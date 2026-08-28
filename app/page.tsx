@@ -7,6 +7,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { demoResults } from "@/app/data/demo-results";
 
 const profiles = [
   {
@@ -127,6 +128,52 @@ export default function Home() {
                 </dl>
               </article>
             ))}
+          </div>
+        </section>
+
+        <section className="pb-16" id="compare">
+          <div className="rounded-2xl border border-emerald-400/20 bg-emerald-400/[0.035] p-6 sm:p-8">
+            <div className="flex flex-col gap-3 border-b border-white/10 pb-6 sm:flex-row sm:items-end sm:justify-between">
+              <div>
+                <p className="font-mono text-xs uppercase tracking-[0.2em] text-emerald-300">Comparison preview</p>
+                <h2 className="mt-2 text-2xl font-semibold tracking-tight">The core OmoBench interaction.</h2>
+                <p className="mt-2 max-w-2xl text-sm leading-6 text-zinc-400">The filter context and table layout are real. The three rows below are local demonstration data, not benchmark claims.</p>
+              </div>
+              <Badge className="border-amber-300/30 bg-amber-300/10 text-amber-200" variant="outline">Illustrative local data</Badge>
+            </div>
+            <div className="mt-5 flex flex-wrap gap-2 font-mono text-xs text-zinc-300">
+              <span className="rounded-md border border-white/10 bg-black/20 px-3 py-2">Model: Qwen3-4B</span>
+              <span className="rounded-md border border-white/10 bg-black/20 px-3 py-2">Hardware: Any</span>
+              <span className="rounded-md border border-white/10 bg-black/20 px-3 py-2">Framework: Any</span>
+              <span className="rounded-md border border-white/10 bg-black/20 px-3 py-2">Profile: chat-small-v1</span>
+            </div>
+            <div className="mt-4">
+              <Table>
+                <TableHeader>
+                  <TableRow className="border-white/10 hover:bg-transparent">
+                    <TableHead className="text-zinc-400">Hardware</TableHead>
+                    <TableHead className="text-zinc-400">Framework</TableHead>
+                    <TableHead className="text-zinc-400">Quantization</TableHead>
+                    <TableHead className="text-zinc-400">TTFT</TableHead>
+                    <TableHead className="text-zinc-400">Output tok/s</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {demoResults.map((result) => (
+                    <TableRow className="border-white/10 hover:bg-white/[0.035]" key={`${result.hardware}-${result.framework}`}>
+                      <TableCell>
+                        <p className="font-medium text-zinc-100">{result.hardware}</p>
+                        <p className="mt-1 font-mono text-xs text-zinc-500">{result.model}</p>
+                      </TableCell>
+                      <TableCell className="font-mono text-xs text-zinc-300">{result.framework}</TableCell>
+                      <TableCell className="font-mono text-xs text-zinc-300">{result.quantization}</TableCell>
+                      <TableCell className="font-mono text-zinc-100">{result.ttft}</TableCell>
+                      <TableCell className="font-mono text-emerald-300">{result.outputTokensPerSecond}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
           </div>
         </section>
 
