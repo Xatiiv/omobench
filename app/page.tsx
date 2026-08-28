@@ -227,12 +227,13 @@ export default function Home() {
                     <TableHead className="text-zinc-400">Quantization</TableHead>
                     <TableHead className="text-zinc-400">TTFT</TableHead>
                     <TableHead className="text-zinc-400">Output tok/s</TableHead>
+                    <TableHead className="text-right text-zinc-400">Record</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {filteredResults.length === 0 ? (
                     <TableRow className="border-white/10 hover:bg-transparent">
-                      <TableCell className="py-8 text-center text-sm text-zinc-400" colSpan={5}>
+                      <TableCell className="py-8 text-center text-sm text-zinc-400" colSpan={6}>
                         No illustrative rows match this combination yet.
                       </TableCell>
                     </TableRow>
@@ -247,6 +248,11 @@ export default function Home() {
                       <TableCell className="font-mono text-xs text-zinc-300">{result.quantization}</TableCell>
                       <TableCell className="font-mono text-zinc-100">{result.ttft}</TableCell>
                       <TableCell className="font-mono text-emerald-300">{result.outputTokensPerSecond}</TableCell>
+                      <TableCell className="text-right">
+                        <a className="font-mono text-xs text-emerald-300 transition hover:text-emerald-200 hover:underline" href={`/runs/${result.id}`}>
+                          View details
+                        </a>
+                      </TableCell>
                     </TableRow>
                     ))
                   )}
