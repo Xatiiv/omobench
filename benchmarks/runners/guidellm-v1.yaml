@@ -1,0 +1,11 @@
+id: guidellm-v1
+runner: guidellm
+runner_version: 0.7.3
+install: pip install 'guidellm[recommended]==0.7.3'
+cli_contract: typed-v0.7
+backend:
+  kind: openai_http
+  request_format: /v1/chat/completions
+privacy:
+  metrics_sample_size: 0
+  reason: Strip retained prompt and output samples from the raw runner report.

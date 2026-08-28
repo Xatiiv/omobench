@@ -1,0 +1,38 @@
+id: chat-long-v1
+profile_format_version: 1
+status: active
+title: Long-context chat latency
+description: >-
+  A single streaming chat completion with an 8K-token context. Use this profile
+  to expose long-context latency without treating it as a throughput test.
+transport:
+  protocol: openai-chat-completions
+  streaming: true
+workload:
+  prompt_source: synthetic-deterministic
+  prompt_seed: 20260828
+  prompt_uniqueness: per-request
+  target_input_tokens: 8192
+  input_token_tolerance_percent: 2
+  requested_output_tokens: 512
+execution:
+  concurrency: 1
+  measured_requests: 30
+  warmup_requests: 3
+  cooldown_requests: 3
+  request_timeout_seconds: 600
+  maximum_duration_seconds: 1800
+acceptance:
+  minimum_successful_requests: 24
+  maximum_error_rate_percent: 1
+report:
+  exclude_warmup_and_cooldown: true
+  required_metrics:
+    - ttft_p50_ms
+    - ttft_p95_ms
+    - inter_token_latency_p50_ms
+    - inter_token_latency_p95_ms
+    - output_tokens_per_second
+    - total_tokens_per_second
+    - requests_per_second
+    - error_rate_percent

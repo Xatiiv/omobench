@@ -1,0 +1,38 @@
+id: throughput-v1
+profile_format_version: 1
+status: active
+title: Sustained serving throughput at 16 concurrent streams
+description: >-
+  A controlled streaming workload for comparing sustained performance at exactly
+  16 simultaneous requests. This is not a claim of maximum theoretical throughput.
+transport:
+  protocol: openai-chat-completions
+  streaming: true
+workload:
+  prompt_source: synthetic-deterministic
+  prompt_seed: 20260828
+  prompt_uniqueness: per-request
+  target_input_tokens: 1024
+  input_token_tolerance_percent: 2
+  requested_output_tokens: 256
+execution:
+  concurrency: 16
+  measured_requests: 160
+  warmup_requests: 16
+  cooldown_requests: 16
+  request_timeout_seconds: 300
+  maximum_duration_seconds: 900
+acceptance:
+  minimum_successful_requests: 128
+  maximum_error_rate_percent: 1
+report:
+  exclude_warmup_and_cooldown: true
+  required_metrics:
+    - ttft_p50_ms
+    - ttft_p95_ms
+    - inter_token_latency_p50_ms
+    - inter_token_latency_p95_ms
+    - output_tokens_per_second
+    - total_tokens_per_second
+    - requests_per_second
+    - error_rate_percent

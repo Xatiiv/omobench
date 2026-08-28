@@ -1,0 +1,182 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omobench.com/schema/benchmark-run-v1.json",
+  "title": "OmoBench benchmark run v1",
+  "description": "The normalized, reproducible result summary submitted alongside raw benchmark evidence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "started_at",
+    "configuration_fingerprint",
+    "model",
+    "runtime",
+    "hardware",
+    "benchmark",
+    "results",
+    "artifacts",
+    "submission"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "run_id": {
+      "type": "string",
+      "description": "Unique ID for this individual execution session.",
+      "pattern": "^[a-z0-9][a-z0-9-]{7,63}$"
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "configuration_fingerprint": {
+      "type": "string",
+      "description": "SHA-256 of normalized model, runtime, hardware, driver, arguments, and profile metadata.",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "revision", "quantization"],
+      "properties": {
+        "id": { "type": "string", "minLength": 3 },
+        "revision": { "type": "string", "description": "Immutable model revision or commit SHA." },
+        "quantization": { "type": ["string", "null"] },
+        "source": { "type": "string", "format": "uri" }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["framework", "version", "arguments", "endpoint_type"],
+      "properties": {
+        "framework": { "type": "string", "enum": ["vllm", "sglang", "llama.cpp"] },
+        "version": { "type": "string" },
+        "arguments": { "type": "array", "items": { "type": "string" } },
+        "endpoint_type": { "const": "openai-compatible" },
+        "container_image": { "type": ["string", "null"] }
+      }
+    },
+    "hardware": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os", "cpu", "ram_gb", "gpus", "driver_version", "detection"],
+      "properties": {
+        "os": { "type": "string" },
+        "cpu": { "type": "string" },
+        "ram_gb": { "type": "number", "exclusiveMinimum": 0 },
+        "gpus": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["model", "memory_gb", "count"],
+            "properties": {
+              "model": { "type": "string" },
+              "memory_gb": { "type": "number", "exclusiveMinimum": 0 },
+              "count": { "type": "integer", "minimum": 1 }
+            }
+          }
+        },
+        "driver_version": { "type": ["string", "null"] },
+        "detection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["hardware", "model", "runtime"],
+          "properties": {
+            "hardware": { "enum": ["auto", "user-confirmed", "manual"] },
+            "model": { "enum": ["user-confirmed", "manual"] },
+            "runtime": { "enum": ["auto", "user-confirmed", "manual"] }
+          }
+        }
+      }
+    },
+    "benchmark": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile_id", "profile_sha256", "runner", "runner_version"],
+      "properties": {
+        "profile_id": { "type": "string", "pattern": "^[a-z0-9-]+-v[0-9]+$" },
+        "profile_sha256": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "runner": { "const": "guidellm" },
+        "runner_version": { "type": "string" }
+      }
+    },
+    "results": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requests", "latency_ms", "output_tokens_per_second", "total_tokens_per_second", "requests_per_second", "error_rate_percent"],
+      "properties": {
+        "requests": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["attempted", "succeeded", "failed"],
+          "properties": {
+            "attempted": { "type": "integer", "minimum": 0 },
+            "succeeded": { "type": "integer", "minimum": 0 },
+            "failed": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "latency_ms": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ttft", "inter_token"],
+          "properties": {
+            "ttft": { "$ref": "#/$defs/percentiles" },
+            "inter_token": { "$ref": "#/$defs/percentiles" }
+          }
+        },
+        "output_tokens_per_second": { "type": "number", "minimum": 0 },
+        "total_tokens_per_second": { "type": "number", "minimum": 0 },
+        "requests_per_second": { "type": "number", "minimum": 0 },
+        "error_rate_percent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "memory_peak_gb": { "type": ["number", "null"], "minimum": 0 }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["raw_runner_output", "runner_stdout_log", "environment_snapshot", "reproduce_markdown"],
+      "properties": {
+        "raw_runner_output": { "$ref": "#/$defs/artifact" },
+        "runner_stdout_log": { "$ref": "#/$defs/artifact" },
+        "environment_snapshot": { "$ref": "#/$defs/artifact" },
+        "reproduce_markdown": { "$ref": "#/$defs/artifact" }
+      }
+    },
+    "submission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["submitter", "run_kind"],
+      "properties": {
+        "submitter": { "type": "string", "minLength": 1 },
+        "run_kind": { "enum": ["initial", "repeat", "replication"] },
+        "repeat_of_run_id": { "type": ["string", "null"] },
+        "source_commit": { "type": ["string", "null"] }
+      }
+    }
+  },
+  "$defs": {
+    "percentiles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["p50", "p95"],
+      "properties": {
+        "p50": { "type": "number", "minimum": 0 },
+        "p95": { "type": "number", "minimum": 0 }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+      }
+    }
+  }
+}
