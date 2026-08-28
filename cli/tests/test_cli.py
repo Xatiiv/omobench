@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import argparse
+import json
+import os
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from omobench.cli import build_guidellm_command, redact_endpoint
+from omobench.cli import build_guidellm_command, redact_endpoint, write_run_intent
 
 
 class GuideLLMCommandTests(unittest.TestCase):
@@ -38,6 +43,33 @@ class GuideLLMCommandTests(unittest.TestCase):
             redact_endpoint(value, "http://localhost:8000/v1"),
             "server=<LOCAL_ENDPOINT> and again <LOCAL_ENDPOINT>",
         )
+
+
+class RunIntentTests(unittest.TestCase):
+    def test_run_intent_uses_a_portable_profile_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            profile_path = root / "benchmarks" / "profiles" / "chat-small-v1.yaml"
+            profile_path.parent.mkdir(parents=True)
+            profile_path.write_text("id: chat-small-v1\n", encoding="utf-8")
+            output_path = root / ".omobench-runs" / "intent.json"
+            args = argparse.Namespace(
+                endpoint="http://localhost:8000/v1",
+                model="Qwen/Qwen3-4B",
+                profile="chat-small-v1",
+                output=str(output_path),
+                force=False,
+            )
+            original_directory = Path.cwd()
+            os.chdir(root)
+            try:
+                with patch("omobench.cli.doctor_report", return_value={}):
+                    self.assertEqual(write_run_intent(args), 0)
+            finally:
+                os.chdir(original_directory)
+
+            intent = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertEqual(intent["profile_path"], "benchmarks/profiles/chat-small-v1.yaml")
 
 
 if __name__ == "__main__":

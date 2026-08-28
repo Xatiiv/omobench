@@ -292,7 +292,7 @@ def write_run_intent(args: argparse.Namespace) -> int:
         "model": args.model,
         "endpoint": args.endpoint,
         "profile": args.profile,
-        "profile_path": str(profile_path.relative_to(root)),
+        "profile_path": profile_path.relative_to(root).as_posix(),
         "detected_environment": doctor_report(),
         "next_step": "Run the benchmark adapter and write the normalized result plus raw evidence.",
     }
