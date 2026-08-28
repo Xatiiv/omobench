@@ -1,4 +1,14 @@
+"use client";
+
+import { useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Table,
   TableBody,
@@ -7,7 +17,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { demoResults } from "@/app/data/demo-results";
+import { demoResults, type DemoResult } from "@/app/data/demo-results";
 
 const profiles = [
   {
@@ -41,7 +51,65 @@ const seedPlan = [
   ["Qwen3-32B", "vLLM · SGLang", "Planned"],
 ];
 
+const getOptions = (key: keyof DemoResult) =>
+  Array.from(new Set(demoResults.map((result) => result[key]))).sort();
+
+const modelOptions = getOptions("model");
+const hardwareOptions = getOptions("hardware");
+const frameworkOptions = getOptions("framework");
+const profileOptions = getOptions("profile");
+
+type DemoFilterProps = {
+  id: string;
+  label: string;
+  onValueChange: (value: string) => void;
+  options: string[];
+  value: string;
+};
+
+function DemoFilter({ id, label, onValueChange, options, value }: DemoFilterProps) {
+  return (
+    <div>
+      <label className="mb-1.5 block font-mono text-[11px] uppercase tracking-[0.14em] text-zinc-500" htmlFor={id}>
+        {label}
+      </label>
+      <Select onValueChange={onValueChange} value={value}>
+        <SelectTrigger className="h-10 w-full border-white/10 bg-black/20 font-mono text-xs text-zinc-200 hover:bg-white/[0.04]" id={id}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent className="border-white/10 bg-zinc-900 text-zinc-100">
+          <SelectItem className="font-mono text-xs focus:bg-emerald-400/15 focus:text-emerald-100" value="all">
+            Any
+          </SelectItem>
+          {options.map((option) => (
+            <SelectItem className="font-mono text-xs focus:bg-emerald-400/15 focus:text-emerald-100" key={option} value={option}>
+              {option}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
 export default function Home() {
+  const [model, setModel] = useState("Qwen3-4B");
+  const [hardware, setHardware] = useState("all");
+  const [framework, setFramework] = useState("all");
+  const [profile, setProfile] = useState("chat-small-v1");
+
+  const filteredResults = useMemo(
+    () =>
+      demoResults.filter(
+        (result) =>
+          (model === "all" || result.model === model) &&
+          (hardware === "all" || result.hardware === hardware) &&
+          (framework === "all" || result.framework === framework) &&
+          (profile === "all" || result.profile === profile),
+      ),
+    [framework, hardware, model, profile],
+  );
+
   return (
     <main className="min-h-screen bg-zinc-950 text-zinc-50">
       <div className="mx-auto max-w-6xl px-6 py-8 sm:px-10 lg:px-12">
@@ -137,16 +205,19 @@ export default function Home() {
               <div>
                 <p className="font-mono text-xs uppercase tracking-[0.2em] text-emerald-300">Comparison preview</p>
                 <h2 className="mt-2 text-2xl font-semibold tracking-tight">The core OmoBench interaction.</h2>
-                <p className="mt-2 max-w-2xl text-sm leading-6 text-zinc-400">The filter context and table layout are real. The three rows below are local demonstration data, not benchmark claims.</p>
+                <p className="mt-2 max-w-2xl text-sm leading-6 text-zinc-400">Choose filters to explore the interaction. Every row is local demonstration data, not a benchmark claim.</p>
               </div>
               <Badge className="border-amber-300/30 bg-amber-300/10 text-amber-200" variant="outline">Illustrative local data</Badge>
             </div>
-            <div className="mt-5 flex flex-wrap gap-2 font-mono text-xs text-zinc-300">
-              <span className="rounded-md border border-white/10 bg-black/20 px-3 py-2">Model: Qwen3-4B</span>
-              <span className="rounded-md border border-white/10 bg-black/20 px-3 py-2">Hardware: Any</span>
-              <span className="rounded-md border border-white/10 bg-black/20 px-3 py-2">Framework: Any</span>
-              <span className="rounded-md border border-white/10 bg-black/20 px-3 py-2">Profile: chat-small-v1</span>
+            <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <DemoFilter id="model-filter" label="Model" onValueChange={setModel} options={modelOptions} value={model} />
+              <DemoFilter id="hardware-filter" label="Hardware" onValueChange={setHardware} options={hardwareOptions} value={hardware} />
+              <DemoFilter id="framework-filter" label="Framework" onValueChange={setFramework} options={frameworkOptions} value={framework} />
+              <DemoFilter id="profile-filter" label="Profile" onValueChange={setProfile} options={profileOptions} value={profile} />
             </div>
+            <p aria-live="polite" className="mt-4 text-sm text-zinc-400">
+              Showing <span className="font-mono text-zinc-200">{filteredResults.length}</span> of {demoResults.length} illustrative rows. Choose <span className="font-mono text-zinc-200">Any</span> to remove a filter.
+            </p>
             <div className="mt-4">
               <Table>
                 <TableHeader>
@@ -159,8 +230,15 @@ export default function Home() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {demoResults.map((result) => (
-                    <TableRow className="border-white/10 hover:bg-white/[0.035]" key={`${result.hardware}-${result.framework}`}>
+                  {filteredResults.length === 0 ? (
+                    <TableRow className="border-white/10 hover:bg-transparent">
+                      <TableCell className="py-8 text-center text-sm text-zinc-400" colSpan={5}>
+                        No illustrative rows match this combination yet.
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    filteredResults.map((result) => (
+                    <TableRow className="border-white/10 hover:bg-white/[0.035]" key={result.id}>
                       <TableCell>
                         <p className="font-medium text-zinc-100">{result.hardware}</p>
                         <p className="mt-1 font-mono text-xs text-zinc-500">{result.model}</p>
@@ -170,7 +248,8 @@ export default function Home() {
                       <TableCell className="font-mono text-zinc-100">{result.ttft}</TableCell>
                       <TableCell className="font-mono text-emerald-300">{result.outputTokensPerSecond}</TableCell>
                     </TableRow>
-                  ))}
+                    ))
+                  )}
                 </TableBody>
               </Table>
             </div>
