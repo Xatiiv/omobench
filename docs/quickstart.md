@@ -38,8 +38,9 @@ benchmark-intent files. Run an actual GuideLLM benchmark from a supported Linux
 or macOS environment; on a Windows computer, use WSL2 or a separate Linux
 benchmark host for the later `--execute` step.
 
-The next build slice converts the raw runner output to the result schema and
-creates the GitHub pull-request submission bundle.
+After a successful runner execution, `omobench package` converts the raw
+GuideLLM report into a local, schema-ready `result.json`. It does not publish
+or submit anything.
 
 ## First runner dry run
 

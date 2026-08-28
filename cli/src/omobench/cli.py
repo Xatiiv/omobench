@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
+import math
+import os
 import platform
 import re
 import shlex
@@ -20,6 +23,7 @@ from . import __version__
 
 
 GUIDELLM_VERSION = "0.7.3"
+RUN_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{7,63}$")
 PROFILE_SPECS: dict[str, dict[str, Any]] = {
     "chat-small-v1": {
         "input_tokens": 1024,
@@ -100,11 +104,61 @@ def detect_nvidia_gpus() -> list[dict[str, Any]]:
     return gpus
 
 
+def detect_cpu() -> str | None:
+    detected = platform.processor().strip()
+    if detected:
+        return detected
+    if sys.platform.startswith("linux"):
+        try:
+            for line in Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines():
+                if line.lower().startswith("model name"):
+                    return line.split(":", maxsplit=1)[1].strip() or None
+        except OSError:
+            pass
+    return platform.machine().strip() or None
+
+
+def detect_ram_gb() -> float | None:
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            class MemoryStatus(ctypes.Structure):
+                _fields_ = [
+                    ("length", ctypes.c_ulong),
+                    ("memory_load", ctypes.c_ulong),
+                    ("total_physical", ctypes.c_ulonglong),
+                    ("available_physical", ctypes.c_ulonglong),
+                    ("total_page_file", ctypes.c_ulonglong),
+                    ("available_page_file", ctypes.c_ulonglong),
+                    ("total_virtual", ctypes.c_ulonglong),
+                    ("available_virtual", ctypes.c_ulonglong),
+                    ("available_extended_virtual", ctypes.c_ulonglong),
+                ]
+
+            memory = MemoryStatus()
+            memory.length = ctypes.sizeof(MemoryStatus)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(memory)):
+                return round(memory.total_physical / (1024**3), 2)
+        except (AttributeError, OSError):
+            return None
+
+    try:
+        return round(
+            os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / (1024**3),
+            2,
+        )
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
 def doctor_report() -> dict[str, Any]:
     return {
         "omobench_cli_version": __version__,
         "python": sys.version.split()[0],
         "operating_system": platform.platform(),
+        "cpu": detect_cpu(),
+        "ram_gb": detect_ram_gb(),
         "guidellm": executable_version("guidellm"),
         "git": executable_version("git"),
         "github_cli": executable_version("gh"),
@@ -182,6 +236,241 @@ def compress_file(path: Path) -> Path:
         shutil.copyfileobj(source, destination)
     path.unlink()
     return compressed_path
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return f"sha256:{digest.hexdigest()}"
+
+
+def sha256_json(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def required_text(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} must be a non-empty string.")
+    return value.strip()
+
+
+def report_value(report: dict[str, Any], *path: str) -> Any:
+    current: Any = report
+    for key in path:
+        if not isinstance(current, dict) or key not in current:
+            location = ".".join(path)
+            raise ValueError(f"GuideLLM report is missing {location}.")
+        current = current[key]
+    return current
+
+
+def report_number(report: dict[str, Any], *path: str) -> float:
+    value = report_value(report, *path)
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError(f"GuideLLM report field {'.'.join(path)} must be numeric.")
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        raise ValueError(f"GuideLLM report field {'.'.join(path)} must be a finite non-negative number.")
+    return number
+
+
+def report_count(report: dict[str, Any], *path: str) -> int:
+    value = report_number(report, *path)
+    if not value.is_integer():
+        raise ValueError(f"GuideLLM report field {'.'.join(path)} must be a whole number.")
+    return int(value)
+
+
+def normalize_guidellm_report(raw_report: dict[str, Any]) -> dict[str, Any]:
+    """Extract the stable MVP metrics from one pinned GuideLLM report."""
+    report_version = report_value(raw_report, "metadata", "version")
+    if report_version != 2:
+        raise ValueError(f"Unsupported GuideLLM report schema version: {report_version!r}.")
+    runner_version = required_text(
+        report_value(raw_report, "metadata", "guidellm_version"),
+        "GuideLLM version",
+    )
+    if runner_version != GUIDELLM_VERSION:
+        raise ValueError(
+            f"OmoBench v1 requires GuideLLM {GUIDELLM_VERSION}; report was created by {runner_version}."
+        )
+
+    benchmarks = report_value(raw_report, "benchmarks")
+    if not isinstance(benchmarks, list) or len(benchmarks) != 1:
+        raise ValueError("OmoBench v1 profiles must produce exactly one GuideLLM benchmark.")
+    benchmark = benchmarks[0]
+    if not isinstance(benchmark, dict):
+        raise ValueError("GuideLLM benchmark entry must be an object.")
+
+    successful = report_count(benchmark, "scheduler_metrics", "requests_made", "successful")
+    incomplete = report_count(benchmark, "scheduler_metrics", "requests_made", "incomplete")
+    errored = report_count(benchmark, "scheduler_metrics", "requests_made", "errored")
+    attempted = report_count(benchmark, "scheduler_metrics", "requests_made", "total")
+    failed = incomplete + errored
+    if attempted != successful + failed:
+        raise ValueError("GuideLLM request counts are inconsistent.")
+    if attempted == 0:
+        raise ValueError("GuideLLM report contains no attempted requests.")
+
+    started_at_seconds = report_number(benchmark, "scheduler_metrics", "measure_start_time")
+    return {
+        "started_at": datetime.fromtimestamp(started_at_seconds, UTC).isoformat(),
+        "runner_version": runner_version,
+        "results": {
+            "requests": {
+                "attempted": attempted,
+                "succeeded": successful,
+                "failed": failed,
+            },
+            "latency_ms": {
+                "ttft": {
+                    "p50": report_number(
+                        benchmark,
+                        "metrics",
+                        "time_to_first_token_ms",
+                        "successful",
+                        "percentiles",
+                        "p50",
+                    ),
+                    "p95": report_number(
+                        benchmark,
+                        "metrics",
+                        "time_to_first_token_ms",
+                        "successful",
+                        "percentiles",
+                        "p95",
+                    ),
+                },
+                "inter_token": {
+                    "p50": report_number(
+                        benchmark,
+                        "metrics",
+                        "inter_token_latency_ms",
+                        "successful",
+                        "percentiles",
+                        "p50",
+                    ),
+                    "p95": report_number(
+                        benchmark,
+                        "metrics",
+                        "inter_token_latency_ms",
+                        "successful",
+                        "percentiles",
+                        "p95",
+                    ),
+                },
+            },
+            "output_tokens_per_second": report_number(
+                benchmark,
+                "metrics",
+                "output_tokens_per_second",
+                "total",
+                "mean",
+            ),
+            "total_tokens_per_second": report_number(
+                benchmark,
+                "metrics",
+                "tokens_per_second",
+                "total",
+                "mean",
+            ),
+            "requests_per_second": report_number(
+                benchmark,
+                "metrics",
+                "requests_per_second",
+                "total",
+                "mean",
+            ),
+            "error_rate_percent": 100 * failed / attempted,
+            "memory_peak_gb": None,
+        },
+    }
+
+
+def load_gzip_json(path: Path) -> dict[str, Any]:
+    try:
+        with gzip.open(path, "rt", encoding="utf-8") as source:
+            parsed = json.load(source)
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"Could not read compressed GuideLLM JSON at {path}: {error}") from error
+    if not isinstance(parsed, dict):
+        raise ValueError("GuideLLM JSON report must contain an object at its root.")
+    return parsed
+
+
+def current_git_commit() -> str | None:
+    commit = command_output(["git", "rev-parse", "HEAD"])
+    if commit and re.fullmatch(r"[0-9a-f]{40}", commit):
+        return commit
+    return None
+
+
+def artifact_metadata(path: Path, run_directory: Path) -> dict[str, str]:
+    try:
+        relative_path = path.resolve().relative_to(run_directory.resolve()).as_posix()
+    except ValueError as error:
+        raise ValueError(f"Artifact {path} must stay inside {run_directory}.") from error
+    return {"path": relative_path, "sha256": sha256_file(path)}
+
+
+def hardware_from_environment(
+    environment: dict[str, Any],
+    cpu_override: str | None,
+    ram_gb_override: float | None,
+) -> dict[str, Any]:
+    cpu = required_text(cpu_override or environment.get("cpu"), "CPU")
+    ram_gb_value = ram_gb_override if ram_gb_override is not None else environment.get("ram_gb")
+    if isinstance(ram_gb_value, bool) or not isinstance(ram_gb_value, int | float):
+        raise ValueError("RAM was not detected. Supply --ram-gb when packaging the run.")
+    ram_gb = float(ram_gb_value)
+    if not math.isfinite(ram_gb) or ram_gb <= 0:
+        raise ValueError("RAM must be a finite positive number.")
+
+    detected_gpus = environment.get("nvidia_gpus")
+    if not isinstance(detected_gpus, list) or not detected_gpus:
+        raise ValueError("No NVIDIA GPUs were detected for this run; OmoBench v1 packaging requires a detected GPU.")
+
+    grouped_gpus: dict[tuple[str, float], int] = {}
+    driver_versions: set[str] = set()
+    for index, gpu in enumerate(detected_gpus, start=1):
+        if not isinstance(gpu, dict):
+            raise ValueError(f"Detected GPU {index} is invalid.")
+        model = required_text(gpu.get("model"), f"Detected GPU {index} model")
+        memory_value = gpu.get("memory_gb")
+        if isinstance(memory_value, bool) or not isinstance(memory_value, int | float):
+            raise ValueError(f"Detected GPU {index} memory is invalid.")
+        memory_gb = float(memory_value)
+        if not math.isfinite(memory_gb) or memory_gb <= 0:
+            raise ValueError(f"Detected GPU {index} memory must be positive.")
+        grouped_gpus[(model, memory_gb)] = grouped_gpus.get((model, memory_gb), 0) + 1
+        driver = gpu.get("driver_version")
+        if isinstance(driver, str) and driver.strip():
+            driver_versions.add(driver.strip())
+
+    gpus = [
+        {"model": model, "memory_gb": memory_gb, "count": count}
+        for (model, memory_gb), count in sorted(grouped_gpus.items())
+    ]
+    return {
+        "os": required_text(environment.get("operating_system"), "Operating system"),
+        "cpu": cpu,
+        "ram_gb": ram_gb,
+        "gpus": gpus,
+        "driver_version": next(iter(driver_versions)) if len(driver_versions) == 1 else None,
+        "detection": {
+            "hardware": "user-confirmed" if cpu_override or ram_gb_override is not None else "auto",
+            "model": "manual",
+            "runtime": "manual",
+        },
+    }
 
 
 def write_local_run(args: argparse.Namespace) -> int:
@@ -268,6 +557,139 @@ def write_local_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def package_local_run(args: argparse.Namespace) -> int:
+    """Convert a completed local staging run into a schema-ready result summary."""
+    root = find_repository_root()
+    if root is None:
+        print("Could not find an OmoBench checkout.", file=sys.stderr)
+        return 2
+    if args.profile not in PROFILE_SPECS:
+        print(f"Unknown profile: {args.profile}", file=sys.stderr)
+        return 2
+
+    run_directory = Path(args.run_dir).expanduser()
+    if not run_directory.is_absolute():
+        run_directory = Path.cwd() / run_directory
+    run_directory = run_directory.resolve()
+    try:
+        run_directory.relative_to(root.resolve())
+    except ValueError:
+        print("--run-dir must stay inside the OmoBench checkout.", file=sys.stderr)
+        return 2
+    if not run_directory.is_dir():
+        print(f"Run directory does not exist: {run_directory}", file=sys.stderr)
+        return 2
+
+    run_id = required_text(args.run_id or run_directory.name, "Run ID")
+    if not RUN_ID_PATTERN.fullmatch(run_id):
+        print("Run ID must use lowercase letters, digits, and hyphens (8–64 characters).", file=sys.stderr)
+        return 2
+    if args.run_kind == "repeat" and not args.repeat_of_run_id:
+        print("--repeat-of-run-id is required when --run-kind is repeat.", file=sys.stderr)
+        return 2
+    if args.run_kind != "repeat" and args.repeat_of_run_id:
+        print("--repeat-of-run-id can only be used when --run-kind is repeat.", file=sys.stderr)
+        return 2
+
+    artifact_paths = {
+        "raw_runner_output": run_directory / "guidellm-benchmarks.json.gz",
+        "runner_stdout_log": run_directory / "guidellm.stdout.log",
+        "environment_snapshot": run_directory / "environment.json",
+        "reproduce_markdown": run_directory / "reproduce.md",
+    }
+    missing = [name for name, path in artifact_paths.items() if not path.is_file()]
+    if missing:
+        print(f"Run directory is missing required evidence: {', '.join(missing)}", file=sys.stderr)
+        return 2
+
+    result_path = run_directory / "result.json"
+    if result_path.exists() and not args.force:
+        print(f"Refusing to overwrite {result_path}. Use --force to replace it.", file=sys.stderr)
+        return 2
+
+    try:
+        raw_report = load_gzip_json(artifact_paths["raw_runner_output"])
+        normalized = normalize_guidellm_report(raw_report)
+        environment = json.loads(
+            artifact_paths["environment_snapshot"].read_text(encoding="utf-8")
+        )
+        if not isinstance(environment, dict):
+            raise ValueError("environment.json must contain an object at its root.")
+        hardware = hardware_from_environment(environment, args.cpu, args.ram_gb)
+        profile_path = root / "benchmarks" / "profiles" / f"{args.profile}.yaml"
+        if not profile_path.is_file():
+            raise ValueError(f"Missing profile definition: {profile_path}")
+
+        model = {
+            "id": required_text(args.model, "Model ID"),
+            "revision": required_text(args.model_revision, "Model revision"),
+            "quantization": (
+                required_text(args.quantization, "Quantization")
+                if args.quantization is not None
+                else None
+            ),
+        }
+        runtime = {
+            "framework": required_text(args.framework, "Framework"),
+            "version": required_text(args.framework_version, "Framework version"),
+            "arguments": [
+                required_text(argument, "Runtime argument")
+                for argument in (args.runtime_arg or [])
+            ],
+            "endpoint_type": "openai-compatible",
+        }
+        benchmark = {
+            "profile_id": args.profile,
+            "profile_sha256": sha256_file(profile_path),
+            "runner": "guidellm",
+            "runner_version": normalized["runner_version"],
+        }
+        fingerprint_payload = {
+            "model": model,
+            "runtime": runtime,
+            "hardware": {
+                "os": hardware["os"],
+                "cpu": hardware["cpu"],
+                "ram_gb": hardware["ram_gb"],
+                "gpus": hardware["gpus"],
+                "driver_version": hardware["driver_version"],
+            },
+            "benchmark": {
+                "profile_id": benchmark["profile_id"],
+                "profile_sha256": benchmark["profile_sha256"],
+            },
+        }
+        result = {
+            "schema_version": "1.0",
+            "run_id": run_id,
+            "started_at": normalized["started_at"],
+            "configuration_fingerprint": sha256_json(fingerprint_payload),
+            "model": model,
+            "runtime": runtime,
+            "hardware": hardware,
+            "benchmark": benchmark,
+            "results": normalized["results"],
+            "artifacts": {
+                name: artifact_metadata(path, run_directory)
+                for name, path in artifact_paths.items()
+            },
+            "submission": {
+                "submitter": required_text(args.submitter, "Submitter"),
+                "run_kind": args.run_kind,
+                "repeat_of_run_id": args.repeat_of_run_id,
+                "source_commit": current_git_commit(),
+            },
+        }
+    except ValueError as error:
+        print(f"Could not package local run: {error}", file=sys.stderr)
+        return 2
+
+    result_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    print(f"Created normalized local result at {result_path}")
+    print("This is still local evidence. Copy the complete run directory into results/ only when you are ready to submit it.")
+    return 0
+
+
 def write_run_intent(args: argparse.Namespace) -> int:
     root = find_repository_root()
     if root is None:
@@ -306,6 +728,9 @@ def print_doctor(report: dict[str, Any]) -> None:
     print(f"OmoBench CLI: {report['omobench_cli_version']}")
     print(f"Python: {report['python']}")
     print(f"OS: {report['operating_system']}")
+    print(f"CPU: {report['cpu'] or 'not detected'}")
+    ram_gb = report["ram_gb"]
+    print(f"RAM: {ram_gb} GB" if ram_gb is not None else "RAM: not detected")
     print(f"GuideLLM: {report['guidellm'] or 'not found'}")
     print(f"Git: {report['git'] or 'not found'}")
     print(f"GitHub CLI: {report['github_cli'] or 'not found'}")
@@ -343,6 +768,23 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--output-dir", default=".omobench-runs", help="local staging directory, relative to repository root")
     run.add_argument("--execute", action="store_true", help="actually invoke GuideLLM; omit for a safe dry run")
 
+    package = subcommands.add_parser("package", help="normalize a completed local GuideLLM staging run")
+    package.add_argument("--run-dir", required=True, help="local staging directory created by omobench run --execute")
+    package.add_argument("--model", required=True, help="canonical model ID")
+    package.add_argument("--model-revision", required=True, help="immutable model revision or commit SHA")
+    package.add_argument("--quantization", help="quantization label, such as BF16 or Q4_K_M")
+    package.add_argument("--framework", required=True, choices=["vllm", "sglang", "llama.cpp"], help="inference framework")
+    package.add_argument("--framework-version", required=True, help="exact framework version")
+    package.add_argument("--runtime-arg", action="append", default=[], help="one normalized framework startup argument; repeat as needed")
+    package.add_argument("--profile", required=True, choices=sorted(PROFILE_SPECS), help="versioned OmoBench profile")
+    package.add_argument("--submitter", required=True, help="GitHub username or organization submitting the run")
+    package.add_argument("--run-id", help="override the staging directory name as the run ID")
+    package.add_argument("--run-kind", choices=["initial", "repeat", "replication"], default="initial")
+    package.add_argument("--repeat-of-run-id", help="previous run ID when this is a repeat")
+    package.add_argument("--cpu", help="override the detected CPU description")
+    package.add_argument("--ram-gb", type=float, help="override detected RAM in gigabytes")
+    package.add_argument("--force", action="store_true", help="allow replacement of an existing local result.json")
+
     return parser
 
 
@@ -362,6 +804,8 @@ def main() -> int:
         return write_run_intent(args)
     if args.command == "run":
         return write_local_run(args)
+    if args.command == "package":
+        return package_local_run(args)
     parser.error(f"Unsupported command: {args.command}")
     return 2
 

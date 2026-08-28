@@ -28,6 +28,33 @@ Never commit API keys, access tokens, hostnames, serial numbers, user prompts,
 model weights, or credentials. A submitter must redact those values before
 creating a pull request.
 
+## Create the local normalized summary
+
+After `omobench run --execute` finishes successfully, package its staging
+directory into a local `result.json`:
+
+```bash
+omobench package \
+  --run-dir .omobench-runs/run-EXAMPLE \
+  --model Qwen/Qwen3-4B \
+  --model-revision YOUR_IMMUTABLE_MODEL_REVISION \
+  --quantization BF16 \
+  --framework vllm \
+  --framework-version YOUR_VLLM_VERSION \
+  --runtime-arg "--served-model-name=Qwen/Qwen3-4B" \
+  --profile chat-small-v1 \
+  --submitter YOUR_GITHUB_USERNAME
+```
+
+The command reads the raw compressed GuideLLM report, local environment
+snapshot, runner log, and reproduction file. It writes `result.json` beside
+them, including hashes for every evidence file. It accepts only the pinned
+GuideLLM v0.7.3 report format and does not contact GitHub.
+
+The model revision, quantization, framework version, and startup arguments are
+deliberately supplied by the operator. An OpenAI-compatible endpoint cannot
+reliably report those reproducibility-critical facts itself.
+
 ## Repeats and duplicates
 
 A `configuration_fingerprint` is a SHA-256 digest of the normalized model
