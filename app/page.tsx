@@ -18,6 +18,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { demoResults, type DemoResult } from "@/app/data/demo-results";
+import { registryResults, type RegistryResult } from "@/app/data/registry-results";
 
 const profiles = [
   {
@@ -59,6 +60,14 @@ const hardwareOptions = getOptions("hardware");
 const frameworkOptions = getOptions("framework");
 const profileOptions = getOptions("profile");
 
+const getRegistryOptions = (select: (result: RegistryResult) => string) =>
+  Array.from(new Set(registryResults.map(select))).sort();
+
+const registryModelOptions = getRegistryOptions((result) => result.model);
+const registryHardwareOptions = getRegistryOptions((result) => result.hardware.display);
+const registryFrameworkOptions = getRegistryOptions((result) => result.framework);
+const registryProfileOptions = getRegistryOptions((result) => result.profile);
+
 type DemoFilterProps = {
   id: string;
   label: string;
@@ -92,11 +101,117 @@ function DemoFilter({ id, label, onValueChange, options, value }: DemoFilterProp
   );
 }
 
-export default function Home() {
-  const [model, setModel] = useState("Qwen3-4B");
+function formatMetric(value: number, suffix = ""): string {
+  return `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 }).format(value)}${suffix}`;
+}
+
+function LocalRegistry() {
+  const [model, setModel] = useState("all");
   const [hardware, setHardware] = useState("all");
   const [framework, setFramework] = useState("all");
-  const [profile, setProfile] = useState("chat-small-v1");
+  const [profile, setProfile] = useState("all");
+
+  const filteredResults = useMemo(
+    () =>
+      registryResults.filter(
+        (result) =>
+          (model === "all" || result.model === model) &&
+          (hardware === "all" || result.hardware.display === hardware) &&
+          (framework === "all" || result.framework === framework) &&
+          (profile === "all" || result.profile === profile),
+      ),
+    [framework, hardware, model, profile],
+  );
+
+  const hasResults = registryResults.length > 0;
+
+  return (
+    <section className="pb-16" id="local-results">
+      <div className="rounded-2xl border border-emerald-400/25 bg-emerald-400/[0.035] p-6 sm:p-8">
+        <div className="flex flex-col gap-3 border-b border-white/10 pb-6 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <p className="font-mono text-xs uppercase tracking-[0.2em] text-emerald-300">Local result registry</p>
+            <h2 className="mt-2 text-2xl font-semibold tracking-tight">Packaged evidence, ready to inspect.</h2>
+            <p className="mt-2 max-w-2xl text-sm leading-6 text-zinc-400">
+              This table reads only normalized <span className="font-mono text-zinc-300">result.json</span> files from the local <span className="font-mono text-zinc-300">results/</span> directory. It never mixes them with demonstration data.
+            </p>
+          </div>
+          <Badge className={hasResults ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-200" : "border-amber-300/30 bg-amber-300/10 text-amber-200"} variant="outline">
+            {hasResults ? `${registryResults.length} packaged local ${registryResults.length === 1 ? "result" : "results"}` : "Awaiting a local result"}
+          </Badge>
+        </div>
+
+        {!hasResults ? (
+          <div className="mt-6 rounded-xl border border-dashed border-white/15 bg-black/20 p-6">
+            <p className="font-medium text-zinc-100">No real benchmark result is stored locally yet.</p>
+            <p className="mt-2 max-w-2xl text-sm leading-6 text-zinc-400">
+              After a future benchmark is packaged, copy its complete evidence directory to <span className="font-mono text-zinc-300">results/&lt;model-slug&gt;/&lt;date&gt;-&lt;run-id&gt;/</span>, then restart the local website. The result will appear here automatically.
+            </p>
+          </div>
+        ) : (
+          <>
+            <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <DemoFilter id="registry-model-filter" label="Model" onValueChange={setModel} options={registryModelOptions} value={model} />
+              <DemoFilter id="registry-hardware-filter" label="Hardware" onValueChange={setHardware} options={registryHardwareOptions} value={hardware} />
+              <DemoFilter id="registry-framework-filter" label="Framework" onValueChange={setFramework} options={registryFrameworkOptions} value={framework} />
+              <DemoFilter id="registry-profile-filter" label="Profile" onValueChange={setProfile} options={registryProfileOptions} value={profile} />
+            </div>
+            <p aria-live="polite" className="mt-4 text-sm text-zinc-400">
+              Showing <span className="font-mono text-zinc-200">{filteredResults.length}</span> of {registryResults.length} packaged local results.
+            </p>
+            <div className="mt-4">
+              <Table>
+                <TableHeader>
+                  <TableRow className="border-white/10 hover:bg-transparent">
+                    <TableHead className="text-zinc-400">Hardware</TableHead>
+                    <TableHead className="text-zinc-400">Framework</TableHead>
+                    <TableHead className="text-zinc-400">Quantization</TableHead>
+                    <TableHead className="text-zinc-400">TTFT p50</TableHead>
+                    <TableHead className="text-zinc-400">Output tok/s</TableHead>
+                    <TableHead className="text-right text-zinc-400">Record</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {filteredResults.length === 0 ? (
+                    <TableRow className="border-white/10 hover:bg-transparent">
+                      <TableCell className="py-8 text-center text-sm text-zinc-400" colSpan={6}>
+                        No packaged local results match this combination.
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    filteredResults.map((result) => (
+                      <TableRow className="border-white/10 hover:bg-white/[0.035]" key={result.id}>
+                        <TableCell>
+                          <p className="font-medium text-zinc-100">{result.hardware.display}</p>
+                          <p className="mt-1 font-mono text-xs text-zinc-500">{result.model}</p>
+                        </TableCell>
+                        <TableCell className="font-mono text-xs text-zinc-300">{result.framework}</TableCell>
+                        <TableCell className="font-mono text-xs text-zinc-300">{result.quantization ?? "Unspecified"}</TableCell>
+                        <TableCell className="font-mono text-zinc-100">{formatMetric(result.ttftP50, " ms")}</TableCell>
+                        <TableCell className="font-mono text-emerald-300">{formatMetric(result.outputTokensPerSecond)}</TableCell>
+                        <TableCell className="text-right">
+                          <a className="font-mono text-xs text-emerald-300 transition hover:text-emerald-200 hover:underline" href={`/runs/${result.id}`}>
+                            View details
+                          </a>
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
+export default function Home() {
+  const [model, setModel] = useState("all");
+  const [hardware, setHardware] = useState("all");
+  const [framework, setFramework] = useState("all");
+  const [profile, setProfile] = useState("all");
 
   const filteredResults = useMemo(
     () =>
@@ -199,13 +314,15 @@ export default function Home() {
           </div>
         </section>
 
+        <LocalRegistry />
+
         <section className="pb-16" id="compare">
           <div className="rounded-2xl border border-emerald-400/20 bg-emerald-400/[0.035] p-6 sm:p-8">
             <div className="flex flex-col gap-3 border-b border-white/10 pb-6 sm:flex-row sm:items-end sm:justify-between">
               <div>
-                <p className="font-mono text-xs uppercase tracking-[0.2em] text-emerald-300">Comparison preview</p>
-                <h2 className="mt-2 text-2xl font-semibold tracking-tight">The core OmoBench interaction.</h2>
-                <p className="mt-2 max-w-2xl text-sm leading-6 text-zinc-400">Choose filters to explore the interaction. Every row is local demonstration data, not a benchmark claim.</p>
+                <p className="font-mono text-xs uppercase tracking-[0.2em] text-emerald-300">Interface demonstration</p>
+                <h2 className="mt-2 text-2xl font-semibold tracking-tight">Try the comparison interaction.</h2>
+                <p className="mt-2 max-w-2xl text-sm leading-6 text-zinc-400">Choose filters to explore the interaction. Every row below is local demonstration data, not a benchmark claim. Packaged results appear separately above.</p>
               </div>
               <Badge className="border-amber-300/30 bg-amber-300/10 text-amber-200" variant="outline">Illustrative local data</Badge>
             </div>
