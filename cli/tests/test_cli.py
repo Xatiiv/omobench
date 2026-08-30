@@ -14,6 +14,7 @@ from omobench.cli import (
     normalize_guidellm_report,
     package_local_run,
     redact_endpoint,
+    validate_execution_device,
     write_run_intent,
 )
 
@@ -130,6 +131,12 @@ class ResultPackagingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no successful requests"):
             normalize_guidellm_report(report)
 
+    def test_v1_blocks_cpu_only_packaging(self) -> None:
+        with self.assertRaisesRegex(ValueError, "GPU-backed runs only"):
+            validate_execution_device("cpu")
+
+        validate_execution_device("gpu")
+
     def test_package_creates_a_schema_ready_local_result(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -171,6 +178,7 @@ class ResultPackagingTests(unittest.TestCase):
                 quantization="BF16",
                 framework="vllm",
                 framework_version="0.11.0",
+                execution_device="gpu",
                 runtime_arg=["--max-model-len=4096"],
                 profile="chat-small-v1",
                 submitter="local-tester",

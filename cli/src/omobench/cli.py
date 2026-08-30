@@ -262,6 +262,14 @@ def required_text(value: Any, label: str) -> str:
     return value.strip()
 
 
+def validate_execution_device(execution_device: str) -> None:
+    if execution_device != "gpu":
+        raise ValueError(
+            "OmoBench v1 packages GPU-backed runs only. "
+            "CPU-only runs can be useful for local testing, but they cannot be published yet."
+        )
+
+
 def report_value(report: dict[str, Any], *path: str) -> Any:
     current: Any = report
     for key in path:
@@ -610,6 +618,7 @@ def package_local_run(args: argparse.Namespace) -> int:
         return 2
 
     try:
+        validate_execution_device(args.execution_device)
         raw_report = load_gzip_json(artifact_paths["raw_runner_output"])
         normalized = normalize_guidellm_report(raw_report)
         environment = json.loads(
@@ -777,6 +786,12 @@ def build_parser() -> argparse.ArgumentParser:
     package.add_argument("--quantization", help="quantization label, such as BF16 or Q4_K_M")
     package.add_argument("--framework", required=True, choices=["vllm", "sglang", "llama.cpp"], help="inference framework")
     package.add_argument("--framework-version", required=True, help="exact framework version")
+    package.add_argument(
+        "--execution-device",
+        required=True,
+        choices=["cpu", "gpu"],
+        help="where inference ran; OmoBench v1 packages GPU-backed runs only",
+    )
     package.add_argument("--runtime-arg", action="append", default=[], help="one normalized framework startup argument; repeat as needed")
     package.add_argument("--profile", required=True, choices=sorted(PROFILE_SPECS), help="versioned OmoBench profile")
     package.add_argument("--submitter", required=True, help="GitHub username or organization submitting the run")

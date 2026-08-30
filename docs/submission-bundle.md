@@ -41,6 +41,7 @@ omobench package \
   --quantization BF16 \
   --framework vllm \
   --framework-version YOUR_VLLM_VERSION \
+  --execution-device gpu \
   --runtime-arg "--served-model-name=Qwen/Qwen3-4B" \
   --profile chat-small-v1 \
   --submitter YOUR_GITHUB_USERNAME
@@ -54,6 +55,11 @@ GuideLLM v0.7.3 report format and does not contact GitHub.
 The model revision, quantization, framework version, and startup arguments are
 deliberately supplied by the operator. An OpenAI-compatible endpoint cannot
 reliably report those reproducibility-critical facts itself.
+
+OmoBench v1 packages GPU-backed results only. The operator must pass
+`--execution-device gpu` after confirming that the model server used the GPU.
+CPU-only runs may be useful for local testing, but they are not publishable
+records yet.
 
 ## Repeats and duplicates
 
