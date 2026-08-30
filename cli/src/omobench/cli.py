@@ -319,6 +319,8 @@ def normalize_guidellm_report(raw_report: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("GuideLLM request counts are inconsistent.")
     if attempted == 0:
         raise ValueError("GuideLLM report contains no attempted requests.")
+    if successful == 0:
+        raise ValueError("GuideLLM report contains no successful requests.")
 
     started_at_seconds = report_number(benchmark, "scheduler_metrics", "measure_start_time")
     return {

@@ -115,6 +115,21 @@ class ResultPackagingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requires GuideLLM 0.7.3"):
             normalize_guidellm_report(report)
 
+    def test_normalizer_rejects_a_report_with_no_successful_requests(self) -> None:
+        report = json.loads(json.dumps(GUIDELLM_REPORT_V2))
+        requests = report["benchmarks"][0]["scheduler_metrics"]["requests_made"]
+        requests.update(
+            {
+                "successful": 0,
+                "incomplete": 0,
+                "errored": 50,
+                "total": 50,
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "no successful requests"):
+            normalize_guidellm_report(report)
+
     def test_package_creates_a_schema_ready_local_result(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
