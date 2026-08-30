@@ -57,7 +57,7 @@ def command_output(command: list[str]) -> str | None:
             check=False,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=60,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
