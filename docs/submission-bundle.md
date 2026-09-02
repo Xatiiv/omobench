@@ -72,3 +72,20 @@ class, driver, and profile. A `run_id` identifies one execution session.
 - Different submitter or host with the same configuration: valid replication.
 - Changed model revision, quantization, runtime, driver, hardware, arguments,
   or benchmark profile: a new configuration.
+
+## Continuous integration checks every submission
+
+Opening a pull request against `results/` runs `tools/validate_results.py` in
+GitHub Actions. It re-validates every `result.json` in the registry (not just
+the one you added) against `schema/benchmark-run.schema.json`, then confirms
+that each artifact path in `artifacts` is relative, stays inside its own
+result directory, exists, and matches the recorded SHA-256 hash. The same
+workflow runs the CLI's unit tests and the website's lint and build. CI
+reports an invalid or tampered bundle on the pull request, and this check
+should pass before the pull request is merged.
+
+You can run the same check locally before opening a pull request:
+
+```bash
+python tools/validate_results.py
+```
