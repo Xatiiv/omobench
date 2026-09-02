@@ -1,0 +1,93 @@
+{
+  "schema_version": "1.0",
+  "run_id": "run-49f0510010c1",
+  "started_at": "2026-08-30T10:37:01.906933+00:00",
+  "configuration_fingerprint": "sha256:5ab306a8027810b4946295cf615ca7aad1d42b7004366921fd5cd0c36941c0dd",
+  "model": {
+    "id": "Qwen/Qwen3-0.6B",
+    "revision": "b5f37287796e5be0ea3dab2e7430873fb3f73e49",
+    "quantization": "Q4_0"
+  },
+  "runtime": {
+    "framework": "llama.cpp",
+    "version": "version: 0.2.0-dev (build 10612, commit 758443071)",
+    "arguments": [
+      "-hf=ggml-org/Qwen3-0.6B-GGUF:Q4_0",
+      "--alias=Qwen/Qwen3-0.6B",
+      "--reasoning=off",
+      "--parallel=1",
+      "--ctx-size=2048"
+    ],
+    "endpoint_type": "openai-compatible"
+  },
+  "hardware": {
+    "os": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "cpu": "x86_64",
+    "ram_gb": 7.49,
+    "gpus": [
+      {
+        "model": "NVIDIA RTX 500 Ada Generation Laptop GPU",
+        "memory_gb": 4.0,
+        "count": 1
+      }
+    ],
+    "driver_version": "596.71",
+    "detection": {
+      "hardware": "auto",
+      "model": "manual",
+      "runtime": "manual"
+    }
+  },
+  "benchmark": {
+    "profile_id": "chat-small-v1",
+    "profile_sha256": "sha256:b81e48915509c086626617a97e5c0c0b7e72e85506713145714cc69a60149084",
+    "runner": "guidellm",
+    "runner_version": "0.7.3"
+  },
+  "results": {
+    "requests": {
+      "attempted": 50,
+      "succeeded": 50,
+      "failed": 0
+    },
+    "latency_ms": {
+      "ttft": {
+        "p50": 4152.972221374512,
+        "p95": 17819.841146469116
+      },
+      "inter_token": {
+        "p50": 14.559684080236098,
+        "p95": 33.51548980264103
+      }
+    },
+    "output_tokens_per_second": 26.235182465464717,
+    "total_tokens_per_second": 132.40568650539225,
+    "requests_per_second": 0.04583333333333334,
+    "error_rate_percent": 0.0,
+    "memory_peak_gb": null
+  },
+  "artifacts": {
+    "raw_runner_output": {
+      "path": "guidellm-benchmarks.json.gz",
+      "sha256": "sha256:073d1decf8f474585ac2c749b361c445ba01c665842a506f128fa3dd8985ce4c"
+    },
+    "runner_stdout_log": {
+      "path": "guidellm.stdout.log",
+      "sha256": "sha256:e0345654af6e60f72ed4b674982756bd1b889fcf3acaf4efae6b3b81e17533db"
+    },
+    "environment_snapshot": {
+      "path": "environment.json",
+      "sha256": "sha256:72526707e462977d8a0cdc531154b4121316add5f3d48b700c4b71c4cdc73dc6"
+    },
+    "reproduce_markdown": {
+      "path": "reproduce.md",
+      "sha256": "sha256:667efcb9f9de05a34f6b67c22c7518467ffa6a7cdfecbdf3d073dc09c200f508"
+    }
+  },
+  "submission": {
+    "submitter": "Xatiiv",
+    "run_kind": "initial",
+    "repeat_of_run_id": null,
+    "source_commit": "9b6fe348efd8f44e353abac8a400aa96d4227282"
+  }
+}

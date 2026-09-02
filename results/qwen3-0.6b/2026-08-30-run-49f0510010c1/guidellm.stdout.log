@@ -1,0 +1,96 @@
+✔ OpenAIHTTPBackend backend validated with model Qwen/Qwen3-0.6B
+  {'kind': 'openai_http', 'target': 'http://127.0.0.1:8080', 'model': 'Qwen/Qwen3-0.6B', 'request_format':              
+  '/v1/chat/completions', 'api_key': None, 'api_routes': {'/health': 'health', '/v1/models': 'v1/models',               
+  '/v1/completions': 'v1/completions', '/v1/chat/completions': 'v1/chat/completions', '/v1/embeddings': 'v1/embeddings',
+  '/v1/responses': 'v1/responses', '/v1/audio/transcriptions': 'v1/audio/transcriptions', '/v1/audio/translations':     
+  'v1/audio/translations', '/pooling': 'pooling'}, 'timeout': None, 'timeout_connect': 5.0, 'http2': True,              
+  'follow_redirects': True, 'verify': False, 'validate_backend': True, 'stream': True, 'extras': None, 'max_tokens':    
+  None, 'server_history': False, 'tool_call_missing_behavior': 'error_stop', 'multiturn_reasoning': False}              
+✔ Tokenizer resolved, using model 'Qwen/Qwen3-0.6B' as tokenizer
+  {'kind': 'huggingface_auto', 'model': 'Qwen/Qwen3-0.6B', 'load_kwargs': {}}                                           
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+✔ 1 datasets resolved
+  [{'kind': 'synthetic_text', 'load_kwargs': {}, 'prompt_tokens': 1024, 'prompt_tokens_stdev': None,                    
+  'prompt_tokens_min': None, 'prompt_tokens_max': None, 'output_tokens': 256, 'output_tokens_stdev': None,              
+  'output_tokens_min': None, 'output_tokens_max': None, 'delay': None, 'delay_stdev': None, 'delay_min': None,          
+  'delay_max': None, 'turns': 1, 'tool_call_turns': [], 'tools': None, 'tool_response_tokens': None,                    
+  'tool_response_tokens_stdev': None, 'tool_response_tokens_min': None, 'tool_response_tokens_max': None,               
+  'server_tool_call_turns': [], 'prefix_buckets': None}]                                                                
+✔ 2 preprocessors resolved
+  [{'kind': 'generative_column_mapper', 'column_mappings': None}, {'kind': 'encode_media', 'audio_kwargs': {},          
+  'image_kwargs': {}, 'video_kwargs': {}}]                                                                              
+✔ Finalizer resolved
+  {'kind': 'generative', 'tool_call_mode': 'client'}                                                                    
+✔ Request loader resolved with inf unique requests
+  {'kind': 'pytorch', 'samples': -1, 'shuffle': False, 'num_workers': 1}                                                
+✔ SynchronousProfile profile resolved
+  {'kind': 'synchronous', 'rampup_duration': 0.0, 'warmup': {'percent': 0.1, 'value': None, 'mode': 'prefer_duration'}, 
+  'cooldown': {'percent': 0.1, 'value': None, 'mode': 'prefer_duration'}}                                               
+✔ Output formats resolved
+  [{'kind': 'json', 'path':                                                                                             
+  '/mnt/c/Users/vitta/Code/omobench/.omobench-runs/run-49f0510010c1/guidellm-benchmarks.json'}]                         
+✔ Setup complete, starting benchmarks...
+
+
+
+
+
+ℹ Run Summary Info
+|=============|==========|==========|=======|======|========|=========|=====|=====|========|=====|=====|
+| Benchmark   | Timings                                 ||||| Input Tokens      ||| Output Tokens    |||
+| Strategy    | Start    | End      | Dur   | Warm | Cool   | Comp    | Inc | Err | Comp   | Inc | Err |
+|             |          |          | Sec   | Sec  | Sec    | Tot     | Tot | Tot | Tot    | Tot | Tot |
+|-------------|----------|----------|-------|------|--------|---------|-----|-----|--------|-----|-----|
+| synchronous | 11:37:01 | 11:49:01 | 720.0 | 90.0 | -396.6 | 34188.0 | 0.0 | 0.0 | 8448.0 | 0.0 | 0.0 |
+|=============|==========|==========|=======|======|========|=========|=====|=====|========|=====|=====|
+
+
+ℹ Text Metrics Statistics (Completed Requests)
+|=============|========|========|=======|=======|=======|=======|======|======|========|========|=======|=======|
+| Benchmark   | Input Tokens                 |||| Input Words              |||| Input Characters             ||||
+| Strategy    | Per Request    || Per Second   || Per Request  || Per Second || Per Request    || Per Second   ||
+|             | Mdn    | p95    | Mdn   | Mean  | Mdn   | p95   | Mdn  | Mean | Mdn    | p95    | Mdn   | Mean  |
+|-------------|--------|--------|-------|-------|-------|-------|------|------|--------|--------|-------|-------|
+| synchronous | 1036.0 | 1036.0 | 104.4 | 107.7 | 854.0 | 859.0 | 86.6 | 88.8 | 5732.0 | 5843.0 | 578.6 | 596.9 |
+|=============|========|========|=======|=======|=======|=======|======|======|========|========|=======|=======|
+| Benchmark   | Output Tokens                |||| Output Words             |||| Output Characters            ||||
+| Strategy    | Per Request    || Per Second   || Per Request  || Per Second || Per Request    || Per Second   ||
+|             | Mdn    | p95    | Mdn   | Mean  | Mdn   | p95   | Mdn  | Mean | Mdn    | p95    | Mdn   | Mean  |
+|-------------|--------|--------|-------|-------|-------|-------|------|------|--------|--------|-------|-------|
+| synchronous | 256.0  | 256.0  | 25.8  | 26.6  | 180.0 | 212.0 | 17.2 | 18.0 | 1203.0 | 1385.0 | 103.5 | 119.6 |
+|=============|========|========|=======|=======|=======|=======|======|======|========|========|=======|=======|
+
+
+ℹ Request Token Statistics (Completed Requests)
+|=============|========|========|=======|=======|========|========|=======|=======|=========|========|
+| Benchmark   | Input Tok      || Output Tok   || Total Tok      || Stream Iter  || Output Tok      ||
+| Strategy    | Per Req        || Per Req      || Per Req        || Per Req      || Per Stream Iter ||
+|             | Mdn    | p95    | Mdn   | p95   | Mdn    | p95    | Mdn   | p95   | Mdn     | p95    |
+|-------------|--------|--------|-------|-------|--------|--------|-------|-------|---------|--------|
+| synchronous | 1036.0 | 1036.0 | 256.0 | 256.0 | 1292.0 | 1292.0 | 260.0 | 260.0 | 1.0     | 1.1    |
+|=============|========|========|=======|=======|========|========|=======|=======|=========|========|
+
+
+ℹ Request Latency Statistics (Completed Requests)
+|=============|========|=========|========|=========|========|=========|======|======|======|======|
+| Benchmark   | Request Latency || TTFT            || TTFOT           || ITL        || TPOT       ||
+| Strategy    | Sec             || ms              || ms              || ms         || ms         ||
+|             | Mdn    | p95     | Mdn    | p95     | Mdn    | p95     | Mdn  | p95  | Mdn  | p95  |
+|-------------|--------|---------|--------|---------|--------|---------|------|------|------|------|
+| synchronous | 8.8    | 20.7    | 4153.0 | 17819.8 | 4153.0 | 17819.8 | 14.6 | 33.5 | 34.3 | 80.7 |
+|=============|========|=========|========|=========|========|=========|======|======|======|======|
+
+
+ℹ Server Throughput Statistics (All Requests)
+|=============|=======|======|=========|==============|===============|==============|
+| Benchmark   | Requests             ||| Input Tokens | Output Tokens | Total Tokens |
+| Strategy    | Concurrency || Per Sec | Per Sec      | Per Sec       | Per Sec      |
+|             | Mdn   | Mean | Mean                                               ||||
+|-------------|-------|------|---------|--------------|---------------|--------------|
+| synchronous | 0.0   | 0.4  | 0.0     | 108.0        | 26.2          | 132.4        |
+|=============|=======|======|=========|==============|===============|==============|
+
+
+
+✔ Benchmarking complete, generated 1 benchmark(s)
+…   json    : /mnt/c/Users/vitta/Code/omobench/.omobench-runs/run-49f0510010c1/guidellm-benchmarks.json
