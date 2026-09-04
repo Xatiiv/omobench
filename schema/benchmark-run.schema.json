@@ -95,6 +95,11 @@
             "additionalProperties": false,
             "required": ["model", "memory_gb", "count"],
             "properties": {
+              "vendor": {
+                "type": "string",
+                "enum": ["nvidia", "amd", "intel", "other"],
+                "description": "Optional GPU vendor. Absent on results published before vendor-neutral detection; never required, so old published results remain valid."
+              },
               "model": { "type": "string" },
               "memory_gb": { "type": "number", "exclusiveMinimum": 0 },
               "count": { "type": "integer", "minimum": 1 }

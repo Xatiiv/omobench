@@ -37,9 +37,30 @@ omobench doctor
 omobench profiles
 ```
 
-`omobench doctor` reports whether the command-line runner, Git tooling, and an
-NVIDIA GPU are visible to the shell. `omobench profiles` confirms that the
-checkout contains the immutable benchmark definitions.
+`omobench doctor` reports whether the command-line runner, Git tooling, and a
+GPU are visible to the shell. GPU detection is vendor-neutral: NVIDIA (via
+`nvidia-smi`), AMD (via `rocm-smi`), Intel, and other GPUs are all reported
+under the same `gpus` field. Vendor utilities are optional — none of them
+need to be installed for `omobench doctor` to run — and every method is
+best-effort:
+
+- NVIDIA: `nvidia-smi`, when present, reports model, real VRAM, and driver.
+- AMD (Linux only): `rocm-smi`, when present, reports the same.
+- Windows fallback: `Win32_VideoController` (via PowerShell/CIM) reports
+  model and driver for any GPU a specialised tool above didn't already
+  cover, but never memory — modern Windows drivers cap or misreport
+  `AdapterRAM` (it has been observed reporting 4 GB for a 16 GB RX 9070), so
+  OmoBench never trusts it.
+- Linux fallback: `lspci`, when present, reports model for any GPU a
+  specialised tool didn't already cover, but no memory or driver version.
+
+When `omobench package` sees a detected GPU with no trustworthy memory
+value, pass `--gpu-memory-gb` — see
+[docs/submission-bundle.md](submission-bundle.md) for exactly when that
+applies and what it does (and does not) let you set.
+
+`omobench profiles` confirms that the checkout contains the immutable
+benchmark definitions.
 
 Windows is suitable for local development, website work, CLI checks, and
 benchmark-intent files. OmoBench's `cli[runner]` extra pins
