@@ -14,9 +14,10 @@ absent from the catalog, or whose catalog `modality` is not
 `omobench` CLI package itself stays permissive about model IDs so it can be
 used for local staging before a model is added to the catalog.
 
-A catalog entry needs at least `id` and `modality`; a missing or malformed
-`catalog/models/*.yaml` file fails validation with a clear error instead of
-silently accepting or rejecting every submission.
+A catalog entry requires non-empty `id`, `modality`, `source`, and `licence`
+fields; a missing or malformed `catalog/models/*.yaml` file fails validation
+with a clear error instead of silently accepting or rejecting every
+submission.
 
 ## Immutable model revisions
 
