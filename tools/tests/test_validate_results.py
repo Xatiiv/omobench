@@ -5,12 +5,15 @@ import gzip
 import hashlib
 import io
 import json
+import shutil
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
+
+import yaml
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
 if str(TOOLS_DIR) not in sys.path:
@@ -82,6 +85,22 @@ ARTIFACT_CONTENTS = {
 }
 
 
+DEFAULT_CATALOG = """
+catalog_version: 1
+models:
+  - id: Qwen/Qwen3-4B
+    family: Qwen
+    modality: text-generation
+    source: https://huggingface.co/Qwen/Qwen3-4B
+    licence: Apache-2.0
+"""
+
+
+def write_catalog(catalog_dir: Path, contents: str = DEFAULT_CATALOG, filename: str = "seed-v1.yaml") -> None:
+    catalog_dir.mkdir(parents=True, exist_ok=True)
+    (catalog_dir / filename).write_text(contents, encoding="utf-8")
+
+
 def write_bundle(
     bundle_dir: Path,
     *,
@@ -111,14 +130,21 @@ class ValidateResultsTests(unittest.TestCase):
         self._temp_directory = tempfile.TemporaryDirectory()
         self.root = Path(self._temp_directory.name)
         self.results_path = self.root / "results"
+        self.catalog_path = self.root / "catalog" / "models"
         self.addCleanup(self._temp_directory.cleanup)
 
         patcher_root = patch.object(validate_results, "ROOT", self.root)
         patcher_results = patch.object(validate_results, "RESULTS_PATH", self.results_path)
+        patcher_catalog = patch.object(validate_results, "CATALOG_PATH", self.catalog_path)
         patcher_root.start()
         patcher_results.start()
+        patcher_catalog.start()
         self.addCleanup(patcher_root.stop)
         self.addCleanup(patcher_results.stop)
+        self.addCleanup(patcher_catalog.stop)
+
+        # A valid default catalog so tests unrelated to catalog behavior keep passing.
+        write_catalog(self.catalog_path)
 
     def run_main(self) -> tuple[int, str, str]:
         stdout, stderr = io.StringIO(), io.StringIO()
@@ -233,6 +259,238 @@ class ValidateResultsTests(unittest.TestCase):
         exit_code, _, stderr = self.run_main()
         self.assertEqual(exit_code, 1)
         self.assertIn("duplicate configuration and raw-runner output", stderr)
+
+    def test_eligible_catalog_model_passes(self) -> None:
+        write_bundle(self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234")
+        exit_code, stdout, _ = self.run_main()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Validated 1 OmoBench result bundle(s).", stdout)
+
+    def test_unknown_model_is_rejected(self) -> None:
+        write_bundle(
+            self.results_path / "unknown-model" / "2026-08-30-run-fixture-1234",
+            result_overrides={
+                "model": {"id": "not-in-catalog/Model", "revision": "abc123", "quantization": "BF16"}
+            },
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("is not present in the model catalog", stderr)
+
+    def test_non_text_generation_model_is_rejected(self) -> None:
+        write_catalog(
+            self.catalog_path,
+            contents="""
+catalog_version: 1
+models:
+  - id: Qwen/Qwen3-4B
+    family: Qwen
+    modality: text-generation
+    source: https://huggingface.co/Qwen/Qwen3-4B
+    licence: Apache-2.0
+  - id: some-org/vision-model
+    family: Other
+    modality: image-generation
+    source: https://huggingface.co/some-org/vision-model
+    licence: Apache-2.0
+""",
+        )
+        write_bundle(
+            self.results_path / "vision-model" / "2026-08-30-run-fixture-1234",
+            result_overrides={
+                "model": {"id": "some-org/vision-model", "revision": "abc123", "quantization": "BF16"}
+            },
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("catalog modality", stderr)
+        self.assertIn("not 'text-generation'", stderr)
+
+    def test_malformed_catalog_yaml_is_reported(self) -> None:
+        write_catalog(self.catalog_path, contents="models: [this is: not: valid: yaml")
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("Model catalog error", stderr)
+        self.assertIn("malformed YAML", stderr)
+
+    def test_missing_catalog_directory_is_reported(self) -> None:
+        shutil.rmtree(self.catalog_path)
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("Model catalog error", stderr)
+        self.assertIn("Model catalog directory is missing", stderr)
+
+    def test_mutable_revision_labels_are_rejected(self) -> None:
+        for mutable_label in ("main", "master", "latest", "MAIN"):
+            with self.subTest(revision=mutable_label):
+                bundle_dir = self.results_path / "qwen3-4b" / f"2026-08-30-run-{mutable_label.lower()}"
+                write_bundle(
+                    bundle_dir,
+                    result_overrides={
+                        "run_id": f"run-fixture-{mutable_label.lower()}",
+                        "model": {"id": "Qwen/Qwen3-4B", "revision": mutable_label, "quantization": "BF16"},
+                    },
+                )
+                exit_code, _, stderr = self.run_main()
+                self.assertEqual(exit_code, 1)
+                self.assertIn("is a mutable label", stderr)
+
+    def test_openai_compatible_other_without_server_description_is_rejected(self) -> None:
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+            result_overrides={
+                "runtime": {
+                    "framework": "openai-compatible-other",
+                    "version": "1.0.0",
+                    "arguments": [],
+                    "endpoint_type": "openai-compatible",
+                }
+            },
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("server_description", stderr)
+
+    def test_openai_compatible_other_with_blank_server_description_is_rejected(self) -> None:
+        for blank_value in ("", "   "):
+            with self.subTest(server_description=repr(blank_value)):
+                run_id = f"run-fixture-blank-{len(blank_value)}"
+                write_bundle(
+                    self.results_path / "qwen3-4b" / f"2026-08-30-{run_id}",
+                    result_overrides={
+                        "run_id": run_id,
+                        "runtime": {
+                            "framework": "openai-compatible-other",
+                            "version": "1.0.0",
+                            "arguments": [],
+                            "endpoint_type": "openai-compatible",
+                            "server_description": blank_value,
+                        },
+                    },
+                )
+                exit_code, _, stderr = self.run_main()
+                self.assertEqual(exit_code, 1)
+                self.assertIn("server_description", stderr)
+
+    def test_openai_compatible_other_with_server_description_is_accepted(self) -> None:
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+            result_overrides={
+                "runtime": {
+                    "framework": "openai-compatible-other",
+                    "version": "1.0.0",
+                    "arguments": [],
+                    "endpoint_type": "openai-compatible",
+                    "server_description": "Custom internal OpenAI-compatible gateway",
+                }
+            },
+        )
+        exit_code, stdout, _ = self.run_main()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Validated 1 OmoBench result bundle(s).", stdout)
+
+    def test_duplicate_model_id_across_catalog_files_is_rejected(self) -> None:
+        write_catalog(
+            self.catalog_path,
+            contents="""
+catalog_version: 1
+models:
+  - id: Qwen/Qwen3-4B
+    family: Qwen
+    modality: text-generation
+    source: https://huggingface.co/Qwen/Qwen3-4B
+    licence: Apache-2.0
+""",
+            filename="seed-v1.yaml",
+        )
+        write_catalog(
+            self.catalog_path,
+            contents="""
+catalog_version: 1
+models:
+  - id: Qwen/Qwen3-4B
+    family: Qwen
+    modality: text-generation
+    source: https://huggingface.co/Qwen/Qwen3-4B
+    licence: Apache-2.0
+""",
+            filename="seed-v2.yaml",
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("Model catalog error", stderr)
+        self.assertIn("duplicate catalog model id", stderr)
+
+    def test_catalog_entry_missing_id_is_rejected(self) -> None:
+        write_catalog(
+            self.catalog_path,
+            contents="""
+catalog_version: 1
+models:
+  - family: Qwen
+    modality: text-generation
+    source: https://huggingface.co/Qwen/Qwen3-4B
+    licence: Apache-2.0
+""",
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("Model catalog error", stderr)
+        self.assertIn("missing a valid 'id'", stderr)
+
+    def test_catalog_entry_empty_id_is_rejected(self) -> None:
+        write_catalog(
+            self.catalog_path,
+            contents="""
+catalog_version: 1
+models:
+  - id: "  "
+    family: Qwen
+    modality: text-generation
+    source: https://huggingface.co/Qwen/Qwen3-4B
+    licence: Apache-2.0
+""",
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("Model catalog error", stderr)
+        self.assertIn("missing a valid 'id'", stderr)
+
+    def test_catalog_entry_missing_or_empty_modality_source_licence_is_rejected(self) -> None:
+        base_entry = {
+            "id": "Qwen/Qwen3-4B",
+            "family": "Qwen",
+            "modality": "text-generation",
+            "source": "https://huggingface.co/Qwen/Qwen3-4B",
+            "licence": "Apache-2.0",
+        }
+        for missing_field in ("modality", "source", "licence"):
+            for bad_value, label in ((None, "missing"), ("   ", "empty")):
+                with self.subTest(field=missing_field, variant=label):
+                    entry = dict(base_entry)
+                    if bad_value is None:
+                        del entry[missing_field]
+                    else:
+                        entry[missing_field] = bad_value
+                    contents = yaml.safe_dump({"catalog_version": 1, "models": [entry]})
+                    write_catalog(self.catalog_path, contents=contents)
+                    exit_code, _, stderr = self.run_main()
+                    self.assertEqual(exit_code, 1)
+                    self.assertIn("Model catalog error", stderr)
+                    self.assertIn(f"missing a valid '{missing_field}'", stderr)
+
+    def test_invalid_models_structure_is_rejected(self) -> None:
+        cases = {
+            "root_not_a_mapping": "- just\n- a\n- list\n",
+            "models_not_a_list": "catalog_version: 1\nmodels: not-a-list\n",
+            "entry_not_a_mapping": "catalog_version: 1\nmodels:\n  - just-a-string\n",
+        }
+        for case_name, contents in cases.items():
+            with self.subTest(case=case_name):
+                write_catalog(self.catalog_path, contents=contents)
+                exit_code, _, stderr = self.run_main()
+                self.assertEqual(exit_code, 1)
+                self.assertIn("Model catalog error", stderr)
 
 
 if __name__ == "__main__":

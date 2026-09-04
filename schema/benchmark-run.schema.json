@@ -42,7 +42,11 @@
       "required": ["id", "revision", "quantization"],
       "properties": {
         "id": { "type": "string", "minLength": 3 },
-        "revision": { "type": "string", "description": "Immutable model revision or commit SHA." },
+        "revision": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Immutable model revision or commit SHA. Mutable labels such as main, master, or latest are rejected by registry validation."
+        },
         "quantization": { "type": ["string", "null"] },
         "source": { "type": "string", "format": "uri" }
       }
@@ -52,11 +56,27 @@
       "additionalProperties": false,
       "required": ["framework", "version", "arguments", "endpoint_type"],
       "properties": {
-        "framework": { "type": "string", "enum": ["vllm", "sglang", "llama.cpp"] },
+        "framework": {
+          "type": "string",
+          "enum": ["vllm", "sglang", "llama.cpp", "lmstudio", "openai-compatible-other"]
+        },
         "version": { "type": "string" },
         "arguments": { "type": "array", "items": { "type": "string" } },
         "endpoint_type": { "const": "openai-compatible" },
-        "container_image": { "type": ["string", "null"] }
+        "container_image": { "type": ["string", "null"] },
+        "server_description": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "Required when framework is openai-compatible-other; free-text description of the server. Must contain at least one non-whitespace character."
+        }
+      },
+      "if": {
+        "properties": { "framework": { "const": "openai-compatible-other" } },
+        "required": ["framework"]
+      },
+      "then": {
+        "required": ["server_description"]
       }
     },
     "hardware": {

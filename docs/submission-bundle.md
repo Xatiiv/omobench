@@ -1,5 +1,32 @@
 # Result submission bundle
 
+## v1 scope
+
+OmoBench v1 covers open-weight text-generation models served through an
+OpenAI-compatible chat-completions endpoint.
+
+## Model eligibility
+
+`catalog/models/*.yaml` is the source of truth for eligible submitted models.
+`tools/validate_results.py` rejects a submitted result whose `model.id` is
+absent from the catalog, or whose catalog `modality` is not
+`text-generation`. This gate lives only in registry validation and CI; the
+`omobench` CLI package itself stays permissive about model IDs so it can be
+used for local staging before a model is added to the catalog.
+
+A catalog entry requires non-empty `id`, `modality`, `source`, and `licence`
+fields; a missing or malformed `catalog/models/*.yaml` file fails validation
+with a clear error instead of silently accepting or rejecting every
+submission.
+
+## Immutable model revisions
+
+`model.revision` must identify an immutable model revision or commit SHA.
+Registry validation rejects an empty revision and clearly mutable labels —
+`main`, `master`, and `latest` (case-insensitive) — because they can point to
+different weights over time and break reproducibility. Normal SHA-based (or
+otherwise content-addressed) revisions are accepted.
+
 Each benchmark submission occupies one directory:
 
 ```text
@@ -60,6 +87,37 @@ OmoBench v1 packages GPU-backed results only. The operator must pass
 `--execution-device gpu` after confirming that the model server used the GPU.
 CPU-only runs may be useful for local testing, but they are not publishable
 records yet.
+
+## Runtime provenance
+
+`--framework` records which server produced the endpoint and accepts:
+
+- `vllm`
+- `sglang`
+- `llama.cpp`
+- `lmstudio`
+- `openai-compatible-other` — any other OpenAI-compatible server
+
+Every `runtime` still requires an `endpoint_type` of `openai-compatible`;
+these framework choices only record *what implements* that endpoint.
+
+When `--framework openai-compatible-other` is used, `--server-description`
+is required — a free-text description of the server (for example, "internal
+gateway in front of a fine-tuned model"). `omobench package` fails clearly
+if that framework is selected without a description:
+
+```bash
+omobench package --framework openai-compatible-other ...
+# --server-description is required when --framework is openai-compatible-other.
+```
+
+`--server-description` is optional for the other frameworks. When supplied,
+it is recorded as `runtime.server_description` in `result.json` and included
+in the `configuration_fingerprint`, so changing only the description produces
+a new configuration. Existing `result.json` files without
+`runtime.server_description` remain valid; the field is optional in
+`schema/benchmark-run.schema.json` except when `runtime.framework` is
+`openai-compatible-other`.
 
 ## Repeats and duplicates
 

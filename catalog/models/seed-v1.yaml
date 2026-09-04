@@ -6,30 +6,35 @@ models:
   - id: Qwen/Qwen3-4B
     family: Qwen
     parameter_class: 4B
+    modality: text-generation
     source: https://huggingface.co/Qwen/Qwen3-4B
     licence: Apache-2.0
     initial_runtimes: [vllm, sglang, llama.cpp]
   - id: meta-llama/Llama-3.1-8B-Instruct
     family: Llama
     parameter_class: 8B
+    modality: text-generation
     source: https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct
     licence: Llama-3.1-Community
     initial_runtimes: [vllm, sglang, llama.cpp]
   - id: deepseek-ai/DeepSeek-R1-Distill-Qwen-14B
     family: DeepSeek
     parameter_class: 14B
+    modality: text-generation
     source: https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-14B
     licence: MIT
     initial_runtimes: [vllm, sglang]
   - id: mistralai/Mistral-Small-3.1-24B-Instruct-2503
     family: Mistral
     parameter_class: 24B
+    modality: text-generation
     source: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503
     licence: Apache-2.0
     initial_runtimes: [vllm, sglang]
   - id: Qwen/Qwen3-32B
     family: Qwen
     parameter_class: 32B
+    modality: text-generation
     source: https://huggingface.co/Qwen/Qwen3-32B
     licence: Apache-2.0
     initial_runtimes: [vllm, sglang]
