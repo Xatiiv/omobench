@@ -16,6 +16,7 @@ from omobench.cli import (
     RUNTIME_FRAMEWORKS,
     build_guidellm_command,
     build_parser,
+    detect_gpus,
     detect_nvidia_gpus,
     detect_windows_cim_gpus,
     doctor_report,
@@ -155,6 +156,50 @@ class GpuDetectionTests(unittest.TestCase):
         with patch("omobench.cli.sys.platform", "linux"):
             self.assertEqual(detect_windows_cim_gpus(), [])
 
+    def test_detect_gpus_suppresses_fallback_records_for_covered_vendors(self) -> None:
+        specialized_nvidia = [
+            {"vendor": "nvidia", "model": "NVIDIA Test GPU", "memory_gb": 24.0, "driver_version": "555.1", "detected_by": "nvidia-smi"}
+        ]
+        specialized_amd = [
+            {"vendor": "amd", "model": "AMD Instinct MI300X", "memory_gb": 192.0, "driver_version": "6.2.1", "detected_by": "rocm-smi"}
+        ]
+        fallback = [
+            {"vendor": "nvidia", "model": "NVIDIA Test GPU", "memory_gb": None, "driver_version": None, "detected_by": "win32_videocontroller"},
+            {"vendor": "amd", "model": "AMD Instinct MI300X", "memory_gb": None, "driver_version": None, "detected_by": "win32_videocontroller"},
+        ]
+        with patch("omobench.cli.sys.platform", "win32"), patch(
+            "omobench.cli.detect_nvidia_gpus", return_value=specialized_nvidia
+        ), patch("omobench.cli.detect_amd_gpus", return_value=specialized_amd), patch(
+            "omobench.cli.detect_windows_cim_gpus", return_value=fallback
+        ):
+            gpus = detect_gpus()
+
+        self.assertEqual(gpus, specialized_nvidia + specialized_amd)
+
+    def test_detect_gpus_retains_uncovered_fallback_vendor(self) -> None:
+        specialized_nvidia = [
+            {"vendor": "nvidia", "model": "NVIDIA Test GPU", "memory_gb": 24.0, "driver_version": "555.1", "detected_by": "nvidia-smi"}
+        ]
+        intel_fallback = {
+            "vendor": "intel",
+            "model": "Intel(R) Arc(TM) A770 Graphics",
+            "memory_gb": None,
+            "driver_version": "31.0.101.5081",
+            "detected_by": "win32_videocontroller",
+        }
+        fallback = [
+            {"vendor": "nvidia", "model": "NVIDIA Test GPU", "memory_gb": None, "driver_version": None, "detected_by": "win32_videocontroller"},
+            intel_fallback,
+        ]
+        with patch("omobench.cli.sys.platform", "win32"), patch(
+            "omobench.cli.detect_nvidia_gpus", return_value=specialized_nvidia
+        ), patch("omobench.cli.detect_amd_gpus", return_value=[]), patch(
+            "omobench.cli.detect_windows_cim_gpus", return_value=fallback
+        ):
+            gpus = detect_gpus()
+
+        self.assertEqual(gpus, specialized_nvidia + [intel_fallback])
+
     def test_doctor_report_uses_generic_gpus_key(self) -> None:
         with patch("omobench.cli.detect_gpus", return_value=[{"vendor": "amd", "model": "Test", "memory_gb": None, "driver_version": None, "detected_by": "test"}]):
             report = doctor_report()
@@ -243,6 +288,18 @@ class HardwareFromEnvironmentTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(ValueError, "more than one"):
             hardware_from_environment(environment, None, None, gpu_memory_gb_override=16.0)
+
+    def test_invalid_gpu_memory_gb_override_types_raise_value_error(self) -> None:
+        environment = {
+            "operating_system": "Test Windows",
+            "cpu": "Test CPU",
+            "ram_gb": 64,
+            "gpus": [{"vendor": "amd", "model": "AMD Radeon RX 9070", "memory_gb": None, "driver_version": None}],
+        }
+        for invalid_value in ("16", True):
+            with self.subTest(invalid_value=invalid_value):
+                with self.assertRaisesRegex(ValueError, "--gpu-memory-gb must be a finite positive number."):
+                    hardware_from_environment(environment, None, None, gpu_memory_gb_override=invalid_value)
 
     def test_gpu_memory_gb_rejected_when_not_needed(self) -> None:
         environment = {
@@ -469,6 +526,48 @@ class ResultPackagingTests(unittest.TestCase):
                 result["hardware"]["gpus"],
                 [{"vendor": "amd", "model": "AMD Instinct MI300X", "memory_gb": 192.0, "count": 1}],
             )
+
+    def test_generic_amd_environment_with_unknown_memory_requires_gpu_memory_gb(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            run_directory = build_staged_run_directory(
+                root,
+                environment={
+                    "operating_system": "Test Linux",
+                    "cpu": "Test CPU",
+                    "ram_gb": 64,
+                    "gpus": [{"vendor": "amd", "model": "AMD Radeon RX 9070", "memory_gb": None, "driver_version": "31.0"}],
+                },
+            )
+            original_directory = Path.cwd()
+
+            args_without_override = base_package_args(run_directory)
+            os.chdir(root)
+            try:
+                with patch("omobench.cli.current_git_commit", return_value="a" * 40):
+                    stderr = io.StringIO()
+                    with redirect_stderr(stderr):
+                        exit_code = package_local_run(args_without_override)
+            finally:
+                os.chdir(original_directory)
+            self.assertEqual(exit_code, 2)
+            self.assertIn("unknown memory", stderr.getvalue())
+            self.assertFalse((run_directory / "result.json").exists())
+
+            args_with_override = base_package_args(run_directory, gpu_memory_gb=16.0)
+            os.chdir(root)
+            try:
+                with patch("omobench.cli.current_git_commit", return_value="a" * 40):
+                    self.assertEqual(package_local_run(args_with_override), 0)
+            finally:
+                os.chdir(original_directory)
+
+            result = json.loads((run_directory / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                result["hardware"]["gpus"],
+                [{"vendor": "amd", "model": "AMD Radeon RX 9070", "memory_gb": 16.0, "count": 1}],
+            )
+            self.assertEqual(result["hardware"]["detection"]["hardware"], "user-confirmed")
 
     def test_missing_detected_gpu_still_blocks_gpu_packaging(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

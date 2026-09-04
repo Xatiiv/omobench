@@ -71,6 +71,8 @@ def classify_gpu_vendor(model_name: str) -> str:
 def is_non_physical_display_adapter(name: str) -> bool:
     lowered = name.lower()
     return any(needle in lowered for needle in NON_PHYSICAL_DISPLAY_ADAPTER_NEEDLES)
+
+
 PROFILE_SPECS: dict[str, dict[str, Any]] = {
     "chat-small-v1": {
         "input_tokens": 1024,
@@ -218,7 +220,7 @@ def detect_windows_cim_gpus() -> list[dict[str, Any]]:
         return []
     output = command_output(
         [
-            "powershell",
+            "powershell.exe",
             "-NoProfile",
             "-NonInteractive",
             "-Command",
@@ -663,8 +665,11 @@ def hardware_from_environment(
     if not math.isfinite(ram_gb) or ram_gb <= 0:
         raise ValueError("RAM must be a finite positive number.")
 
-    if gpu_memory_gb_override is not None and not (
-        math.isfinite(gpu_memory_gb_override) and gpu_memory_gb_override > 0
+    if gpu_memory_gb_override is not None and (
+        isinstance(gpu_memory_gb_override, bool)
+        or not isinstance(gpu_memory_gb_override, int | float)
+        or not math.isfinite(gpu_memory_gb_override)
+        or gpu_memory_gb_override <= 0
     ):
         raise ValueError("--gpu-memory-gb must be a finite positive number.")
 
@@ -911,7 +916,9 @@ def package_local_run(args: argparse.Namespace) -> int:
         )
         if not isinstance(environment, dict):
             raise ValueError("environment.json must contain an object at its root.")
-        hardware = hardware_from_environment(environment, args.cpu, args.ram_gb, args.gpu_memory_gb)
+        hardware = hardware_from_environment(
+            environment, args.cpu, args.ram_gb, getattr(args, "gpu_memory_gb", None)
+        )
         profile_path = root / "benchmarks" / "profiles" / f"{args.profile}.yaml"
         if not profile_path.is_file():
             raise ValueError(f"Missing profile definition: {profile_path}")
