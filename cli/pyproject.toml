@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "CLI scaffolding for reproducible OmoBench submissions"
 requires-python = ">=3.10"
 authors = [{ name = "OmoBench" }]
+dependencies = ["PyYAML>=6.0"]
 
 [project.optional-dependencies]
 runner = ["guidellm[recommended]==0.7.3"]

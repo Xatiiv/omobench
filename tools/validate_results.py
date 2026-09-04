@@ -9,12 +9,77 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import yaml
 from jsonschema import Draft202012Validator, FormatChecker
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "schema" / "benchmark-run.schema.json"
 RESULTS_PATH = ROOT / "results"
+CATALOG_PATH = ROOT / "catalog" / "models"
+ELIGIBLE_MODALITY = "text-generation"
+MUTABLE_REVISION_LABELS = {"main", "master", "latest"}
+
+
+class CatalogError(Exception):
+    """Raised when catalog/models/*.yaml cannot be loaded or is malformed."""
+
+
+def load_model_catalog(catalog_path: Path) -> dict[str, dict[str, Any]]:
+    """Load catalog/models/*.yaml into a model id -> catalog entry map.
+
+    catalog/models/*.yaml is the source of truth for eligible submitted
+    models; a submitted result whose model.id is absent here, or whose
+    catalog modality is not text-generation, is rejected.
+    """
+    if not catalog_path.is_dir():
+        raise CatalogError(f"Model catalog directory is missing: {catalog_path.relative_to(ROOT)}")
+
+    catalog_files = sorted(catalog_path.glob("*.yaml"))
+    if not catalog_files:
+        raise CatalogError(f"No model catalog files found in {catalog_path.relative_to(ROOT)}")
+
+    models: dict[str, dict[str, Any]] = {}
+    for catalog_file in catalog_files:
+        relative_path = catalog_file.relative_to(ROOT)
+        try:
+            document = yaml.safe_load(catalog_file.read_text(encoding="utf-8"))
+        except yaml.YAMLError as error:
+            raise CatalogError(f"{relative_path}: malformed YAML ({error})") from error
+
+        if not isinstance(document, dict):
+            raise CatalogError(f"{relative_path}: catalog file must contain a mapping at its root")
+
+        entries = document.get("models")
+        if not isinstance(entries, list):
+            raise CatalogError(f"{relative_path}: catalog file must contain a 'models' list")
+
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                raise CatalogError(f"{relative_path}: models[{index}] must be a mapping")
+
+            model_id = entry.get("id")
+            if not isinstance(model_id, str) or not model_id.strip():
+                raise CatalogError(f"{relative_path}: models[{index}] is missing a valid 'id'")
+
+            modality = entry.get("modality")
+            if not isinstance(modality, str) or not modality.strip():
+                raise CatalogError(f"{relative_path}: model '{model_id}' is missing a valid 'modality'")
+
+            source = entry.get("source")
+            if not isinstance(source, str) or not source.strip():
+                raise CatalogError(f"{relative_path}: model '{model_id}' is missing a valid 'source'")
+
+            licence = entry.get("licence")
+            if not isinstance(licence, str) or not licence.strip():
+                raise CatalogError(f"{relative_path}: model '{model_id}' is missing a valid 'licence'")
+
+            if model_id in models:
+                raise CatalogError(f"{relative_path}: duplicate catalog model id '{model_id}'")
+
+            models[model_id] = entry
+
+    return models
 
 
 def sha256(path: Path) -> str:
@@ -37,6 +102,7 @@ def safe_artifact_path(result_path: Path, artifact_path: str) -> Path | None:
 def validate_result(
     result_path: Path,
     validator: Draft202012Validator,
+    catalog: dict[str, dict[str, Any]],
     run_ids: set[str],
     duplicate_keys: set[tuple[str, str]],
 ) -> list[str]:
@@ -49,6 +115,29 @@ def validate_result(
     for error in sorted(validator.iter_errors(result), key=lambda item: list(item.path)):
         location = ".".join(str(part) for part in error.path) or "root"
         errors.append(f"{result_path.relative_to(ROOT)}: {location}: {error.message}")
+    if errors:
+        return errors
+
+    model_id = result["model"]["id"]
+    catalog_entry = catalog.get(model_id)
+    if catalog_entry is None:
+        errors.append(
+            f"{result_path.relative_to(ROOT)}: model.id: '{model_id}' is not present in the model catalog "
+            "(catalog/models/*.yaml); only catalog-listed models are eligible for submission"
+        )
+    elif catalog_entry.get("modality") != ELIGIBLE_MODALITY:
+        errors.append(
+            f"{result_path.relative_to(ROOT)}: model.id: '{model_id}' has catalog modality "
+            f"'{catalog_entry.get('modality')}', not '{ELIGIBLE_MODALITY}'"
+        )
+
+    revision = result["model"]["revision"]
+    if revision.strip().lower() in MUTABLE_REVISION_LABELS:
+        errors.append(
+            f"{result_path.relative_to(ROOT)}: model.revision: '{revision}' is a mutable label; "
+            "submit an immutable revision or commit SHA instead of main, master, or latest"
+        )
+
     if errors:
         return errors
 
@@ -88,6 +177,12 @@ def validate_result(
 
 
 def main() -> int:
+    try:
+        catalog = load_model_catalog(CATALOG_PATH)
+    except CatalogError as error:
+        print(f"Model catalog error: {error}", file=sys.stderr)
+        return 1
+
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
     validator = Draft202012Validator(schema, format_checker=FormatChecker())
     result_files = sorted(RESULTS_PATH.rglob("result.json"))
@@ -99,7 +194,7 @@ def main() -> int:
     duplicate_keys: set[tuple[str, str]] = set()
     errors: list[str] = []
     for result_path in result_files:
-        errors.extend(validate_result(result_path, validator, run_ids, duplicate_keys))
+        errors.extend(validate_result(result_path, validator, catalog, run_ids, duplicate_keys))
 
     if errors:
         print("\n".join(errors), file=sys.stderr)

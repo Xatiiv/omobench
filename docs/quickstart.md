@@ -2,6 +2,14 @@
 
 This is the first developer setup, before running a benchmark.
 
+## v1 scope
+
+OmoBench v1 covers open-weight text-generation models served through an
+OpenAI-compatible chat-completions endpoint. Only models listed in
+`catalog/models/*.yaml` with `modality: text-generation` are eligible for
+submission; see [docs/submission-bundle.md](submission-bundle.md) for the full
+model-eligibility and runtime-provenance contract.
+
 ```bash
 git clone git@github.com:YOUR-ORG/omobench.git
 cd omobench
@@ -34,8 +42,11 @@ NVIDIA GPU are visible to the shell. `omobench profiles` confirms that the
 checkout contains the immutable benchmark definitions.
 
 Windows is suitable for local development, website work, CLI checks, and
-benchmark-intent files. Run an actual GuideLLM benchmark from a supported Linux
-or macOS environment; on a Windows computer, use WSL2 or a separate Linux
+benchmark-intent files. OmoBench's `cli[runner]` extra pins
+`guidellm[recommended]`, and that recommended dependency set includes
+`uvloop`, which does not install on native Windows. This is a limitation of
+OmoBench's current `cli[runner]` extra, not a claim that GuideLLM itself can
+never run on Windows. On a Windows computer, use WSL2 or a separate Linux
 benchmark host for the later `--execute` step.
 
 After a successful runner execution, `omobench package` converts the raw

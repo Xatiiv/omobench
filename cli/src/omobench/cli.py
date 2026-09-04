@@ -24,6 +24,8 @@ from . import __version__
 
 GUIDELLM_VERSION = "0.7.3"
 RUN_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{7,63}$")
+RUNTIME_FRAMEWORKS = ["vllm", "sglang", "llama.cpp", "lmstudio", "openai-compatible-other"]
+OTHER_SERVER_FRAMEWORK = "openai-compatible-other"
 PROFILE_SPECS: dict[str, dict[str, Any]] = {
     "chat-small-v1": {
         "input_tokens": 1024,
@@ -600,6 +602,12 @@ def package_local_run(args: argparse.Namespace) -> int:
     if args.run_kind != "repeat" and args.repeat_of_run_id:
         print("--repeat-of-run-id can only be used when --run-kind is repeat.", file=sys.stderr)
         return 2
+    if args.framework == OTHER_SERVER_FRAMEWORK and not (args.server_description and args.server_description.strip()):
+        print(
+            f"--server-description is required when --framework is {OTHER_SERVER_FRAMEWORK}.",
+            file=sys.stderr,
+        )
+        return 2
 
     artifact_paths = {
         "raw_runner_output": run_directory / "guidellm-benchmarks.json.gz",
@@ -649,6 +657,8 @@ def package_local_run(args: argparse.Namespace) -> int:
             ],
             "endpoint_type": "openai-compatible",
         }
+        if args.server_description is not None:
+            runtime["server_description"] = required_text(args.server_description, "Server description")
         benchmark = {
             "profile_id": args.profile,
             "profile_sha256": sha256_file(profile_path),
@@ -784,8 +794,15 @@ def build_parser() -> argparse.ArgumentParser:
     package.add_argument("--model", required=True, help="canonical model ID")
     package.add_argument("--model-revision", required=True, help="immutable model revision or commit SHA")
     package.add_argument("--quantization", help="quantization label, such as BF16 or Q4_K_M")
-    package.add_argument("--framework", required=True, choices=["vllm", "sglang", "llama.cpp"], help="inference framework")
+    package.add_argument("--framework", required=True, choices=RUNTIME_FRAMEWORKS, help="inference framework")
     package.add_argument("--framework-version", required=True, help="exact framework version")
+    package.add_argument(
+        "--server-description",
+        help=(
+            "free-text description of the OpenAI-compatible server; "
+            f"required when --framework is {OTHER_SERVER_FRAMEWORK}"
+        ),
+    )
     package.add_argument(
         "--execution-device",
         required=True,
