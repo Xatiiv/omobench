@@ -479,6 +479,28 @@ models:
                     self.assertIn("Model catalog error", stderr)
                     self.assertIn(f"missing a valid '{missing_field}'", stderr)
 
+    def test_gpu_vendor_amd_is_accepted(self) -> None:
+        hardware = copy.deepcopy(VALID_RESULT_TEMPLATE["hardware"])
+        hardware["gpus"][0]["vendor"] = "amd"
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+            result_overrides={"hardware": hardware},
+        )
+        exit_code, stdout, _ = self.run_main()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Validated 1 OmoBench result bundle(s).", stdout)
+
+    def test_invalid_gpu_vendor_is_rejected(self) -> None:
+        hardware = copy.deepcopy(VALID_RESULT_TEMPLATE["hardware"])
+        hardware["gpus"][0]["vendor"] = "not-a-real-vendor"
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+            result_overrides={"hardware": hardware},
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("vendor", stderr)
+
     def test_invalid_models_structure_is_rejected(self) -> None:
         cases = {
             "root_not_a_mapping": "- just\n- a\n- list\n",

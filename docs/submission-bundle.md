@@ -84,9 +84,42 @@ deliberately supplied by the operator. An OpenAI-compatible endpoint cannot
 reliably report those reproducibility-critical facts itself.
 
 OmoBench v1 packages GPU-backed results only. The operator must pass
-`--execution-device gpu` after confirming that the model server used the GPU.
+`--execution-device gpu` after confirming that the model server **genuinely
+ran on the GPU** — `--execution-device gpu` records that confirmation, it
+does not itself verify or cause GPU execution.
+
 CPU-only runs may be useful for local testing, but they are not publishable
 records yet.
+
+## GPU vendor and memory
+
+OmoBench detects NVIDIA, AMD, Intel, and other GPUs; none of it requires
+installing anything beyond the vendor tool a GPU already ships with
+(`nvidia-smi`, `rocm-smi`), and every detection method is best-effort — see
+[docs/quickstart.md](quickstart.md) for exactly how each vendor and OS
+combination is detected. `hardware.gpus[].vendor` is optional in
+`schema/benchmark-run.schema.json`; a `result.json` published before
+vendor-neutral detection existed simply omits it and remains valid.
+
+Some detection paths (notably the Windows CIM fallback) cannot safely
+determine VRAM and record it as unknown rather than guessing. When
+`omobench doctor` shows a detected GPU with no memory value, package that
+run with:
+
+```bash
+omobench package --gpu-memory-gb 16 ...
+```
+
+Before doing so, confirm the real VRAM figure in the serving runtime's own
+startup log or the OS hardware panel — `--gpu-memory-gb` only fills in a
+memory value for a GPU `omobench doctor` already detected; it never invents
+a GPU model or vendor, and `omobench package` still requires at least one
+automatically detected GPU. It is rejected with a clear error if every
+detected GPU already has a known memory value (nothing to fill in), and it
+is rejected as ambiguous if GPUs with unknown memory span more than one
+vendor/model class, since one value cannot be safely applied to more than
+one kind of GPU. Applying it marks `hardware.detection.hardware` as
+`user-confirmed` instead of `auto`.
 
 ## Runtime provenance
 

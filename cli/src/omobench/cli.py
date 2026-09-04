@@ -26,6 +26,53 @@ GUIDELLM_VERSION = "0.7.3"
 RUN_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{7,63}$")
 RUNTIME_FRAMEWORKS = ["vllm", "sglang", "llama.cpp", "lmstudio", "openai-compatible-other"]
 OTHER_SERVER_FRAMEWORK = "openai-compatible-other"
+GPU_VENDORS = ("nvidia", "amd", "intel", "other")
+
+# Substring needles (checked against a lowercased GPU name) used to classify a
+# vendor-neutral detection (Windows CIM, Linux lspci) that has no vendor tool
+# of its own to ask directly. Order matters only in that each vendor's list is
+# checked independently; ambiguous/unmatched names fall back to "other".
+GPU_VENDOR_NAME_NEEDLES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("nvidia", ("nvidia", "geforce", "quadro", "tesla", "rtx", "gtx")),
+    ("amd", ("amd", "radeon", "instinct", "firepro")),
+    ("intel", ("intel", "arc graphics", "iris", "uhd graphics")),
+)
+
+# Windows Win32_VideoController rows that are not a real, physical accelerator
+# (remote/virtual/basic display stacks). Matched as a case-insensitive
+# substring of the reported name.
+NON_PHYSICAL_DISPLAY_ADAPTER_NEEDLES = (
+    "microsoft basic display",
+    "microsoft basic render",
+    "microsoft remote display",
+    "microsoft hyper-v video",
+    "remote desktop",
+    "vmware svga",
+    "virtualbox graphics",
+    "parsec virtual display",
+    "citrix",
+)
+
+
+def classify_gpu_vendor(model_name: str) -> str:
+    """Best-effort vendor classification from a free-text GPU name.
+
+    Used only by vendor-neutral OS fallbacks (Windows CIM, Linux lspci) that
+    report a name string but not a vendor. nvidia-smi/rocm-smi already know
+    their own vendor and never call this.
+    """
+    lowered = model_name.lower()
+    for vendor, needles in GPU_VENDOR_NAME_NEEDLES:
+        if any(needle in lowered for needle in needles):
+            return vendor
+    return "other"
+
+
+def is_non_physical_display_adapter(name: str) -> bool:
+    lowered = name.lower()
+    return any(needle in lowered for needle in NON_PHYSICAL_DISPLAY_ADAPTER_NEEDLES)
+
+
 PROFILE_SPECS: dict[str, dict[str, Any]] = {
     "chat-small-v1": {
         "input_tokens": 1024,
@@ -97,6 +144,7 @@ def detect_nvidia_gpus() -> list[dict[str, Any]]:
             memory_gb = None
         gpus.append(
             {
+                "vendor": "nvidia",
                 "model": name,
                 "memory_gb": memory_gb,
                 "driver_version": driver_version,
@@ -104,6 +152,176 @@ def detect_nvidia_gpus() -> list[dict[str, Any]]:
             }
         )
     return gpus
+
+
+def detect_amd_gpus() -> list[dict[str, Any]]:
+    """Best-effort AMD GPU detection via rocm-smi (Linux only).
+
+    Does not require the user to install ROCm: this only runs when rocm-smi
+    is already on PATH, and any missing/unparseable field degrades to an
+    empty result rather than raising.
+    """
+    if sys.platform == "win32":
+        return []
+    output = command_output(
+        ["rocm-smi", "--showproductname", "--showmeminfo", "vram", "--showdriverversion", "--json"]
+    )
+    if not output:
+        return []
+    try:
+        parsed = json.loads(output)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, dict):
+        return []
+
+    gpus: list[dict[str, Any]] = []
+    for key, card in parsed.items():
+        if not isinstance(card, dict) or not key.lower().startswith("card"):
+            continue
+        name = (
+            card.get("Card series")
+            or card.get("Card Series")
+            or card.get("Device Name")
+            or "AMD GPU"
+        )
+        memory_gb = None
+        for memory_key in ("VRAM Total Memory (B)", "VRAM Total Memory(B)", "VRAM Total (B)"):
+            raw_memory = card.get(memory_key)
+            if raw_memory is None:
+                continue
+            try:
+                memory_gb = round(int(raw_memory) / (1024**3), 2)
+            except (TypeError, ValueError):
+                memory_gb = None
+            break
+        driver_version = card.get("Driver version") or card.get("Driver Version")
+        gpus.append(
+            {
+                "vendor": "amd",
+                "model": str(name),
+                "memory_gb": memory_gb,
+                "driver_version": str(driver_version).strip() if driver_version else None,
+                "detected_by": "rocm-smi",
+            }
+        )
+    return gpus
+
+
+def detect_windows_cim_gpus() -> list[dict[str, Any]]:
+    """Best-effort, vendor-neutral Windows GPU fallback via Win32_VideoController.
+
+    Deliberately does not read AdapterRAM: it is capped/unreliable under
+    modern Windows drivers (observed reporting 4 GB for a 16 GB RX 9070), so
+    memory is always null here and must come from a specialised tool (for
+    example nvidia-smi) or --gpu-memory-gb at packaging time.
+    """
+    if sys.platform != "win32":
+        return []
+    output = command_output(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-CimInstance Win32_VideoController | Select-Object Name,DriverVersion | ConvertTo-Json -Compress",
+        ]
+    )
+    if not output:
+        return []
+    try:
+        parsed = json.loads(output)
+    except json.JSONDecodeError:
+        return []
+    entries = parsed if isinstance(parsed, list) else [parsed]
+
+    gpus: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("Name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        name = name.strip()
+        if is_non_physical_display_adapter(name):
+            continue
+        driver_version = entry.get("DriverVersion")
+        gpus.append(
+            {
+                "vendor": classify_gpu_vendor(name),
+                "model": name,
+                "memory_gb": None,
+                "driver_version": (
+                    driver_version.strip() if isinstance(driver_version, str) and driver_version.strip() else None
+                ),
+                "detected_by": "win32_videocontroller",
+            }
+        )
+    return gpus
+
+
+def detect_linux_pci_gpus() -> list[dict[str, Any]]:
+    """Best-effort, vendor-neutral Linux GPU fallback via lspci.
+
+    Used so AMD/Intel hardware is not invisible merely because rocm-smi (or
+    an equivalent vendor tool) is absent. lspci exposes no memory or driver
+    version, so both are always null here.
+    """
+    if not sys.platform.startswith("linux"):
+        return []
+    output = command_output(["lspci", "-mm"])
+    if not output:
+        return []
+
+    gpu_classes = ("vga compatible controller", "3d controller", "display controller")
+    gpus: list[dict[str, Any]] = []
+    for line in output.splitlines():
+        try:
+            fields = shlex.split(line)
+        except ValueError:
+            continue
+        if len(fields) < 4:
+            continue
+        device_class = fields[1].lower()
+        if not any(device_class.startswith(gpu_class) for gpu_class in gpu_classes):
+            continue
+        model = f"{fields[2]} {fields[3]}".strip()
+        if not model:
+            continue
+        gpus.append(
+            {
+                "vendor": classify_gpu_vendor(model),
+                "model": model,
+                "memory_gb": None,
+                "driver_version": None,
+                "detected_by": "lspci",
+            }
+        )
+    return gpus
+
+
+def detect_gpus() -> list[dict[str, Any]]:
+    """Vendor-neutral GPU aggregator.
+
+    Specialised vendor tools (nvidia-smi, rocm-smi) are preferred whenever
+    they succeed, since they report real memory and driver values. The OS
+    fallback (Windows CIM / Linux lspci) only supplies vendors that no
+    specialised tool already covered, so the same physical GPU is never
+    reported twice and a lower-quality (null-memory) record never shadows a
+    higher-quality one.
+    """
+    specialized = detect_nvidia_gpus() + detect_amd_gpus()
+    covered_vendors = {gpu["vendor"] for gpu in specialized}
+
+    if sys.platform == "win32":
+        fallback = detect_windows_cim_gpus()
+    elif sys.platform.startswith("linux"):
+        fallback = detect_linux_pci_gpus()
+    else:
+        fallback = []
+
+    supplemental = [gpu for gpu in fallback if gpu["vendor"] not in covered_vendors]
+    return specialized + supplemental
 
 
 def detect_cpu() -> str | None:
@@ -164,7 +382,7 @@ def doctor_report() -> dict[str, Any]:
         "guidellm": executable_version("guidellm"),
         "git": executable_version("git"),
         "github_cli": executable_version("gh"),
-        "nvidia_gpus": detect_nvidia_gpus(),
+        "gpus": detect_gpus(),
     }
 
 
@@ -437,6 +655,7 @@ def hardware_from_environment(
     environment: dict[str, Any],
     cpu_override: str | None,
     ram_gb_override: float | None,
+    gpu_memory_gb_override: float | None = None,
 ) -> dict[str, Any]:
     cpu = required_text(cpu_override or environment.get("cpu"), "CPU")
     ram_gb_value = ram_gb_override if ram_gb_override is not None else environment.get("ram_gb")
@@ -446,30 +665,89 @@ def hardware_from_environment(
     if not math.isfinite(ram_gb) or ram_gb <= 0:
         raise ValueError("RAM must be a finite positive number.")
 
-    detected_gpus = environment.get("nvidia_gpus")
-    if not isinstance(detected_gpus, list) or not detected_gpus:
-        raise ValueError("No NVIDIA GPUs were detected for this run; OmoBench v1 packaging requires a detected GPU.")
+    if gpu_memory_gb_override is not None and (
+        isinstance(gpu_memory_gb_override, bool)
+        or not isinstance(gpu_memory_gb_override, int | float)
+        or not math.isfinite(gpu_memory_gb_override)
+        or gpu_memory_gb_override <= 0
+    ):
+        raise ValueError("--gpu-memory-gb must be a finite positive number.")
 
-    grouped_gpus: dict[tuple[str, float], int] = {}
+    # "gpus" is the generic key written by current doctor_report()/environment.json.
+    # Older staged runs recorded the same shape under the legacy "nvidia_gpus"
+    # key; fall back to it so an already-executed staging directory still
+    # packages without having to re-run the benchmark.
+    detected_gpus = environment.get("gpus")
+    using_legacy_key = detected_gpus is None
+    if using_legacy_key:
+        detected_gpus = environment.get("nvidia_gpus")
+    if not isinstance(detected_gpus, list) or not detected_gpus:
+        raise ValueError("No GPUs were detected for this run; OmoBench v1 packaging requires a detected GPU.")
+
+    parsed_gpus: list[dict[str, Any]] = []
     driver_versions: set[str] = set()
     for index, gpu in enumerate(detected_gpus, start=1):
         if not isinstance(gpu, dict):
             raise ValueError(f"Detected GPU {index} is invalid.")
         model = required_text(gpu.get("model"), f"Detected GPU {index} model")
+        vendor = gpu.get("vendor")
+        if vendor is None:
+            # Legacy nvidia_gpus entries predate the vendor field but are, by
+            # definition, NVIDIA; a hand-authored generic "gpus" entry with no
+            # vendor is treated as unknown rather than guessed at.
+            vendor = "nvidia" if using_legacy_key else "other"
+        elif not isinstance(vendor, str) or vendor not in GPU_VENDORS:
+            raise ValueError(f"Detected GPU {index} vendor is invalid.")
+
         memory_value = gpu.get("memory_gb")
-        if isinstance(memory_value, bool) or not isinstance(memory_value, int | float):
+        if memory_value is None:
+            memory_gb: float | None = None
+        elif isinstance(memory_value, bool) or not isinstance(memory_value, int | float):
             raise ValueError(f"Detected GPU {index} memory is invalid.")
-        memory_gb = float(memory_value)
-        if not math.isfinite(memory_gb) or memory_gb <= 0:
-            raise ValueError(f"Detected GPU {index} memory must be positive.")
-        grouped_gpus[(model, memory_gb)] = grouped_gpus.get((model, memory_gb), 0) + 1
+        else:
+            memory_gb = float(memory_value)
+            if not math.isfinite(memory_gb) or memory_gb <= 0:
+                raise ValueError(f"Detected GPU {index} memory must be positive.")
+
+        parsed_gpus.append({"vendor": vendor, "model": model, "memory_gb": memory_gb})
         driver = gpu.get("driver_version")
         if isinstance(driver, str) and driver.strip():
             driver_versions.add(driver.strip())
 
+    unknown_memory_gpus = [gpu for gpu in parsed_gpus if gpu["memory_gb"] is None]
+    hardware_detection_state = "auto"
+    if unknown_memory_gpus:
+        classes = sorted({(gpu["vendor"], gpu["model"]) for gpu in unknown_memory_gpus})
+        if gpu_memory_gb_override is None:
+            class_list = ", ".join(f"{vendor}:{model}" for vendor, model in classes)
+            raise ValueError(
+                f"Detected GPU(s) with unknown memory: {class_list}. Supply --gpu-memory-gb to "
+                "record their VRAM; confirm the value in the serving runtime's hardware panel first."
+            )
+        if len(classes) > 1:
+            class_list = ", ".join(f"{vendor}:{model}" for vendor, model in classes)
+            raise ValueError(
+                "Cannot apply --gpu-memory-gb: unknown-memory GPUs span more than one "
+                f"vendor/model class ({class_list}). This value can only be applied when every "
+                "GPU with unknown memory is the same vendor and model."
+            )
+        for gpu in unknown_memory_gpus:
+            gpu["memory_gb"] = gpu_memory_gb_override
+        hardware_detection_state = "user-confirmed"
+    elif gpu_memory_gb_override is not None:
+        raise ValueError(
+            "--gpu-memory-gb was supplied, but every detected GPU already has a known memory "
+            "value; remove --gpu-memory-gb instead of overriding detected facts."
+        )
+
+    grouped_gpus: dict[tuple[str, str, float], int] = {}
+    for gpu in parsed_gpus:
+        key = (gpu["vendor"], gpu["model"], gpu["memory_gb"])
+        grouped_gpus[key] = grouped_gpus.get(key, 0) + 1
+
     gpus = [
-        {"model": model, "memory_gb": memory_gb, "count": count}
-        for (model, memory_gb), count in sorted(grouped_gpus.items())
+        {"vendor": vendor, "model": model, "memory_gb": memory_gb, "count": count}
+        for (vendor, model, memory_gb), count in sorted(grouped_gpus.items())
     ]
     return {
         "os": required_text(environment.get("operating_system"), "Operating system"),
@@ -478,7 +756,11 @@ def hardware_from_environment(
         "gpus": gpus,
         "driver_version": next(iter(driver_versions)) if len(driver_versions) == 1 else None,
         "detection": {
-            "hardware": "user-confirmed" if cpu_override or ram_gb_override is not None else "auto",
+            "hardware": (
+                "user-confirmed"
+                if cpu_override or ram_gb_override is not None or hardware_detection_state == "user-confirmed"
+                else "auto"
+            ),
             "model": "manual",
             "runtime": "manual",
         },
@@ -634,7 +916,9 @@ def package_local_run(args: argparse.Namespace) -> int:
         )
         if not isinstance(environment, dict):
             raise ValueError("environment.json must contain an object at its root.")
-        hardware = hardware_from_environment(environment, args.cpu, args.ram_gb)
+        hardware = hardware_from_environment(
+            environment, args.cpu, args.ram_gb, getattr(args, "gpu_memory_gb", None)
+        )
         profile_path = root / "benchmarks" / "profiles" / f"{args.profile}.yaml"
         if not profile_path.is_file():
             raise ValueError(f"Missing profile definition: {profile_path}")
@@ -755,14 +1039,16 @@ def print_doctor(report: dict[str, Any]) -> None:
     print(f"GuideLLM: {report['guidellm'] or 'not found'}")
     print(f"Git: {report['git'] or 'not found'}")
     print(f"GitHub CLI: {report['github_cli'] or 'not found'}")
-    gpus = report["nvidia_gpus"]
+    gpus = report["gpus"]
     if not gpus:
-        print("NVIDIA GPUs: none detected")
+        print("GPUs: none detected")
         return
-    print("NVIDIA GPUs:")
+    print("GPUs:")
     for gpu in gpus:
         memory = f"{gpu['memory_gb']} GB" if gpu["memory_gb"] is not None else "unknown memory"
-        print(f"  - {gpu['model']} ({memory}, driver {gpu['driver_version']})")
+        driver = gpu["driver_version"] or "unknown"
+        vendor = gpu.get("vendor", "other")
+        print(f"  - [{vendor}] {gpu['model']} ({memory}, driver {driver})")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -817,6 +1103,16 @@ def build_parser() -> argparse.ArgumentParser:
     package.add_argument("--repeat-of-run-id", help="previous run ID when this is a repeat")
     package.add_argument("--cpu", help="override the detected CPU description")
     package.add_argument("--ram-gb", type=float, help="override detected RAM in gigabytes")
+    package.add_argument(
+        "--gpu-memory-gb",
+        type=float,
+        help=(
+            "VRAM per GPU, in gigabytes, for a detected GPU whose memory could not be safely "
+            "determined (for example the Windows CIM fallback). Confirm this value in the "
+            "serving runtime's or hardware panel's own VRAM report first; it only fills in "
+            "memory for an already-detected GPU and does not invent a GPU model or vendor."
+        ),
+    )
     package.add_argument("--force", action="store_true", help="allow replacement of an existing local result.json")
 
     return parser
