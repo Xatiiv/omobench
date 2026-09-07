@@ -1,135 +1,264 @@
 # OmoBench
 
-OmoBench is a GitHub-backed registry of reproducible self-hosted language-model
-inference benchmarks. The MVP proves a small, inspectable loop: run a versioned
-profile, store the raw evidence, submit it in a GitHub pull request, and compare
-the validated result on a public site.
+> Reproducible, GitHub-backed benchmarks for self-hosted language-model inference.
 
-## OmoBench core
+OmoBench is a public registry and test harness for comparing how open-weight
+language models perform when **you run them yourself**. It applies the same
+versioned workload to an existing OpenAI-compatible model server, records the
+raw evidence, validates the submission in GitHub, and displays the normalized
+result on the website.
 
-- `benchmarks/profiles/` — immutable, versioned workload definitions
-- `catalog/models/` — the initial eligible-model list and licence notes
-- `schema/` — the submitted-result contract
-- `cli/` — the `omobench` command-line tool
-- `results/` — submitted benchmark evidence, grouped by model and run
-- `app/` — the comparison website
+It is deliberately **not** a model host, model downloader, cloud GPU service,
+or automatic GPU verifier. You choose and run the model server; OmoBench makes
+the resulting performance claim inspectable and comparable.
 
-### First local commands
+## What OmoBench v1 covers
+
+- Open-weight, text-generation models.
+- Streaming OpenAI-compatible `/v1/chat/completions` endpoints.
+- GPU-backed public results.
+- Reproducible server provenance for `vllm`, `sglang`, `llama.cpp`,
+  `lmstudio`, and documented generic OpenAI-compatible servers.
+- NVIDIA, AMD, Intel, and other GPU metadata.
+
+The public registry accepts only models listed in `catalog/models/*.yaml`
+with `modality: text-generation`. You may stage a local test for another
+model, but GitHub validation will reject it until a catalog entry is added.
+
+## How a result moves through the system
+
+1. **Run a model server** yourself and expose an OpenAI-compatible chat endpoint.
+2. **Run an OmoBench profile** against that endpoint using the `omobench` CLI.
+3. **Keep local evidence**: raw GuideLLM output, a redacted runner log,
+   environment snapshot, and reproduction command.
+4. **Package** that evidence into a normalized `result.json` with model,
+   runtime, hardware, and profile metadata.
+5. **Submit the complete bundle in a GitHub pull request**.
+6. **CI validates the bundle**, then the website reads the committed summary and
+   displays it.
+
+Nothing becomes public when you run or package a benchmark locally.
+
+## Fixed benchmark profiles
+
+Profiles are versioned files under `benchmarks/profiles/`. Do not compare
+results from different profiles as if they measured the same thing.
+
+| Profile | Purpose | Input → requested output | Concurrent streams | Measured requests |
+| --- | --- | ---: | ---: | ---: |
+| `chat-small-v1` | Interactive chat responsiveness | 1,024 → 256 tokens | 1 | 50 |
+| `chat-long-v1` | Long-context chat latency | 8,192 → 512 tokens | 1 | 30 |
+| `throughput-v1` | Sustained serving throughput | 1,024 → 256 tokens | 16 | 160 |
+
+All profiles use deterministic synthetic prompts, streaming responses, warm-up
+and cool-down traffic, and a 1% maximum error-rate constraint.
+
+## Run a benchmark
+
+### 1. Prerequisites
+
+For a contributor running a benchmark, you need:
+
+- Git and Python 3.10 or later.
+- A reachable model server with streaming `/v1/chat/completions`.
+- A real GPU-backed server for a publishable v1 result.
+- Linux, macOS, or WSL2 for the current `--execute` flow; native Windows is currently unsupported for execution.
+
+Native Windows is fine for VS Code, website development, CLI checks, and dry
+runs. The current `cli[runner]` extra installs
+`guidellm[recommended]==0.7.3`, whose dependency set includes `uvloop`;
+that does not install under native Windows. Run the actual benchmark command
+from WSL2 or another Linux host instead.
+
+Node.js 22.13 or later is needed only when you are developing or building the
+website.
+
+### 2. Install the CLI
+
+From an OmoBench checkout:
 
 ```bash
+# Linux, macOS, or WSL2
 python3 -m venv .venv
 source .venv/bin/activate
+
 pip install -e ./cli
 omobench doctor
 omobench profiles
 ```
 
-`doctor` inspects local prerequisites. It does not run a benchmark.
+For Windows Git Bash development:
 
-## Prerequisites
-
-- Node.js `>=22.13.0`
-- Linux with `flock`, `curl`, and GNU `timeout`
-
-## Sites Lifecycle
-
-The Sites lifecycle CLI runs the locked dependency install before returning this checkout. Edit the source under `app/`, then checkpoint when a coherent milestone is ready to inspect or share. The remote Sites builder runs `npm run build` against the pushed commit. Do not repeat install or build as a normal pre-checkpoint step.
-
-This starter does not use `wrangler.jsonc`.
-
-`install:ci` is intentionally a single, non-retrying `npm ci`. It refuses a concurrent install for the same project, consumes a matching image-seeded npm cache with `--prefer-offline` while retaining registry fallback for a missing cache object, otherwise downloads and verifies the complete vinext tarball recorded in `package-lock.json`, limits npm to one socket, and terminates a stalled install. `build` applies a short timeout. These helpers target Linux and use GNU `timeout`; they are not native macOS scripts.
-
-Scripts that need writable project-scoped home, npm, XDG, and temporary paths use `scripts/sites-env.sh`. The `dev` and `start` scripts honor the caller's runtime environment and keep Wrangler logs inside the checkout. The generated `.sites-runtime/` directory is disposable and ignored by Git.
-
-## Included Shape
-
-- edit site code under `app/`
-- `app/chatgpt-auth.ts` provides optional dispatch-owned ChatGPT sign-in helpers
-- `.openai/hosting.json` declares optional Sites D1 and R2 bindings
-- `vite.config.ts` simulates declared bindings for local development
-- `db/index.ts` reads the D1 binding from the Cloudflare Worker environment
-- `db/schema.ts` starts intentionally empty
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
-
-## Workspace Auth Headers
-
-OpenAI workspace sites can read the current user's email from
-`oai-authenticated-user-email`.
-
-SIWC-authenticated workspace sites may also receive
-`oai-authenticated-user-full-name` when the user's SIWC profile has a non-empty
-`name` claim. The full-name value is percent-encoded UTF-8 and is accompanied by
-`oai-authenticated-user-full-name-encoding: percent-encoded-utf-8`.
-
-Treat the full name as optional and fall back to email when it is absent:
-
-```tsx
-import { headers } from "next/headers";
-
-export default async function Home() {
-  const requestHeaders = await headers();
-  const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
-      "percent-encoded-utf-8"
-      ? decodeURIComponent(encodedFullName)
-      : null;
-
-  const displayName = fullName ?? email;
-  // ...
-}
+```bash
+python -m venv .venv
+source .venv/Scripts/activate
+pip install -e ./cli
 ```
 
-## Optional Dispatch-Owned ChatGPT Sign-In
+`omobench doctor` reports the machine and tools visible to the shell. It
+does not start a model or prove that your server is using a GPU.
 
-Import the ready-to-use helpers from `app/chatgpt-auth.ts` when the site needs
-optional or required ChatGPT sign-in:
+### 3. Start your model server separately
 
-- Use `getChatGPTUser()` for optional signed-in UI.
-- Use `requireChatGPTUser(returnTo)` for server-rendered pages that should send
-  anonymous visitors through Sign in with ChatGPT.
-- In a Server Component, start sign-in with
-  `<a href={chatGPTSignInPath(returnTo)} target="_top">`. The auth helper
-  module is server-only; do not import it into a Client Component.
-- Do not use `fetch`, XHR, a client-side router, or a framework link that can
-  prefetch the sign-in route. SIWC must start as a top-level navigation.
-- Never request the AuthAPI authorization endpoint directly. The dispatch-owned
-  `/signin-with-chatgpt` route must start the SIWC flow.
-- Use `chatGPTSignOutPath(returnTo)` for browser sign-out links or actions.
-- Pass a same-origin relative `returnTo` path for the destination after sign-in
-  or sign-out. The helper validates and safely encodes it.
-- Mark protected pages with `export const dynamic = "force-dynamic"` because
-  they depend on per-request identity headers.
+Start a compatible server using the software you chose, such as LM Studio,
+llama.cpp, vLLM, or SGLang. Confirm that it can answer a streaming request at
+an endpoint like:
 
-Dispatch owns `/signin-with-chatgpt`, `/signout-with-chatgpt`, `/callback`, the
-OAuth cookies, and identity header injection. Do not implement app routes for
-those reserved paths. Routes that do not import and call the helper remain
-anonymous-compatible.
+```text
+http://localhost:8000/v1/chat/completions
+```
 
-SIWC establishes identity only; it does not prove workspace membership. Use the
-Sites hosting platform's access policy controls for workspace-wide restrictions,
-or enforce explicit server-side membership or allowlist checks.
+Before publishing a GPU result, confirm in that server's own logs or hardware
+panel that inference actually ran on the GPU. Passing
+`--execution-device gpu` records your confirmation; it does not cause or
+independently prove GPU execution.
 
-Use SIWC for account pages, user-specific dashboards, saved records, and write
-actions tied to the current ChatGPT user. Leave public content anonymous.
+### 4. Inspect the exact command first
 
-## Diagnostic Commands
+Install the pinned runner when you are ready to contact the endpoint:
 
-- `npm run install:ci`: perform the one bounded lockfile install
-- `npm run dev`: start the Vite/Vinext development server
-- `npm run build`: build the deployable Sites artifact
-- `npm run start`: start the built Vinext application
-- `npm test`: build and verify the rendered development-preview metadata
-- `npm run db:generate`: generate Drizzle migrations after schema changes
+```bash
+pip install -e './cli[runner]'
 
-Use build commands for targeted diagnosis after a remote failure, not as part of the normal checkpoint path.
+omobench run \
+  --endpoint http://localhost:8000/v1 \
+  --model Qwen/Qwen3-4B \
+  --profile chat-small-v1
+```
 
-The timeout defaults can be overridden for a controlled canary with `SITES_INSTALL_TIMEOUT`, `SITES_INSTALL_KILL_AFTER`, `SITES_BUILD_TIMEOUT`, and `SITES_BUILD_KILL_AFTER`. A timeout fails the command; the helpers never retry an unchanged install or build.
+Without `--execute`, this is a dry run: it prints the exact GuideLLM command
+and does not contact the endpoint.
 
-## Learn More
+### 5. Execute the profile
 
-- [vinext Documentation](https://github.com/cloudflare/vinext)
-- [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+```bash
+omobench run \
+  --endpoint http://localhost:8000/v1 \
+  --model Qwen/Qwen3-4B \
+  --profile chat-small-v1 \
+  --execute
+```
+
+This creates a Git-ignored staging directory such as:
+
+```text
+.omobench-runs/run-xxxxxxxxxxxx/
+  guidellm-benchmarks.json.gz
+  guidellm.stdout.log
+  environment.json
+  reproduce.md
+```
+
+The endpoint is redacted from the saved runner log and reproduction command.
+Do not put tokens, API keys, hostnames, model weights, or private prompts in a
+submission.
+
+### 6. Package the local evidence
+
+```bash
+omobench package \
+  --run-dir .omobench-runs/run-EXAMPLE \
+  --model Qwen/Qwen3-4B \
+  --model-revision YOUR_IMMUTABLE_MODEL_REVISION \
+  --quantization Q4_K_M \
+  --framework llama.cpp \
+  --framework-version "YOUR_EXACT_VERSION" \
+  --execution-device gpu \
+  --runtime-arg "--ctx-size=4096" \
+  --profile chat-small-v1 \
+  --submitter YOUR_GITHUB_USERNAME
+```
+
+The package command writes `result.json` beside the evidence. It records:
+
+- model ID, immutable revision, and quantization;
+- server framework, exact version, and startup arguments;
+- OS, CPU, RAM, GPU model/vendor/VRAM, and driver;
+- profile ID and profile hash;
+- latency, throughput, request, and error metrics;
+- SHA-256 hashes for every evidence artifact.
+
+Some Windows GPU detection paths can identify a GPU but cannot safely read its
+VRAM. In that case, confirm the real VRAM in the serving runtime or hardware
+panel and add `--gpu-memory-gb 16` (using the appropriate value). It only
+fills missing memory for a GPU OmoBench already detected; it cannot invent a
+GPU or override a known value.
+
+For `--framework openai-compatible-other`, also supply a meaningful
+`--server-description`.
+
+## Read the results
+
+| Metric | Meaning | Better direction |
+| --- | --- | --- |
+| TTFT p50 / p95 | Time until the first streamed token arrives | Lower |
+| Inter-token latency p50 / p95 | Delay between generated tokens | Lower |
+| Output tokens/sec | Generation speed after output begins | Higher |
+| Total tokens/sec | Overall token-processing rate | Higher |
+| Requests/sec | Completed request rate for that profile | Higher |
+| Error rate | Failed request percentage | Lower |
+
+OmoBench does not currently treat peak memory as a trustworthy comparable v1
+metric, so it is not a headline score.
+
+## Submit a public result
+
+When the local result is correct, copy the **complete** run directory into the
+repository:
+
+```text
+results/<model-slug>/<YYYY-MM-DD>-<run-id>/
+  result.json
+  guidellm-benchmarks.json.gz
+  guidellm.stdout.log
+  environment.json
+  reproduce.md
+```
+
+Validate it locally:
+
+```bash
+python tools/validate_results.py
+```
+
+Then create a normal Git branch and pull request. CI checks the schema,
+artifact hashes and paths, model catalog eligibility, immutable revision,
+duplicate runs, CLI tests, validator tests, website lint, and website build.
+
+A `configuration_fingerprint` distinguishes a real repeat from an accidental
+duplicate: the same configuration plus the same raw output is rejected; the
+same configuration with new raw evidence is a valid repeat.
+
+## Repository map
+
+| Directory | Purpose |
+| --- | --- |
+| `benchmarks/profiles/` | Immutable workload definitions |
+| `catalog/models/` | Eligible public models and licence metadata |
+| `cli/` | The `omobench` command-line tool |
+| `schema/` | Public `result.json` contract |
+| `results/` | Submitted evidence bundles |
+| `tools/` | Registry validator and its tests |
+| `app/` | Comparison website |
+
+The website imports only normalized `result.json` files at build time. Raw
+evidence remains in GitHub for review rather than being shipped to every
+visitor's browser.
+
+## Develop the website
+
+Website work is separate from running a benchmark:
+
+```bash
+npm ci
+npm run dev
+npm run lint
+npm run build
+```
+
+## More documentation
+
+- [Local setup and runner notes](docs/quickstart.md)
+- [Submission-bundle contract](docs/submission-bundle.md)
+- [Benchmark-result JSON schema](schema/benchmark-run.schema.json)
+- [Eligible-model catalog](catalog/models/seed-v1.yaml)
