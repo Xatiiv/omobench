@@ -62,7 +62,7 @@ For a contributor running a benchmark, you need:
 - Git and Python 3.10 or later.
 - A reachable model server with streaming `/v1/chat/completions`.
 - A real GPU-backed server for a publishable v1 result.
-- Linux or WSL2 for the current `--execute` flow.
+- Linux, macOS, or WSL2 for the current `--execute` flow; native Windows is currently unsupported for execution.
 
 Native Windows is fine for VS Code, website development, CLI checks, and dry
 runs. The current `cli[runner]` extra installs
