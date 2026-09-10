@@ -1,264 +1,230 @@
 # OmoBench
 
-> Reproducible, GitHub-backed benchmarks for self-hosted language-model inference.
+> Reproducible benchmarks for language models you run yourself, with evidence reviewed through GitHub.
 
-OmoBench is a public registry and test harness for comparing how open-weight
-language models perform when **you run them yourself**. It applies the same
-versioned workload to an existing OpenAI-compatible model server, records the
-raw evidence, validates the submission in GitHub, and displays the normalized
-result on the website.
+OmoBench measures how quickly a self-hosted, open-weight language model responds
+to a fixed workload. It records latency, token throughput, request counts, and
+errors alongside the model, runtime, and hardware configuration. Contributors
+can submit complete evidence bundles through pull requests for comparison on
+the website.
 
-It is deliberately **not** a model host, model downloader, cloud GPU service,
-or automatic GPU verifier. You choose and run the model server; OmoBench makes
-the resulting performance claim inspectable and comparable.
+You can now control a benchmark through a **local browser panel**. Its buttons
+run the existing CLI and pinned GuideLLM runner. CPU measurements are available
+locally; public v1 submissions require confirmed GPU execution and a model in
+the [eligible-model catalog](catalog/models/seed-v1.yaml).
 
-## What OmoBench v1 covers
+## Start here
 
-- Open-weight, text-generation models.
-- Streaming OpenAI-compatible `/v1/chat/completions` endpoints.
-- GPU-backed public results.
-- Reproducible server provenance for `vllm`, `sglang`, `llama.cpp`,
-  `lmstudio`, and documented generic OpenAI-compatible servers.
-- NVIDIA, AMD, Intel, and other GPU metadata.
+- **Install or update OmoBench:** [Setup guide](docs/quickstart.md).
+- **Run a real CPU benchmark, including starting the model:** [CPU demo walkthrough](docs/local-demo.md).
+- **Use the panel or submit a GPU run:** [Browser control guide](docs/browser-control.md).
+- **Use terminal commands directly:** [CLI workflow](docs/quickstart.md#run-directly-from-the-cli).
+- **Develop the comparison website:** [Website development](#develop-the-comparison-website).
 
-The public registry accepts only models listed in `catalog/models/*.yaml`
-with `modality: text-generation`. You may stage a local test for another
-model, but GitHub validation will reject it until a catalog entry is added.
+## What runs where
 
-## How a result moves through the system
-
-1. **Run a model server** yourself and expose an OpenAI-compatible chat endpoint.
-2. **Run an OmoBench profile** against that endpoint using the `omobench` CLI.
-3. **Keep local evidence**: raw GuideLLM output, a redacted runner log,
-   environment snapshot, and reproduction command.
-4. **Package** that evidence into a normalized `result.json` with model,
-   runtime, hardware, and profile metadata.
-5. **Submit the complete bundle in a GitHub pull request**.
-6. **CI validates the bundle**, then the website reads the committed summary and
-   displays it.
-
-Nothing becomes public when you run or package a benchmark locally.
-
-## Fixed benchmark profiles
-
-Profiles are versioned files under `benchmarks/profiles/`. Do not compare
-results from different profiles as if they measured the same thing.
-
-| Profile | Purpose | Input → requested output | Concurrent streams | Measured requests |
-| --- | --- | ---: | ---: | ---: |
-| `chat-small-v1` | Interactive chat responsiveness | 1,024 → 256 tokens | 1 | 50 |
-| `chat-long-v1` | Long-context chat latency | 8,192 → 512 tokens | 1 | 30 |
-| `throughput-v1` | Sustained serving throughput | 1,024 → 256 tokens | 16 | 160 |
-
-All profiles use deterministic synthetic prompts, streaming responses, warm-up
-and cool-down traffic, and a 1% maximum error-rate constraint.
-
-## Run a benchmark
-
-### 1. Prerequisites
-
-For a contributor running a benchmark, you need:
-
-- Git and Python 3.10 or later.
-- A reachable model server with streaming `/v1/chat/completions`.
-- A real GPU-backed server for a publishable v1 result.
-- Linux, macOS, or WSL2 for the current `--execute` flow; native Windows is currently unsupported for execution.
-
-Native Windows is fine for VS Code, website development, CLI checks, and dry
-runs. The current `cli[runner]` extra installs
-`guidellm[recommended]==0.7.3`, whose dependency set includes `uvloop`;
-that does not install under native Windows. Run the actual benchmark command
-from WSL2 or another Linux host instead.
-
-Node.js 22.13 or later is needed only when you are developing or building the
-website.
-
-### 2. Install the CLI
-
-From an OmoBench checkout:
-
-```bash
-# Linux, macOS, or WSL2
-python3 -m venv .venv
-source .venv/bin/activate
-
-pip install -e ./cli
-omobench doctor
-omobench profiles
-```
-
-For Windows Git Bash development:
-
-```bash
-python -m venv .venv
-source .venv/Scripts/activate
-pip install -e ./cli
-```
-
-`omobench doctor` reports the machine and tools visible to the shell. It
-does not start a model or prove that your server is using a GPU.
-
-### 3. Start your model server separately
-
-Start a compatible server using the software you chose, such as LM Studio,
-llama.cpp, vLLM, or SGLang. Confirm that it can answer a streaming request at
-an endpoint like:
-
-```text
-http://localhost:8000/v1/chat/completions
-```
-
-Before publishing a GPU result, confirm in that server's own logs or hardware
-panel that inference actually ran on the GPU. Passing
-`--execution-device gpu` records your confirmation; it does not cause or
-independently prove GPU execution.
-
-### 4. Inspect the exact command first
-
-Install the pinned runner when you are ready to contact the endpoint:
-
-```bash
-pip install -e './cli[runner]'
-
-omobench run \
-  --endpoint http://localhost:8000/v1 \
-  --model Qwen/Qwen3-4B \
-  --profile chat-small-v1
-```
-
-Without `--execute`, this is a dry run: it prints the exact GuideLLM command
-and does not contact the endpoint.
-
-### 5. Execute the profile
-
-```bash
-omobench run \
-  --endpoint http://localhost:8000/v1 \
-  --model Qwen/Qwen3-4B \
-  --profile chat-small-v1 \
-  --execute
-```
-
-This creates a Git-ignored staging directory such as:
-
-```text
-.omobench-runs/run-xxxxxxxxxxxx/
-  guidellm-benchmarks.json.gz
-  guidellm.stdout.log
-  environment.json
-  reproduce.md
-```
-
-The endpoint is redacted from the saved runner log and reproduction command.
-Do not put tokens, API keys, hostnames, model weights, or private prompts in a
-submission.
-
-### 6. Package the local evidence
-
-```bash
-omobench package \
-  --run-dir .omobench-runs/run-EXAMPLE \
-  --model Qwen/Qwen3-4B \
-  --model-revision YOUR_IMMUTABLE_MODEL_REVISION \
-  --quantization Q4_K_M \
-  --framework llama.cpp \
-  --framework-version "YOUR_EXACT_VERSION" \
-  --execution-device gpu \
-  --runtime-arg "--ctx-size=4096" \
-  --profile chat-small-v1 \
-  --submitter YOUR_GITHUB_USERNAME
-```
-
-The package command writes `result.json` beside the evidence. It records:
-
-- model ID, immutable revision, and quantization;
-- server framework, exact version, and startup arguments;
-- OS, CPU, RAM, GPU model/vendor/VRAM, and driver;
-- profile ID and profile hash;
-- latency, throughput, request, and error metrics;
-- SHA-256 hashes for every evidence artifact.
-
-Some Windows GPU detection paths can identify a GPU but cannot safely read its
-VRAM. In that case, confirm the real VRAM in the serving runtime or hardware
-panel and add `--gpu-memory-gb 16` (using the appropriate value). It only
-fills missing memory for a GPU OmoBench already detected; it cannot invent a
-GPU or override a known value.
-
-For `--framework openai-compatible-other`, also supply a meaningful
-`--server-description`.
-
-## Read the results
-
-| Metric | Meaning | Better direction |
+| Component | What it does | How it starts |
 | --- | --- | --- |
-| TTFT p50 / p95 | Time until the first streamed token arrives | Lower |
-| Inter-token latency p50 / p95 | Delay between generated tokens | Lower |
-| Output tokens/sec | Generation speed after output begins | Higher |
-| Total tokens/sec | Overall token-processing rate | Higher |
-| Requests/sec | Completed request rate for that profile | Higher |
-| Error rate | Failed request percentage | Lower |
+| Your model server | Loads weights and performs inference on CPU or GPU | Start llama.cpp, LM Studio, vLLM, or another compatible server separately |
+| Local OmoBench panel | Tests the connection, runs the CLI, shows logs/results, and prepares submissions | `omobench ui`; normally `127.0.0.1:8765` |
+| Comparison website | Displays illustrative demo rows and a separate registry of committed results | Visit the hosted site, or use `npm run dev` locally |
 
-OmoBench does not currently treat peak memory as a trustworthy comparable v1
-metric, so it is not a headline score.
+The panel needs a running model server. It does not download models, start that
+server, or select its hardware for you. The website's **Run a benchmark** page
+explains how to launch the local panel; visiting the hosted site does not start
+programs on your computer.
 
-## Submit a public result
+## Run through the browser
 
-When the local result is correct, copy the **complete** run directory into the
-repository:
+### 1. Prepare OmoBench
 
-```text
-results/<model-slug>/<YYYY-MM-DD>-<run-id>/
-  result.json
-  guidellm-benchmarks.json.gz
-  guidellm.stdout.log
-  environment.json
-  reproduce.md
-```
+Use Linux, macOS, or **Ubuntu inside WSL2** for benchmark execution. Python 3.12
+is used in CI and is the recommended version for the setup walkthrough.
 
-Validate it locally:
+On Windows, keep your existing VS Code window and checkout. In its terminal,
+enter WSL before using Linux commands:
 
 ```bash
-python tools/validate_results.py
+wsl.exe -d Ubuntu
 ```
 
-Then create a normal Git branch and pull request. CI checks the schema,
-artifact hashes and paths, model catalog eligibility, immutable revision,
-duplicate runs, CLI tests, validator tests, website lint, and website build.
+The prompt should be a Linux prompt such as `user@computer:...$`. If it still
+says `MINGW64`, you are in Windows Git Bash. See the
+[Windows/WSL setup instructions](docs/quickstart.md#windows-enter-wsl-first).
 
-A `configuration_fingerprint` distinguishes a real repeat from an accidental
-duplicate: the same configuration plus the same raw output is rejected; the
-same configuration with new raw evidence is a valid repeat.
+From your checkout, in Linux/macOS/WSL, activate your Linux Python environment.
+If you already have the runner environment used by this walkthrough:
 
-## Repository map
+```bash
+source "$HOME/.venvs/omobench-runner/bin/activate"
+python -m pip install -e './cli[ui,runner]'
+omobench --help
+omobench doctor
+```
 
-| Directory | Purpose |
+If that environment does not exist, [create it first](docs/quickstart.md#create-or-activate-the-python-environment).
+Help must include `ui`. If it does not, follow
+[update an existing checkout](docs/quickstart.md#update-an-existing-checkout).
+
+The current runner dependency set includes `uvloop`, which does not install
+under native Windows Python. A Windows `.venv/Scripts/activate` environment
+cannot be used as a WSL environment. Node.js and npm are **not needed** for
+benchmarking through the local panel.
+
+### 2. Start the model server
+
+Use a second terminal, in the same Linux/WSL environment, to start your model.
+Follow the [model-server guide](docs/model-server.md#cpu-example-with-llamacpp)
+for a complete small-model CPU example.
+
+Wait until the model has loaded and the server is listening. Note its address
+and the exact model identifier it accepts. In our example those are
+`http://127.0.0.1:8092` and `Qwen/Qwen3-0.6B`.
+
+### 3. Open the panel and run
+
+Back in the terminal with the OmoBench environment activated:
+
+```bash
+omobench ui
+```
+
+Keep both terminals open. If a browser does not open automatically, copy the
+full URL printed by the panel, including `#token=...`, into your browser.
+On WSL, use your normal Windows browser.
+
+1. Enter the **Server address** and **Server model identifier** from your running
+   server. Its address is different from the panel's port `8765`.
+2. Click **Test connection** and wait for the streaming connection confirmation.
+3. Choose `chat-small-v1` for a first run. Select **CPU · local measurements**
+   only after configuring CPU execution in the server, or select GPU after
+   confirming GPU inference in its logs or telemetry. Tick the confirmation.
+4. Click **Run benchmark**, watch the logs, and inspect the final measurements.
+   The fixed workload can take several minutes, particularly on CPU.
+5. Use **Download local summary** to save measurements. A completed GPU run also
+   offers **Review & submit**: packaging, validation, ZIP download, and PR creation.
+
+Selecting CPU or GPU in OmoBench records your declaration; it does not change
+the model server. CPU runs measure language-model inference on your CPU, not a
+general-purpose CPU score. They cannot currently become public v1 results.
+
+See [troubleshooting](docs/troubleshooting.md) for missing commands, WSL paths,
+incorrect identifiers, streaming errors, and interrupted runs.
+
+## What is supported today
+
+- Locally served models compatible with streaming `/v1/chat/completions` can be
+  tried; public submissions must pass catalog eligibility checks.
+- The panel accepts localhost model servers without authentication headers or
+  redirects. Run it in the same OS/WSL environment as the server.
+- Runtime records distinguish `vllm`, `sglang`, `llama.cpp`, `lmstudio`, and
+  `openai-compatible-other` with a meaningful server description.
+- NVIDIA, AMD, Intel, and other GPU metadata are supported through best-effort
+  detection. This does not guarantee runtime/driver compatibility with every GPU.
+- Live logs, cancellation, saved UI-run history, and local summary downloads work
+  without a GitHub account. Authentication is needed for direct PR upload.
+- Quality/accuracy evaluation, model installation, cloud hardware provisioning,
+  and native Windows benchmark execution are outside the current workflow.
+
+## Fixed workloads and measurements
+
+Profiles live under `benchmarks/profiles/`. Compare results within the same
+profile, accounting for model revision, quantization, and runtime differences.
+
+| Profile | Purpose | Target input / requested output | Streams | Request limit | Duration limit |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `chat-small-v1` | Interactive chat responsiveness | 1,024 / 256 tokens | 1 | 50 | 900 s |
+| `chat-long-v1` | Long-context chat latency | 8,192 / 512 tokens | 1 | 30 | 1,800 s |
+| `throughput-v1` | Sustained serving throughput | 1,024 / 256 tokens | 16 | 160 | 900 s |
+
+The CLI pins GuideLLM to `0.7.3`, sets a fixed synthetic-prompt seed, includes
+warm-up/cool-down phases, and passes request, duration, and 1% error-rate
+constraints. Limits are not promises of an exact wall-clock duration or a full
+request count. Requested output length is not guaranteed: a model can stop early.
+The context must fit the prompt, requested output, and chat-template overhead;
+the small demo's 2,048-token context is unsuitable for `chat-long-v1`.
+
+| Metric | Meaning |
 | --- | --- |
-| `benchmarks/profiles/` | Immutable workload definitions |
-| `catalog/models/` | Eligible public models and licence metadata |
-| `cli/` | The `omobench` command-line tool |
-| `schema/` | Public `result.json` contract |
-| `results/` | Submitted evidence bundles |
-| `tools/` | Registry validator and its tests |
-| `app/` | Comparison website |
+| TTFT p50 / p95 | Median / 95th-percentile time until the first streamed token; lower is better |
+| Inter-token latency p50 / p95 | Delays between output tokens, as reported by GuideLLM; lower is better |
+| Output tokens/sec | GuideLLM's reported output-token throughput; higher is better |
+| Total tokens/sec | GuideLLM's reported input-plus-output token throughput |
+| Requests/sec | GuideLLM's reported request rate for the workload |
+| Error rate | Percentage of attempted requests that failed or remained incomplete |
 
-The website imports only normalized `result.json` files at build time. Raw
-evidence remains in GitHub for review rather than being shipped to every
-visitor's browser.
+Raw reports remain available for interpretation. The normalized summary leaves
+peak memory as `null`; it is not a verified comparable score.
 
-## Develop the website
+## Evidence and publication
 
-Website work is separate from running a benchmark:
+Run locally, inspect the evidence, package a GPU result, validate it, and submit
+a PR. Creating a branch or PR uploads evidence to GitHub; acceptance into the
+website registry happens after review, merge, and a website build containing
+that commit. Running or packaging alone does not upload anything.
+
+UI jobs live under `.omobench-runs/ui/job-<id>/run-<id>/`; direct CLI runs default
+to `.omobench-runs/run-<id>/`. The standard submission bundle is:
+
+```text
+result.json
+guidellm-benchmarks.json.gz
+guidellm.stdout.log
+environment.json
+reproduce.md
+```
+
+The packager records model/runtime/hardware metadata, an immutable model revision,
+profile hash, and artifact hashes. Validation checks the schema, catalog,
+obviously mutable revision labels, artifact paths/hashes, and duplicates. These
+checks do not independently prove GPU usage or every workload acceptance rule.
+
+The panel can upload a reviewed bundle using your existing GitHub CLI (`gh`)
+authentication and write access to the checkout's `origin` repository.
+Otherwise, download the ZIP and use a fork and manual PR. The panel does not
+merge PRs. Read the [submission guide](docs/submission-bundle.md) before publishing.
+
+## Develop the comparison website
+
+Only website development needs Node.js (22.13 or later, as declared in
+`package.json`). From the checkout, with Node and npm available in that terminal:
 
 ```bash
 npm ci
 npm run dev
+```
+
+Open the URL printed by the development server. This displays the comparison
+website, not the benchmark controller. Illustrative rows are labelled and kept
+separate from real `results/` bundles. The website imports normalized
+`result.json` files at build time; raw evidence remains in GitHub for review.
+
+To check website changes:
+
+```bash
 npm run lint
 npm run build
 ```
 
-## More documentation
+The build uses vinext/Vite. The repository includes a Vercel adapter and the
+existing Cloudflare build path; use the checked-in build/configuration rather
+than substituting `next build`.
 
-- [Local setup and runner notes](docs/quickstart.md)
-- [Submission-bundle contract](docs/submission-bundle.md)
-- [Benchmark-result JSON schema](schema/benchmark-run.schema.json)
-- [Eligible-model catalog](catalog/models/seed-v1.yaml)
+## Repository and documentation map
+
+| Path | Purpose |
+| --- | --- |
+| `cli/` | CLI, local browser controller/assets, and tests |
+| `benchmarks/profiles/` | Fixed workload definitions |
+| `catalog/models/` | Eligible public models and licence metadata |
+| `schema/` and `tools/` | Result contract and registry validation |
+| `results/` | Submitted public evidence bundles |
+| `app/` | Comparison website |
+| [docs/quickstart.md](docs/quickstart.md) | Installation, updates, and direct CLI commands |
+| [docs/model-server.md](docs/model-server.md) | Starting a server, model identifiers, CPU/GPU settings |
+| [docs/browser-control.md](docs/browser-control.md) | Panel controls, recovery, packaging, and submission |
+| [docs/local-demo.md](docs/local-demo.md) | CPU demonstration and website-only demo |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | Common setup and runtime failures |
+| [docs/submission-bundle.md](docs/submission-bundle.md) | Evidence requirements and manual PR workflow |
+| [docs/local-results.md](docs/local-results.md) | Preview a packaged GPU result on the website |
+| [AGENTS.md](AGENTS.md) | Shared contributor and coding-agent context |

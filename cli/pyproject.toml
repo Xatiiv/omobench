@@ -12,9 +12,13 @@ dependencies = ["PyYAML>=6.0"]
 
 [project.optional-dependencies]
 runner = ["guidellm[recommended]==0.7.3"]
+ui = ["jsonschema==4.25.1"]
 
 [project.scripts]
 omobench = "omobench.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+omobench = ["web/*.html", "web/*.css", "web/*.js"]

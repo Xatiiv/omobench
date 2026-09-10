@@ -5,6 +5,16 @@
 OmoBench v1 covers open-weight text-generation models served through an
 OpenAI-compatible chat-completions endpoint.
 
+Public v1 records require actual GPU inference. CPU runs can be benchmarked and
+downloaded locally through the [browser panel](browser-control.md), but its local
+summary is not a public `result.json` and must not be placed under `results/`.
+
+There are two submission routes: **Review & submit** in `omobench ui`, or the
+[manual PR workflow](#manual-pull-request-workflow). Both preserve the same five
+evidence files and go through CI and maintainer review. Packaging stays local;
+uploading a branch/PR makes evidence visible according to GitHub repository
+permissions. The website registry updates after merge and a build containing it.
+
 ## Model eligibility
 
 `catalog/models/*.yaml` is the source of truth for eligible submitted models.
@@ -18,6 +28,13 @@ A catalog entry requires non-empty `id`, `modality`, `source`, and `licence`
 fields; a missing or malformed `catalog/models/*.yaml` file fails validation
 with a clear error instead of silently accepting or rejecting every
 submission.
+
+The API identifier used during a run may be an alias. Packaging must use the
+canonical catalog ID of the model actually served. Adding an alias does not
+make a different model eligible. New eligible models can be added through a
+catalog YAML change, without changing the runner; the browser uploader does not
+automatically make that source change. The catalog's `initial_runtimes` field
+is planning information, not an enforced runtime allowlist.
 
 ## Immutable model revisions
 
@@ -51,14 +68,17 @@ The remaining files are the evidence for the summary:
   package-version information.
 - `reproduce.md` — exact non-secret commands needed to recreate the run.
 
-Never commit API keys, access tokens, hostnames, serial numbers, user prompts,
-model weights, or credentials. A submitter must redact those values before
-creating a pull request.
+Never commit API keys, access tokens, private hostnames, serial numbers, user
+prompts, model weights, or credentials. Inspect evidence before final packaging
+and hashing; do not modify published bundles to conceal a problem. Automatic
+endpoint redaction is not a substitute for reviewing all files and startup arguments.
 
 ## Create the local normalized summary
 
-After `omobench run --execute` finishes successfully, package its staging
-directory into a local `result.json`:
+After a confirmed GPU run finishes successfully, package its staging directory
+into a local `result.json`. This is a metadata template: replace the model,
+revision, quantization, version, paths, submitter, and every runtime argument
+with the actual values from that run. It is not the CPU demo's configuration.
 
 ```bash
 omobench package \
@@ -69,7 +89,7 @@ omobench package \
   --framework vllm \
   --framework-version YOUR_VLLM_VERSION \
   --execution-device gpu \
-  --runtime-arg "--served-model-name=Qwen/Qwen3-4B" \
+  --runtime-arg=--served-model-name=Qwen/Qwen3-4B \
   --profile chat-small-v1 \
   --submitter YOUR_GITHUB_USERNAME
 ```
@@ -78,6 +98,18 @@ The command reads the raw compressed GuideLLM report, local environment
 snapshot, runner log, and reproduction file. It writes `result.json` beside
 them, including hashes for every evidence file. It accepts only the pinned
 GuideLLM v0.7.3 report format and does not contact GitHub.
+
+Repeat `--runtime-arg=VALUE` for every setting; use the equals form when VALUE
+starts with a dash, so argparse does not mistake it for another OmoBench option.
+For a UI-created run, use the displayed inner
+`.omobench-runs/ui/job-<id>/run-<id>/` path, not its parent job directory.
+
+Packaging alone does not check catalog membership or all registry requirements.
+Use **Package & validate** in the panel or the manual validator below. A green
+validator result checks the implemented schema/catalog/artifact/duplicate rules;
+it does not independently establish GPU execution or verify every acceptance
+condition in the profile YAML. Inspect successful request counts, errors, and
+raw output against the selected profile before submitting.
 
 The model revision, quantization, framework version, and startup arguments are
 deliberately supplied by the operator. An OpenAI-compatible endpoint cannot
@@ -93,9 +125,9 @@ records yet.
 
 ## GPU vendor and memory
 
-OmoBench detects NVIDIA, AMD, Intel, and other GPUs; none of it requires
-installing anything beyond the vendor tool a GPU already ships with
-(`nvidia-smi`, `rocm-smi`), and every detection method is best-effort — see
+OmoBench reports NVIDIA, AMD, Intel, and other GPUs through available vendor
+utilities and OS fallbacks. It does not install those utilities, and every
+detection method is best-effort — see
 [docs/quickstart.md](quickstart.md) for exactly how each vendor and OS
 combination is detected. `hardware.gpus[].vendor` is optional in
 `schema/benchmark-run.schema.json`; a `result.json` published before
@@ -164,6 +196,66 @@ class, driver, and profile. A `run_id` identifies one execution session.
 - Changed model revision, quantization, runtime, driver, hardware, arguments,
   or benchmark profile: a new configuration.
 
+## Manual pull request workflow
+
+Use this if you prefer Git commands, lack `gh` authentication/write access, or
+need to add a catalog entry alongside a result. Work in a checkout where you
+can push a feature branch; fork the project first if you lack upstream access.
+With a fork, open the eventual PR against the upstream repository's `main`.
+
+1. Inspect `git status --short` and preserve unrelated work. From a suitable
+   clean base, create a new submission branch, for example
+   `git switch -c submit/your-new-run-id`.
+2. If using the panel's ZIP, extract it **at the checkout root**. It already
+   contains `results/<model-slug>/<date>-<run-id>/`. Do not nest it inside another
+   `results/`, and do not replace an existing bundle.
+3. For a directly packaged CLI run, copy the standard files instead. In the
+   example below, replace the source path, model slug, date, and run ID first:
+
+   ```bash
+   RUN_DIR=".omobench-runs/run-YOUR_RUN_ID"
+   RESULT_DIR="results/your-model/YYYY-MM-DD-run-YOUR_RUN_ID"
+   mkdir -p results/your-model
+   mkdir "$RESULT_DIR" &&
+   cp "$RUN_DIR/result.json" "$RUN_DIR/guidellm-benchmarks.json.gz" \
+     "$RUN_DIR/guidellm.stdout.log" "$RUN_DIR/environment.json" \
+     "$RUN_DIR/reproduce.md" "$RESULT_DIR/"
+   ```
+
+   The final `mkdir` intentionally fails if the destination already exists.
+   For UI evidence, use its inner run directory; never copy `job.json`, UI logs,
+   or the whole `.omobench-runs/` tree into the public registry.
+4. Install the validator dependency and check all bundles:
+
+   ```bash
+   python -m pip install -e './cli[ui]'
+   python tools/validate_results.py
+   ```
+
+   If a model is absent from the catalog, add a legitimate entry in
+   `catalog/models/` and validate again. Preserve the run's actual model identity.
+5. Inspect all five files for completeness and private data, then stage only
+   that bundle (and an intentional catalog entry, if needed). Replace the
+   example paths and branch below before running:
+
+   ```bash
+   git add -- results/your-model/YYYY-MM-DD-run-YOUR_RUN_ID
+   git diff --cached --check
+   git diff --cached --stat
+   git commit -m "Add benchmark evidence for your model"
+   git push -u origin submit/your-new-run-id
+   ```
+
+6. Open a PR using the link Git prints, or GitHub's **Compare & pull request**.
+   Describe the model, immutable revision, runtime, hardware, profile, actual GPU
+   execution evidence, and local validation result. Review CI before merge.
+   The website must subsequently build the merged commit to show the new result.
+
+The browser panel's direct uploader also uses a new branch, but opens its PR
+against the default branch of the displayed `origin` repository. If that is a
+fork, it does not automatically create an upstream PR. Follow the manual route
+above for an upstream submission.
+
 ## Continuous integration checks every submission
 
 Opening a pull request against `results/` runs `tools/validate_results.py` in
@@ -178,5 +270,6 @@ should pass before the pull request is merged.
 You can run the same check locally before opening a pull request:
 
 ```bash
+python -m pip install -e './cli[ui]'
 python tools/validate_results.py
 ```
