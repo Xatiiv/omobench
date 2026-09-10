@@ -141,6 +141,19 @@ class ServiceTests(unittest.TestCase):
                 self.server.controller.start(RUN_CONFIG)
             process.assert_not_called()
 
+    def test_connection_probe_cannot_add_traffic_during_a_benchmark(self):
+        controller = self.server.controller
+        controller.busy = True
+        with patch("omobench.ui.probe_connection") as probe:
+            with self.assertRaisesRegex(UIError, "active operation"):
+                controller.connection(RUN_CONFIG)
+            probe.assert_not_called()
+        controller.busy = False
+        with patch("omobench.ui.probe_connection", side_effect=UIError("Connection failed")):
+            with self.assertRaises(UIError):
+                controller.connection(RUN_CONFIG)
+        self.assertFalse(controller.busy)
+
 
 class ConnectionTests(unittest.TestCase):
     def test_real_streaming_probe_and_redirect_rejection(self):

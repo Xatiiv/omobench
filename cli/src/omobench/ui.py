@@ -230,6 +230,17 @@ class Controller:
     def _cli_command(self, arguments: list[str]) -> list[str]:
         return [sys.executable, "-u", "-m", "omobench.cli", *arguments]
 
+    def connection(self, data: dict) -> dict:
+        with self.lock:
+            if self.busy or self.closing:
+                raise UIError("Wait for the active operation before testing the connection.", 409)
+            self.busy = True
+        try:
+            return probe_connection(data)
+        finally:
+            with self.lock:
+                self.busy = False
+
     def start(self, data: dict) -> dict:
         config = run_config(data)
         if sys.platform == "win32":
@@ -536,7 +547,7 @@ class UIHandler(BaseHTTPRequestHandler):
                 raise UIError("Request must be a JSON object.")
             controller = self.server.controller
             if self.path == "/api/connection":
-                return self._json(probe_connection(data))
+                return self._json(controller.connection(data))
             if self.path == "/api/runs":
                 return self._json(controller.start(data), 202)
             match = re.fullmatch(r"/api/runs/(job-[a-f0-9]{16})/(cancel|package|prepare|submit)", self.path)
