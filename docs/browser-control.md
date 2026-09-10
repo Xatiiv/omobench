@@ -12,20 +12,23 @@ programs on visitors' computers.
 
 ## First-time setup
 
-1. Open a terminal in your OmoBench checkout. Use Linux, macOS, or WSL2 for
-   benchmark execution. Keep using your existing checkout and VS Code window.
-2. Activate that environment, for example:
+1. Open a terminal in your existing OmoBench checkout. Use Linux, macOS, or WSL2
+   for execution. On Windows, run `wsl.exe -d Ubuntu` and wait for a Linux prompt;
+   a prompt containing `MINGW64` is still Windows Git Bash. See
+   [setup and updates](quickstart.md) if `omobench --help` does not list `ui`.
+2. Activate your Linux environment, for example:
 
    ```bash
-   python3 -m venv .venv  # Only if this checkout has no Linux Python environment yet
-   source .venv/bin/activate
+   source "$HOME/.venvs/omobench-runner/bin/activate"
    python -m pip install -e './cli[ui,runner]'
    ```
 
-   A Windows `.venv` cannot be reused as a WSL environment. If you already have a
-   WSL runner environment, activate it instead of creating another one.
+   If it does not exist, [create the environment first](quickstart.md#create-or-activate-the-python-environment).
+   A Windows `.venv` cannot be reused as a WSL environment.
 3. Start your chosen model server and load the model. Keep it running in its own
-   terminal or app. Note its localhost address and API model identifier.
+   terminal or app. Note its localhost address and API model identifier. Follow
+   [model-server setup](model-server.md) for a complete CPU example. Every new
+   Windows terminal must enter WSL too if the server is installed there.
 4. In the activated OmoBench environment, run:
 
    ```bash
@@ -48,7 +51,10 @@ extra includes `uvloop`, which does not support native Windows.
    GPU detection alone does not prove GPU inference.
 2. **Enter the connection.** Use an address such as `http://127.0.0.1:8092` or
    `http://127.0.0.1:8092/v1`. Enter the model identifier accepted by the server.
-   Click **Test connection**. This sends one tiny streaming request; it is not
+   Use the exact API name, including case and slash. For the documented llama.cpp
+   example it is `Qwen/Qwen3-0.6B`, not the shortened `Qwen3-0.6B` display name.
+   [List your server's identifiers](model-server.md#address-and-model-identifier)
+   if unsure. Click **Test connection**. This sends one tiny streaming request; it is not
    included in benchmark evidence.
 3. **Choose a fixed profile and declare the device.** The panel displays the
    profile's token counts, load, and limits. Configure CPU/GPU use in the model
@@ -61,11 +67,14 @@ extra includes `uvloop`, which does not support native Windows.
    summary** to save the displayed measurements. This summary is clearly identified
    as local data and is not a public `result.json`.
 
-For a short CPU demonstration, load a small model with CPU execution explicitly
+For a CPU demonstration, load a small model with CPU execution explicitly
 enabled in your server, choose **chat-small-v1**, select **CPU**, and run. This is a
 real inference workload on your CPU, not a general CPU hardware test. Slower CPUs
 may reach the profile's time limit; the UI does not shorten or alter the workload.
 CPU results can be demonstrated and downloaded locally; public v1 packaging remains GPU-only.
+The [CPU demo walkthrough](local-demo.md) gives the two-terminal launch sequence
+and exact form values. [Troubleshooting](troubleshooting.md) covers connection
+failures, missing commands, and slow runs.
 
 Use **Cancel benchmark** to stop the CLI and its GuideLLM child process. The model
 server stays running. Cancelled, failed, and interrupted runs are labelled accordingly;
@@ -92,12 +101,16 @@ After a completed GPU run, **Review & submit** becomes available:
    as `omobench ui` using `gh auth login`. Your account needs write access to the
    checkout's `origin` repository on github.com. The panel shows that exact destination
    and base branch before you confirm. Authentication credentials stay with GitHub CLI.
+   If `origin` is your fork, the panel opens the PR there; it does not open a
+   cross-fork PR against the upstream project. Use the manual workflow for upstream.
 6. After reviewing the bundle and confirming GPU execution and absence of secrets,
    click **Create pull request**. This uploads only the five standard evidence files
    into a new `submit/<run-id>` branch and opens a PR against the repository's default
    branch. It does not stage local changes, switch branches, or push to `main`.
 7. Review the PR's CI checks and follow the normal maintainer review process. The
-   panel never merges a PR. An upload is not acceptance into the registry.
+   panel never merges a PR. Evidence is uploaded at submission time and is visible
+   according to the repository's visibility, even before merge. The registry site
+   includes it after merge and a successful build containing that commit.
 
 The complete bundle is `result.json`, `guidellm-benchmarks.json.gz`,
 `guidellm.stdout.log`, `environment.json`, and `reproduce.md`. File hashes shown in
@@ -109,6 +122,10 @@ Without GitHub CLI or write access, **Download complete bundle** still works. Un
 it into your fork/check-out and follow [the manual submission workflow](submission-bundle.md).
 The panel does not automatically create forks or upload repository source changes.
 Uploads larger than 50 MiB per file must use the manual workflow.
+If a model needs a catalog entry, add it through a separate source-change PR or
+include the entry in a manually prepared submission PR. The panel uploads only
+the five evidence files. Downloaded ZIPs already contain the `results/...` path;
+extract at the checkout root rather than adding a second `results/` level.
 
 ## Local storage and recovery
 

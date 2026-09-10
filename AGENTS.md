@@ -8,6 +8,10 @@ The [README](README.md) is the user-facing contributor guide. This file explains
 
 OmoBench is a GitHub-backed evidence registry and test harness for self-hosted, open-weight language-model inference. A contributor runs a fixed profile against their own OpenAI-compatible server, preserves raw evidence, packages a normalized result, and submits the complete bundle through a GitHub pull request.
 
+`omobench ui` is a local browser controller around the same CLI. It can run CPU
+workloads and export local measurements; public v1 packaging remains GPU-only.
+The comparison website and its `/run` launch guide are separate from this panel.
+
 It is **not** a model host, model downloader, cloud GPU provider, or automatic proof that a model server used a GPU.
 
 ## V1 scope and invariants
@@ -32,7 +36,15 @@ Treat `results/` as append-only public evidence.
 - Never place API keys, tokens, private hostnames, private prompts, model weights, or other secrets in a bundle, log, or documentation.
 - Do not claim that a run is publishable unless the server's own logs or hardware telemetry confirm real GPU inference.
 
-Local staging data belongs in `.omobench-runs/` and is not public until a complete bundle is intentionally copied into `results/` and merged.
+Local staging data belongs in `.omobench-runs/`; UI jobs use
+`.omobench-runs/ui/job-<id>/run-<id>/`. Running or packaging does not upload data.
+Pushing a submission branch/PR exposes its evidence according to repository
+visibility, before merge. Registry inclusion follows review, merge, and a site build.
+
+The panel submits only the five standard evidence files after explicit review,
+using existing `gh` authentication and a new branch in the displayed `origin`.
+It does not merge PRs, create forks, start models, or change local Git branches.
+Keep localhost/token/origin protections and the one-panel-per-checkout lock.
 
 ## Repository map
 
@@ -40,7 +52,7 @@ Local staging data belongs in `.omobench-runs/` and is not public until a comple
 | --- | --- |
 | `benchmarks/profiles/` | Fixed, versioned benchmark workloads |
 | `catalog/models/` | Eligible-model registry |
-| `cli/` | `omobench` CLI and CLI tests |
+| `cli/` | `omobench` CLI, browser controller/assets, and tests |
 | `schema/` | Public `result.json` contract |
 | `tools/` | Result validator and validator tests |
 | `results/` | Submitted evidence bundles |
@@ -74,6 +86,12 @@ A result-bundle change must pass `python tools/validate_results.py`. Keep CI gre
 ## Platform notes
 
 Native Windows is supported for repository work, website development, CLI checks, and dry runs. The current GuideLLM execution path (`omobench run --execute`) must run on Linux, macOS, or WSL2 because its recommended dependency set includes `uvloop`, which does not support native Windows.
+
+The panel inherits this execution restriction. Label Windows-shell entry commands
+and WSL commands explicitly in documentation. Keep Windows and Linux Python
+environments separate, and verify editable imports point to the intended checkout.
+Use [the setup guide](docs/quickstart.md), [CPU demo](docs/local-demo.md), and
+[troubleshooting](docs/troubleshooting.md) for detailed operational instructions.
 
 ## Keep this file useful
 
