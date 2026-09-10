@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OmoBench · Local control</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="/">Omo<span>Bench</span><span class="brand-mark">▥</span></a><span class="pill"><span class="dot"></span> Local workspace</span></header>
+  <div class="layout">
+    <aside>
+      <div class="aside-head"><h2>This machine</h2><button id="refresh-setup" class="quiet" type="button">Refresh</button></div>
+      <dl id="machine"><dt>Checking your environment…</dt></dl>
+      <div class="aside-head recent-head"><h2>Recent runs</h2><button id="new-run" class="quiet" type="button">+ New</button></div>
+      <div id="runs-list"><p class="muted">Your runs will appear here.</p></div>
+      <p class="aside-note">Evidence stays in this checkout. Uploading a bundle requires your confirmation.</p>
+    </aside>
+    <main>
+      <div class="eyebrow">LOCAL BENCHMARK CONTROL</div>
+      <h1>Benchmark your model.</h1>
+      <p class="intro">Connect a model server, run a fixed workload, and inspect the measurements.</p>
+      <div id="notice" class="notice" role="status" hidden></div>
+      <div id="runner-status" class="notice">Checking the runner…</div>
+      <section id="configure" class="panel">
+        <div class="section-head"><div><span class="step">01</span><h2>Connect &amp; run</h2></div><span class="muted small">Uses the OmoBench CLI</span></div>
+        <p class="muted">Start and load your model in a local inference server first. This panel sends requests to it.</p>
+        <form id="run-form">
+          <div class="grid two">
+            <label>Server address<input id="endpoint" name="endpoint" value="http://127.0.0.1:8092" required spellcheck="false"><span class="hint">Localhost address; an optional /v1 suffix is accepted.</span></label>
+            <label>Server model identifier<input id="model" name="model" placeholder="Identifier shown by your server" required spellcheck="false"><span class="hint">Use the model name or alias accepted by the server API.</span></label>
+            <label>Benchmark profile<select id="profile" name="profile"></select></label>
+            <label>Server execution device<select id="execution-device" name="execution_device"><option value="cpu">CPU · local measurements</option><option value="gpu">GPU · eligible for submission review</option></select></label>
+          </div>
+          <p id="profile-detail" class="profile-detail"></p>
+          <label class="check"><input id="device-confirmed" type="checkbox" required><span>I have configured this device in my model server. For a GPU run, I have confirmed GPU inference in the server logs or telemetry.</span></label>
+          <p class="hint">Selecting CPU or GPU records your declaration. Change the model server settings to change where inference runs.</p>
+          <div class="actions"><button id="test-connection" type="button" class="secondary">Test connection</button><button id="start-run" type="submit">Run benchmark <span aria-hidden="true">↗</span></button></div>
+          <p id="connection-result" class="hint" role="status"></p>
+        </form>
+      </section>
+      <section id="run-panel" class="panel" hidden>
+        <div class="section-head"><div><span class="step">02</span><h2 id="run-title">Benchmark</h2></div><span id="run-status" class="pill"></span></div>
+        <p id="run-meta" class="muted"></p>
+        <p id="run-error" class="notice error" role="status" hidden></p>
+        <div id="metrics" class="grid metrics" hidden></div>
+        <p id="local-note" class="notice" hidden>These are local CPU measurements. Public v1 submissions require GPU execution. You can download this summary for your demo.</p>
+        <div class="actions"><button id="cancel-run" type="button" class="danger" hidden>Cancel benchmark</button><button id="download-summary" type="button" class="secondary" hidden>Download local summary</button></div>
+        <details id="log-details" open><summary>Live runner log <span class="hint">Latest output · refreshes automatically</span></summary><pre id="log" tabindex="0">Waiting for the runner…</pre></details>
+        <p id="run-path" class="hint path"></p>
+      </section>
+      <section id="package-panel" class="panel" hidden>
+        <div class="section-head"><div><span class="step">03</span><h2>Review &amp; submit</h2></div><span class="pill">GPU evidence</span></div>
+        <p class="muted">Record the model and serving configuration used for this run. Packaging uses the existing CLI and registry validator.</p>
+        <form id="package-form">
+          <div class="grid two">
+            <label>Canonical model ID<input name="model" id="package-model" list="catalog-models" required spellcheck="false"><datalist id="catalog-models"></datalist><span class="hint">Public results must use a model listed in the catalog.</span></label>
+            <label>Immutable model revision<input name="model_revision" required placeholder="Model commit SHA or immutable revision" spellcheck="false"></label>
+            <label>Framework<select name="framework" id="framework"></select></label>
+            <label>Exact framework version<input name="framework_version" required placeholder="Version, build, and commit where available"></label>
+            <label>Quantization<input name="quantization" placeholder="For example BF16 or Q4_K_M"></label>
+            <label>Submitter<input name="submitter" required placeholder="GitHub username or organization"></label>
+          </div>
+          <label id="description-field" hidden>Server description<input name="server_description" id="server-description" placeholder="Name and details of the generic server"></label>
+          <label>Runtime startup arguments<textarea name="runtime_args" rows="3" placeholder="One argument per line, e.g. --ctx-size=2048"></textarea><span class="hint">Record the actual server settings, including GPU offload. Do not include tokens or passwords.</span></label>
+          <details><summary>Hardware details, if detection is incomplete</summary><div class="grid two"><label>GPU memory per card (GB)<input name="gpu_memory_gb" type="number" min="0.01" step="any" placeholder="Only if detected VRAM is unknown"></label><label>CPU description<input name="cpu" placeholder="Leave blank to use detected CPU"></label></div></details>
+          <div class="actions"><button id="package-button" type="submit">Package &amp; validate</button></div>
+        </form>
+        <p id="validation-result" class="notice" role="status" hidden></p>
+        <button id="prepare-button" class="secondary" type="button" hidden>Review submission files</button>
+        <div id="submission-preview" hidden>
+          <h3>Submission preview</h3><p id="repository" class="muted"></p>
+          <ul id="submission-files" class="files-list"></ul>
+          <details><summary>Normalized result</summary><pre id="result-json" tabindex="0"></pre></details>
+          <details><summary>Pull request description</summary><pre id="pr-description" tabindex="0"></pre></details>
+          <div class="actions"><button id="download-bundle" type="button" class="secondary">Download complete bundle</button></div>
+          <p id="github-message" class="hint"></p>
+          <label class="check"><input id="submit-confirmed" type="checkbox"><span>I reviewed the complete bundle, confirmed real GPU execution, and checked that the evidence contains no secrets. Create a branch and pull request in the repository shown above.</span></label>
+          <button id="submit-button" type="button" disabled>Create pull request</button>
+        </div>
+        <p id="submission-link" class="notice" hidden></p>
+      </section>
+      <footer>Fixed profiles. Inspectable evidence. Publication through pull requests.</footer>
+    </main>
+  </div>
+</body>
+</html>

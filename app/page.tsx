@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import {
   Select,
@@ -251,9 +252,9 @@ export default function Home() {
               the evidence; this site makes it comparable.
             </p>
             <div className="mt-8 flex flex-wrap gap-3 text-sm">
-              <a className="rounded-md bg-emerald-400 px-4 py-2.5 font-medium text-zinc-950 transition hover:bg-emerald-300" href="#workflow">
-                See the benchmark loop
-              </a>
+              <Link className="rounded-md bg-emerald-400 px-4 py-2.5 font-medium text-zinc-950 transition hover:bg-emerald-300" href="/run">
+                Run a benchmark
+              </Link>
               <a className="rounded-md border border-white/15 px-4 py-2.5 font-medium text-zinc-200 transition hover:border-white/30 hover:bg-white/5" href="#profiles">
                 Inspect v1 profiles
               </a>

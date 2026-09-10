@@ -1061,6 +1061,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     subcommands.add_parser("profiles", help="list versioned benchmark profiles")
 
+    ui = subcommands.add_parser("ui", help="open the local browser control panel")
+    ui.add_argument("--port", type=int, default=8765, help="localhost port (default: 8765)")
+    ui.add_argument("--no-browser", action="store_true", help="print the URL without opening a browser")
+
     intent = subcommands.add_parser("init-run", help="prepare a benchmark intent without running it")
     intent.add_argument("--endpoint", required=True, help="OpenAI-compatible endpoint base URL")
     intent.add_argument("--model", required=True, help="Canonical model ID")
@@ -1121,6 +1125,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+    if args.command == "ui":
+        from .ui import serve_ui
+
+        return serve_ui(args.port, open_browser=not args.no_browser)
     if args.command == "doctor":
         report = doctor_report()
         if args.json:

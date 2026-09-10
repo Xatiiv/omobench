@@ -39,6 +39,28 @@ model, but GitHub validation will reject it until a catalog entry is added.
 
 Nothing becomes public when you run or package a benchmark locally.
 
+## Run from your browser
+
+The local control panel uses the same CLI and fixed profiles. From your checkout,
+with your Python environment activated (Linux, macOS, or WSL2):
+
+```bash
+python -m pip install -e './cli[ui,runner]'
+omobench ui
+```
+
+Start your model server separately, then use the panel to test its connection,
+run a benchmark, watch logs, cancel, and inspect measurements. CPU runs have a
+downloadable local summary. Confirmed GPU runs can be packaged, validated, and
+submitted through a GitHub PR after reviewing the complete evidence bundle.
+
+Keep the terminal open. If the browser does not open, copy the full connection
+link printed in the terminal. The panel listens on localhost and needs no Node.js
+installation. The hosted website's **Run a benchmark** link explains how to launch it.
+
+See the [browser control guide](docs/browser-control.md) for setup, a CPU demo,
+GitHub authentication, platform limitations, and recovery.
+
 ## Fixed benchmark profiles
 
 Profiles are versioned files under `benchmarks/profiles/`. Do not compare
