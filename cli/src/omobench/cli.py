@@ -108,7 +108,7 @@ def command_output(command: list[str]) -> str | None:
             text=True,
             timeout=60,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired):
         return None
     output = (result.stdout or result.stderr).strip()
     return output or None

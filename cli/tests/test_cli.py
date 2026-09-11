@@ -5,6 +5,7 @@ import gzip
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -16,6 +17,8 @@ from omobench.cli import (
     RUNTIME_FRAMEWORKS,
     build_guidellm_command,
     build_parser,
+    command_output,
+    detect_amd_gpus,
     detect_gpus,
     detect_nvidia_gpus,
     detect_windows_cim_gpus,
@@ -129,6 +132,21 @@ class GpuDetectionTests(unittest.TestCase):
         self.assertEqual(gpus[0]["vendor"], "nvidia")
         self.assertEqual(gpus[0]["model"], "NVIDIA Test GPU")
         self.assertEqual(gpus[0]["memory_gb"], 24.0)
+
+    def test_command_output_returns_none_on_permission_error(self) -> None:
+        with patch("omobench.cli.subprocess.run", side_effect=PermissionError(13, "Permission denied")):
+            self.assertIsNone(command_output(["rocm-smi", "--json"]))
+
+    def test_command_output_returns_stdout_on_success(self) -> None:
+        completed = subprocess.CompletedProcess(args=["rocm-smi"], returncode=0, stdout="ok\n", stderr="")
+        with patch("omobench.cli.subprocess.run", return_value=completed):
+            self.assertEqual(command_output(["rocm-smi"]), "ok")
+
+    def test_detect_amd_gpus_returns_empty_when_rocm_smi_permission_denied(self) -> None:
+        with patch("omobench.cli.sys.platform", "linux"), patch(
+            "omobench.cli.subprocess.run", side_effect=PermissionError(13, "Permission denied")
+        ):
+            self.assertEqual(detect_amd_gpus(), [])
 
     def test_windows_cim_detects_amd_and_intel_with_null_memory(self) -> None:
         cim_json = json.dumps(
