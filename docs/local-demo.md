@@ -7,6 +7,13 @@ the presentation and filters.
 
 ## Real CPU demo
 
+Prefer not to hand-install a model server for this? [Guided CPU setup](guided-launcher.md)
+downloads, verifies, and starts one reviewed small CPU model (`qwen3-4b-cpu-v1`)
+through `omobench prepare`/`omobench launch` or the panel's `/guided` page,
+then runs this same unchanged benchmark. It is a development milestone, not a
+general installer. The rest of this walkthrough uses a model you install and
+start yourself, which stays available either way.
+
 ### 1. Prepare once, before the demo
 
 Complete [installation](quickstart.md) and confirm `omobench --help` lists

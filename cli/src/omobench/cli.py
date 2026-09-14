@@ -1029,6 +1029,99 @@ def write_run_intent(args: argparse.Namespace) -> int:
     return 0
 
 
+def print_managed_review(report: dict[str, Any]) -> None:
+    recipe = report["recipe"]
+    print(f"Recipe: {recipe['id']} — {recipe['title']}")
+    print(
+        f"Model: {recipe['model_id']} ({recipe['quantization']}) · profile {recipe['benchmark_profile']} "
+        f"· execution device {recipe['execution_device']}"
+    )
+    print(f"Supported environment: {recipe['supported_environment']}")
+    platform_status = report["platform"]
+    print(f"Platform check: {'OK' if platform_status['ok'] else 'BLOCKED'} — {platform_status['message']}")
+    print(f"Storage folder: {report['storage_dir']} (exists: {report['storage_dir_exists']})")
+    if report["free_space_bytes"] is not None:
+        print(
+            f"Free space: {report['free_space_bytes']:,} bytes; required: {report['required_bytes']:,} bytes; "
+            f"enough: {report['has_enough_space']}"
+        )
+    else:
+        print(f"Free space: unknown; required: {report['required_bytes']:,} bytes")
+    for file_entry in report["files"]:
+        print(
+            f"- {file_entry['kind']}: {file_entry['filename']} ({file_entry['size_bytes']:,} bytes, "
+            f"sha256:{file_entry['sha256']}, licence {file_entry['licence']})"
+        )
+        print(f"    {file_entry['url']}")
+    installed = report["already_installed"]
+    if installed["installed"]:
+        state = f"valid={installed['valid']}"
+        if installed["error"]:
+            state += f" ({installed['error']})"
+        print(f"Already installed: {state}")
+    else:
+        print("Not yet installed.")
+    print("\nThis is a review only. Nothing has been downloaded. Add --download to install after reviewing.")
+
+
+def run_prepare_command(args: argparse.Namespace) -> int:
+    from . import managed_setup
+
+    root = find_repository_root()
+    if root is None:
+        print("Could not find an OmoBench checkout.", file=sys.stderr)
+        return 2
+
+    if args.list:
+        try:
+            recipes = managed_setup.load_recipes(root)
+        except managed_setup.ManagedSetupError as error:
+            print(f"Could not load the managed download catalog: {error}", file=sys.stderr)
+            return 2
+        for recipe in recipes:
+            print(
+                f"{recipe['id']}: {recipe['title']} · model {recipe['model_id']} · "
+                f"profile {recipe['benchmark_profile']} · execution device {recipe['execution_device']}"
+            )
+        return 0
+
+    if not args.recipe:
+        print("Choose --recipe, or use --list to see reviewed recipes.", file=sys.stderr)
+        return 2
+    if not args.storage_dir:
+        print("Choose --storage-dir, for example /mnt/d/OmoBench in WSL/Linux.", file=sys.stderr)
+        return 2
+
+    try:
+        storage_dir = managed_setup.normalize_storage_dir(args.storage_dir)
+    except managed_setup.ManagedSetupError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+
+    try:
+        if not args.download:
+            report = managed_setup.review(root, args.recipe, storage_dir)
+            if args.json:
+                print(json.dumps(report, indent=2))
+            else:
+                print_managed_review(report)
+            return 0
+
+        def progress(label: str, done: int, total: int) -> None:
+            print(f"\r{label}: {done:,}/{total:,} bytes", end="", file=sys.stderr, flush=True)
+
+        manifest = managed_setup.download_and_install(root, args.recipe, storage_dir, progress=progress)
+        print(file=sys.stderr)
+        print(f"Installed {args.recipe} under {managed_setup.managed_root(storage_dir)}")
+        print(f"Model: {manifest['model']['path']}")
+        print(f"Runtime executable: {manifest['runtime']['executable_path']}")
+        print("This is local, reviewed, verified evidence for setup only; it is not a benchmark result.")
+        return 0
+    except managed_setup.ManagedSetupError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+
+
 def print_doctor(report: dict[str, Any]) -> None:
     print(f"OmoBench CLI: {report['omobench_cli_version']}")
     print(f"Python: {report['python']}")
@@ -1119,6 +1212,40 @@ def build_parser() -> argparse.ArgumentParser:
     )
     package.add_argument("--force", action="store_true", help="allow replacement of an existing local result.json")
 
+    prepare = subcommands.add_parser(
+        "prepare", help="review or install a reviewed managed CPU download recipe (does not benchmark)"
+    )
+    prepare.add_argument("--list", action="store_true", help="list reviewed managed recipes and exit")
+    prepare.add_argument("--recipe", help="managed recipe id, for example qwen3-4b-cpu-v1")
+    prepare.add_argument(
+        "--storage-dir",
+        help="absolute storage folder for managed downloads, for example /mnt/d/OmoBench in WSL/Linux",
+    )
+    prepare.add_argument(
+        "--download",
+        action="store_true",
+        help="perform the verified download and installation; omit to only review",
+    )
+    prepare.add_argument("--json", action="store_true", help="print machine-readable review output")
+
+    launch = subcommands.add_parser(
+        "launch", help="start the verified managed CPU server, then smoke-test or run the existing benchmark"
+    )
+    launch.add_argument("--recipe", required=True, help="managed recipe id, for example qwen3-4b-cpu-v1")
+    launch.add_argument(
+        "--storage-dir",
+        required=True,
+        help="absolute storage folder used by 'omobench prepare --download', for example /mnt/d/OmoBench",
+    )
+    launch_mode = launch.add_mutually_exclusive_group(required=True)
+    launch_mode.add_argument(
+        "--smoke", action="store_true", help="only check server readiness and the model alias; no inference"
+    )
+    launch_mode.add_argument(
+        "--execute", action="store_true", help="run the existing, unchanged benchmark profile against the server"
+    )
+    launch.add_argument("--output-dir", default=".omobench-runs", help="local staging directory, relative to repository root")
+
     return parser
 
 
@@ -1144,6 +1271,12 @@ def main() -> int:
         return write_local_run(args)
     if args.command == "package":
         return package_local_run(args)
+    if args.command == "prepare":
+        return run_prepare_command(args)
+    if args.command == "launch":
+        from .launcher import run_launch_command
+
+        return run_launch_command(args)
     parser.error(f"Unsupported command: {args.command}")
     return 2
 

@@ -14,6 +14,12 @@ The comparison website and its `/run` launch guide are separate from this panel.
 
 It is **not** a model host, model downloader, cloud GPU provider, or automatic proof that a model server used a GPU.
 
+`omobench prepare`/`omobench launch` and the panel's `/guided` page add a reviewed,
+managed CPU setup path (a development milestone, not an installer): they download
+and verify one pinned model + runtime recipe from `catalog/downloads/`, then run
+the same unchanged benchmark engine described below. See
+[guided-launcher.md](docs/guided-launcher.md).
+
 ## V1 scope and invariants
 
 - Public results are for catalogued open-weight, text-generation models.
@@ -52,6 +58,7 @@ Keep localhost/token/origin protections and the one-panel-per-checkout lock.
 | --- | --- |
 | `benchmarks/profiles/` | Fixed, versioned benchmark workloads |
 | `catalog/models/` | Eligible-model registry |
+| `catalog/downloads/` | Reviewed managed download recipes (model + runtime provenance for `omobench prepare`/`launch`); see [guided-launcher.md](docs/guided-launcher.md) |
 | `cli/` | `omobench` CLI, browser controller/assets, and tests |
 | `schema/` | Public `result.json` contract |
 | `tools/` | Result validator and validator tests |

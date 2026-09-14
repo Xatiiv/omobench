@@ -10,6 +10,15 @@ It does not install models, start the model server, or switch its execution devi
 The hosted website links to these launch instructions; it does not remotely execute
 programs on visitors' computers.
 
+Don't have a server running yet? The panel's **guided CPU setup** link opens
+`/guided`, a separate page that downloads, verifies, and starts one reviewed
+small CPU model for you, then runs this same benchmark. It is a development
+milestone, not a general installer, and CPU results from it are local-only
+for the same reason CPU results are local-only everywhere else in OmoBench.
+See [Guided CPU setup](guided-launcher.md). This page describes the original,
+"connect to a server you already run yourself" workflow, which stays available
+either way.
+
 ## First-time setup
 
 1. Open a terminal in your existing OmoBench checkout. Use Linux, macOS, or WSL2

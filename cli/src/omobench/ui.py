@@ -473,6 +473,9 @@ class UIServer(ThreadingHTTPServer):
         self.origin = f"http://127.0.0.1:{self.server_port}"
         self.token = secrets.token_urlsafe(32)
         self.controller = Controller(root)
+        from .ui_managed import ManagedController
+
+        self.managed = ManagedController(root, self.controller)
 
 
 class UIHandler(BaseHTTPRequestHandler):
@@ -514,7 +517,10 @@ class UIHandler(BaseHTTPRequestHandler):
             self._authorize()
             static = {"/": ("index.html", "text/html; charset=utf-8"),
                       "/app.js": ("app.js", "text/javascript; charset=utf-8"),
-                      "/style.css": ("style.css", "text/css; charset=utf-8")}
+                      "/style.css": ("style.css", "text/css; charset=utf-8"),
+                      "/guided": ("guided.html", "text/html; charset=utf-8"),
+                      "/guided.js": ("guided.js", "text/javascript; charset=utf-8"),
+                      "/guided.css": ("guided.css", "text/css; charset=utf-8")}
             if self.path in static:
                 name, mime = static[self.path]
                 return self._send(200, files("omobench").joinpath("web", name).read_bytes(), mime)
@@ -528,6 +534,19 @@ class UIHandler(BaseHTTPRequestHandler):
                 if match[2]:
                     return self._send(200, controller.bundle(match[1]), "application/zip")
                 return self._json(controller.detail(match[1]))
+            managed = self.server.managed
+            if self.path == "/api/managed/recipes":
+                return self._json({"recipes": managed.recipes(), "default_storage_dir": managed.default_storage_dir()})
+            if self.path == "/api/managed/setup-jobs":
+                return self._json(managed.setup_job_list())
+            match = re.fullmatch(r"/api/managed/setup-jobs/(mjob-[a-f0-9]{16})", self.path)
+            if match:
+                return self._json(managed.setup_job_detail(match[1]))
+            if self.path == "/api/managed/runs":
+                return self._json(managed.run_job_list())
+            match = re.fullmatch(r"/api/managed/runs/(mrun-[a-f0-9]{16})", self.path)
+            if match:
+                return self._json(managed.run_job_detail(match[1]))
             raise UIError("Not found.", 404)
         except UIError as error:
             self._json({"error": str(error)}, error.status)
@@ -556,6 +575,22 @@ class UIHandler(BaseHTTPRequestHandler):
                 if action in {"cancel", "prepare"}:
                     return self._json(getattr(controller, action)(job_id))
                 return self._json(getattr(controller, action)(job_id, data))
+            managed = self.server.managed
+            if self.path == "/api/managed/review":
+                return self._json(managed.review(data))
+            if self.path == "/api/managed/setup-jobs":
+                return self._json(managed.prepare(data), 202)
+            match = re.fullmatch(r"/api/managed/setup-jobs/(mjob-[a-f0-9]{16})/cancel", self.path)
+            if match:
+                return self._json(managed.cancel_setup(match[1]))
+            if self.path == "/api/managed/runs":
+                mode = data.get("mode")
+                if mode not in {"smoke", "execute"}:
+                    raise UIError("Choose managed run mode 'smoke' or 'execute'.")
+                return self._json(managed.start_run(data, mode=mode), 202)
+            match = re.fullmatch(r"/api/managed/runs/(mrun-[a-f0-9]{16})/cancel", self.path)
+            if match:
+                return self._json(managed.cancel_run(match[1]))
             raise UIError("Not found.", 404)
         except UIError as error:
             self._json({"error": str(error)}, error.status)
@@ -602,6 +637,7 @@ def _serve_ui(root: Path, port: int, open_browser: bool) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        server.managed.close()
         server.controller.close()
         server.server_close()
         signal.signal(signal.SIGTERM, previous)

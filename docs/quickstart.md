@@ -158,6 +158,12 @@ command. See [troubleshooting](troubleshooting.md).
 ## Start the browser workflow
 
 Start and load your model separately using the [model-server guide](model-server.md).
+Alternatively, `omobench ui`'s `/guided` page (and `omobench prepare`/`omobench launch`
+on the command line) can download, verify, and start one reviewed small CPU
+model for you; see [Guided CPU setup](guided-launcher.md). It adds one extra
+requirement of its own — Linux x86_64 with glibc 2.34 or newer — because its
+pinned runtime build depends on it.
+
 Then, in the activated OmoBench terminal:
 
 ```bash
