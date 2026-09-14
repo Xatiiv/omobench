@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OmoBench · Launcher design preview</title>
+  <style>/* PREVIEW_STYLE */</style>
+</head>
+<body>
+<div class="preview-banner"><strong>INTERACTIVE DESIGN PREVIEW</strong><span>No downloads or benchmarks run here.</span></div>
+<div class="app-shell">
+  <aside class="sidebar">
+    <a class="brand" href="#benchmarks" aria-label="OmoBench home"><span class="brand-mark"><i></i><i></i><i></i></span>omo<span class="brand-light">bench</span></a>
+    <div class="edition">THE OPEN MODEL BENCHMARK</div>
+    <nav aria-label="Main navigation">
+      <button class="nav-item selected" data-view="benchmarks"><span aria-hidden="true">◫</span>Benchmarks</button>
+      <button class="nav-item" data-view="results"><span aria-hidden="true">▥</span>Results</button>
+      <button class="nav-item" data-view="settings"><span aria-hidden="true">⚙</span>Storage & setup</button>
+    </nav>
+    <div class="sidebar-bottom"><span class="local-dot"></span> Runs on your machine<p>Your results stay local.<br>You choose what to share.</p><small>Launcher concept / milestone 01</small></div>
+  </aside>
+  <main>
+    <header class="topbar"><span id="breadcrumb">Workspace / Benchmarks</span><button class="text-button" id="cli-button">Use the CLI <span aria-hidden="true">↗</span></button></header>
+    <section id="benchmarks" class="view">
+      <div class="page-heading"><div><div class="eyebrow">MEET YOUR MACHINE</div><h1>Find your model’s pace.</h1><p>Choose a model. Pick a test. See how it runs on your hardware.</p></div><span class="outline-badge">Local execution</span></div>
+      <div class="workspace-grid">
+        <div>
+          <div class="hero-card"><div><div class="eyebrow">OPEN MODELS. REAL MEASUREMENTS.</div><h2>A clear view of<br>inference performance.</h2><p>Response time, generation speed, and reliability.<br>One repeatable workload at a time.</p><span class="hero-tag">Powered by the existing OmoBench CLI</span></div><div class="chip-art" aria-hidden="true"><div class="chip-lines"></div><div class="chip-core">omo<span>INFERENCE</span></div></div></div>
+          <div class="section-label"><h2>Choose your test</h2><span>Fixed, versioned workloads</span></div>
+          <div id="profile-list" class="profile-list" role="group" aria-label="Benchmark profile"></div>
+          <details class="advanced"><summary>Connect an existing model server <span>Advanced</span></summary><p>Keep your own runtime and model settings. In the application, this will use the current connection workflow.</p><label for="endpoint">Server address</label><input id="endpoint" value="http://127.0.0.1:8092"><label for="server-model">Server model identifier</label><input id="server-model" placeholder="The identifier accepted by your server"><button id="advanced-button" class="secondary">Preview connection check</button><p id="advanced-note" aria-live="polite"></p></details>
+        </div>
+        <aside class="configuration">
+          <div class="section-label"><h2>Your configuration</h2><span class="step-number">01</span></div>
+          <label>Run on</label><div class="segmented" role="group" aria-label="Execution device"><button class="active" data-device="cpu" aria-pressed="true">CPU</button><button data-device="gpu" aria-pressed="false">GPU</button></div>
+          <div class="hardware-card"><span class="hardware-icon" aria-hidden="true">▦</span><div><strong id="hardware-name">Your processor</strong><p id="hardware-detail">Detected during application setup</p></div></div>
+          <p id="device-note" class="field-note">CPU inference measurements can be saved locally.</p>
+          <label for="model">Model</label><select id="model"></select><p class="field-note" id="model-note"></p>
+          <div class="recipe-note">This preview reads the model catalog. Automatic download configurations are still being qualified.</div>
+          <label for="folder-inline">Model & runtime storage</label><input id="folder-inline" value="D:\OmoBench"><p class="field-note">Choose where larger downloads will live.</p>
+          <div class="config-summary"><div><span>Selected test</span><strong id="selected-test">Chat responsiveness</strong></div><div><span>Workload limit</span><strong id="duration">15 minutes</strong></div><div><span>Download size</span><strong>Shown before download</strong></div></div>
+          <button id="prepare-button" class="primary">Preview setup <span aria-hidden="true">→</span></button><p class="button-note">A design walkthrough. Nothing is installed.</p>
+        </aside>
+      </div>
+    </section>
+    <section id="setup" class="view" hidden>
+      <button class="text-button back-button" data-back="benchmarks">← Back to benchmarks</button>
+      <div class="page-heading"><div><div class="eyebrow">PREPARE ONCE. BENCHMARK AGAIN.</div><h1>A home for your models.</h1><p>Review the files and storage location before anything downloads.</p></div></div>
+      <div class="setup-grid"><div class="panel"><h2>Storage location</h2><label for="folder-setup">Keep models and runtimes in</label><input id="folder-setup" value="D:\OmoBench"><p class="field-note">The finished application will check available space and reuse verified files.</p><hr><h2>What will be prepared</h2><div class="download-row"><span class="hardware-icon">▦</span><div><strong>Inference runtime</strong><p>A tested build for your selected hardware</p></div><span class="muted">Size pending</span></div><div class="download-row"><span class="hardware-icon">◇</span><div><strong id="setup-model"></strong><p>Exact revision and file checksum recorded</p></div><span class="muted">Size pending</span></div><div class="download-row"><span class="hardware-icon">◴</span><div><strong>Benchmark runner</strong><p>The existing pinned GuideLLM workflow</p></div><span class="muted">Size pending</span></div></div><div class="panel setup-summary"><span class="small-tag">SETUP PREVIEW</span><h2>Ready when you are.</h2><p>In the finished app, you approve the download once. OmoBench takes care of starting the model and saving the results.</p><div class="notice">Windows setup and automatic downloads are under development. This walkthrough simulates preparation.</div><button id="start-preview" class="primary">Preview a run →</button><p class="button-note">Uses the test you selected. No inference runs.</p></div></div>
+    </section>
+    <section id="running" class="view" hidden>
+      <div class="page-heading"><div><div class="eyebrow">ONE WORKLOAD. VISIBLE PROGRESS.</div><h1 id="running-title">Preparing your benchmark.</h1><p id="running-model"></p></div><span class="outline-badge">Simulation</span></div>
+      <div class="run-grid"><div class="panel running-panel"><div class="orb" aria-hidden="true"><span>omo</span></div><h2 id="stage-title" aria-live="polite">Checking local files</h2><p id="stage-description">Reusing verified downloads where possible.</p><div class="indeterminate" role="progressbar" aria-label="Simulated run activity"><span></span></div><div class="run-facts"><div><span>Elapsed in preview</span><strong id="elapsed">00:00</strong></div><div><span>Selected workload limit</span><strong id="running-limit"></strong></div></div><p class="field-note">A real run will display reported progress. Elapsed time alone does not indicate how much work remains.</p><button class="secondary" id="show-results">View result layout →</button><button class="danger-link" id="cancel-preview">Cancel preview</button></div><div class="panel"><h2>Every step, accounted for.</h2><ol id="stage-list" class="stage-list"><li>Check files and environment</li><li>Load the model</li><li>Run the fixed benchmark</li><li>Save measurements and evidence</li></ol><div class="notice">Detailed logs remain available. The main screen explains what is happening without requiring you to interpret them.</div><details class="sample-log"><summary>View example status messages</summary><pre id="example-log">[preview] Checking files…</pre></details></div></div>
+    </section>
+    <section id="results" class="view" hidden>
+      <div class="page-heading"><div><div class="eyebrow">UNDERSTAND THE RUN</div><h1>Your results, explained.</h1><p>Measurements appear here after an actual benchmark.</p></div><span class="outline-badge">Result layout · no measurements</span></div>
+      <div class="metric-grid"><div class="metric-card"><span>Output speed</span><strong>— <small>tokens / sec</small></strong><p>How quickly the model generates output.</p></div><div class="metric-card"><span>Time to first token · median</span><strong>— <small>ms</small></strong><p>How long you wait for the response to begin.</p></div><div class="metric-card"><span>Time to first token · p95</span><strong>— <small>ms</small></strong><p>Latency for the slower end of requests.</p></div></div>
+      <div class="results-grid"><div class="panel"><div class="section-label"><h2>Run details</h2><span class="small-tag">LOCAL CPU RESULT</span></div><dl class="result-details"><dt>Model</dt><dd id="result-model">—</dd><dt>Workload</dt><dd id="result-profile">—</dd><dt>Successful / attempted requests</dt><dd>— / —</dd><dt>Incomplete or failed requests</dt><dd>—</dd><dt>Error rate</dt><dd>—</dd><dt>Runtime and model revision</dt><dd>Captured from the real run</dd></dl><p class="field-note">Completion and request reliability are shown separately. No measurements are invented for this prototype.</p></div><div class="panel"><h2>Keep it. Compare it. Share it.</h2><p>Real runs will be saved in local history, with the configuration and original evidence available for inspection.</p><button class="secondary full" disabled>Export result · available after a real run</button><button class="secondary full" disabled>Create pull request · eligible GPU runs</button><p class="field-note">Publication still requires reviewing an eligible evidence bundle and opening a GitHub PR. CPU measurements remain local.</p><button class="primary" id="another-preview">Choose another test →</button></div></div>
+    </section>
+    <section id="settings" class="view" hidden>
+      <div class="page-heading"><div><div class="eyebrow">YOUR WORKSPACE</div><h1>Storage & setup.</h1><p>Keep large downloads on the drive you choose.</p></div></div><div class="panel settings-panel"><label for="folder-settings">Model and runtime folder</label><input id="folder-settings" value="D:\OmoBench"><p class="field-note">This preview remembers your choice only until you close or reload it. It never creates a directory.</p><button id="save-settings" class="primary">Use this location in the preview</button><div id="settings-feedback" class="notice" hidden aria-live="polite"></div><hr><h2>Installation readiness</h2><p>The first release targets Windows. The current runner requires a supported Linux, macOS, or WSL2 environment. Native Windows GPU execution has not been qualified by this milestone.</p><p>The application will show compatibility before downloading a runtime. An incompatible GPU will never silently switch your test to CPU.</p></div>
+    </section>
+    <footer>Fixed workloads. Original evidence. Results reviewed through GitHub.<span>OmoBench / launcher preview</span></footer>
+  </main>
+</div>
+<dialog id="cli-dialog"><form method="dialog"><button class="dialog-close" aria-label="Close CLI instructions">×</button></form><div class="eyebrow">SAME BENCHMARK. YOUR TERMINAL.</div><h2>The CLI stays a first-class option.</h2><p>This is the current command for a model server that is already running. Replace its address and model identifier with your server’s values.</p><pre id="cli-command"></pre><p>The experimental <code>omobench launch</code> command can also start an existing local CPU server for <code>chat-small-v1</code>. See <code>docs/guided-launcher.md</code> for the milestone’s scope and checks.</p></dialog>
+<script id="preview-data" type="application/json">PREVIEW_DATA</script>
+<script>/* PREVIEW_SCRIPT */</script>
+</body>
+</html>

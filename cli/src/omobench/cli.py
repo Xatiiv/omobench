@@ -1056,6 +1056,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=__version__)
     subcommands = parser.add_subparsers(dest="command", required=True)
 
+    from .launcher import add_launch_parser
+    add_launch_parser(subcommands)
+
     doctor = subcommands.add_parser("doctor", help="inspect local benchmark prerequisites")
     doctor.add_argument("--json", action="store_true", help="print machine-readable output")
 
@@ -1125,6 +1128,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+    if args.command == "launch":
+        from .launcher import launch
+
+        return launch(args)
     if args.command == "ui":
         from .ui import serve_ui
 
