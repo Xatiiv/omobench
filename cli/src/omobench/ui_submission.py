@@ -87,14 +87,17 @@ def destination(result: dict) -> str:
 def description(result: dict, prefix: str) -> tuple[str, str]:
     title = f"Add {result['model']['id']} benchmark ({result['benchmark']['profile_id']})"
     metrics = result["results"]
+    # Absent only on a result predating execution-device tracking; those are GPU runs.
+    device_label = "CPU" if result.get("execution_device") == "cpu" else "GPU"
     body = (
         f"Adds the complete evidence bundle at `{prefix}`.\n\n"
         f"- Model: {result['model']['id']} at `{result['model']['revision']}`\n"
         f"- Runtime: {result['runtime']['framework']} {result['runtime']['version']}\n"
         f"- Profile: `{result['benchmark']['profile_id']}`\n"
+        f"- Execution device: {device_label}\n"
         f"- Successful requests: {metrics['requests']['succeeded']} / {metrics['requests']['attempted']}\n"
         f"- Output tokens/s: {metrics['output_tokens_per_second']:.2f}\n\n"
-        "The contributor confirms GPU execution and has reviewed the bundle for secrets. "
+        f"The contributor confirms {device_label} execution and has reviewed the bundle for secrets. "
         "The local schema, catalog, artifact-hash, and duplicate checks passed. "
         "CI and maintainer review are still required before this becomes a registry result.\n"
     )

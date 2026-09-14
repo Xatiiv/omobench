@@ -521,6 +521,129 @@ class SafeExtractTests(unittest.TestCase):
             with self.assertRaises(ms.ManagedSetupError):
                 self._extract(temporary, [("app/link", {"kind": "symlink", "target": "/etc/passwd"})])
 
+    def test_internal_relative_symlink_is_materialized_as_a_regular_file(self):
+        """Mirrors a real llama.cpp archive: libmtmd.so -> libmtmd.so.0.0.0 in the same dir."""
+        with tempfile.TemporaryDirectory() as temporary:
+            library_content = b"\x7fELF-fake-shared-library-bytes"
+            executable = self._extract(
+                temporary,
+                [
+                    ("app/run", {"kind": "file", "content": b"#!/bin/sh\necho hi\n", "mode": 0o755}),
+                    (
+                        "app/libmtmd.so.0.0.0",
+                        {"kind": "file", "content": library_content, "mode": 0o755},
+                    ),
+                    ("app/libmtmd.so", {"kind": "symlink", "target": "libmtmd.so.0.0.0"}),
+                ],
+            )
+            link_path = executable.parent / "libmtmd.so"
+            self.assertTrue(link_path.is_file())
+            self.assertFalse(link_path.is_symlink())
+            self.assertEqual(link_path.read_bytes(), library_content)
+            # Executable permission from the archived target is preserved.
+            self.assertTrue(link_path.stat().st_mode & 0o111)
+
+    def test_symlink_pointing_outside_the_destination_via_traversal_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(ms.ManagedSetupError):
+                self._extract(
+                    temporary,
+                    [
+                        ("app/run", {"kind": "file", "content": b"x", "mode": 0o755}),
+                        ("app/evil", {"kind": "symlink", "target": "../../../../etc/passwd"}),
+                    ],
+                )
+
+    def test_symlink_cycle_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(ms.ManagedSetupError, "cycle"):
+                self._extract(
+                    temporary,
+                    [
+                        ("app/run", {"kind": "file", "content": b"x", "mode": 0o755}),
+                        ("app/a", {"kind": "symlink", "target": "b"}),
+                        ("app/b", {"kind": "symlink", "target": "a"}),
+                    ],
+                )
+
+    def test_self_referential_symlink_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(ms.ManagedSetupError, "cycle"):
+                self._extract(
+                    temporary,
+                    [
+                        ("app/run", {"kind": "file", "content": b"x", "mode": 0o755}),
+                        ("app/loop", {"kind": "symlink", "target": "loop"}),
+                    ],
+                )
+
+    def test_symlink_to_missing_target_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(ms.ManagedSetupError, "does not exist"):
+                self._extract(
+                    temporary,
+                    [
+                        ("app/run", {"kind": "file", "content": b"x", "mode": 0o755}),
+                        ("app/link", {"kind": "symlink", "target": "missing.so"}),
+                    ],
+                )
+
+    def test_symlink_with_backslash_target_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(ms.ManagedSetupError):
+                self._extract(
+                    temporary,
+                    [
+                        ("app/run", {"kind": "file", "content": b"x", "mode": 0o755}),
+                        ("app/link", {"kind": "symlink", "target": "evil\\path"}),
+                    ],
+                )
+
+    def test_symlink_to_directory_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(ms.ManagedSetupError, "not a regular file"):
+                self._extract(
+                    temporary,
+                    [
+                        ("app/run", {"kind": "file", "content": b"x", "mode": 0o755}),
+                        ("app/subdir", {"kind": "dir"}),
+                        ("app/link", {"kind": "symlink", "target": "subdir"}),
+                    ],
+                )
+
+    def test_full_llamacpp_style_archive_is_extracted_safely(self):
+        """One fixture covering an executable, a versioned library, a valid symlink to it,
+        a rejected traversal symlink, a rejected cycle, and a rejected hard link."""
+        with tempfile.TemporaryDirectory() as temporary:
+            archive_path = Path(temporary) / "archive.tar.gz"
+            build_tar_gz(
+                archive_path,
+                [
+                    ("llama-b10621/main", {"kind": "file", "content": b"#!/bin/sh\n", "mode": 0o755}),
+                    (
+                        "llama-b10621/libmtmd.so.0.0.0",
+                        {"kind": "file", "content": b"library-bytes", "mode": 0o755},
+                    ),
+                    (
+                        "llama-b10621/libmtmd.so",
+                        {"kind": "symlink", "target": "libmtmd.so.0.0.0"},
+                    ),
+                ],
+            )
+            dest = Path(temporary) / "dest"
+            executable = ms.safe_extract_tar_gz(
+                archive_path,
+                dest,
+                executable_path="llama-b10621/main",
+                max_entries=100,
+                max_extracted_bytes=10_000,
+            )
+            self.assertTrue(executable.is_file())
+            link_path = dest / "llama-b10621" / "libmtmd.so"
+            self.assertTrue(link_path.is_file())
+            self.assertFalse(link_path.is_symlink())
+            self.assertEqual(link_path.read_bytes(), b"library-bytes")
+
     def test_hardlink_is_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
             with self.assertRaises(ms.ManagedSetupError):

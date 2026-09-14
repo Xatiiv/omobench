@@ -483,11 +483,15 @@ def required_text(value: Any, label: str) -> str:
 
 
 def validate_execution_device(execution_device: str) -> None:
-    if execution_device != "gpu":
-        raise ValueError(
-            "OmoBench v1 packages GPU-backed runs only. "
-            "CPU-only runs can be useful for local testing, but they cannot be published yet."
-        )
+    """Confirm an explicit, recognized execution device was declared.
+
+    execution_device records what performed inference for this run, not
+    merely what hardware the machine happens to have. CPU and GPU runs are
+    both first-class, publishable OmoBench results; this only rejects a
+    missing or unrecognized declaration.
+    """
+    if execution_device not in {"cpu", "gpu"}:
+        raise ValueError("--execution-device must be 'cpu' or 'gpu'.")
 
 
 def report_value(report: dict[str, Any], *path: str) -> Any:
@@ -656,7 +660,18 @@ def hardware_from_environment(
     cpu_override: str | None,
     ram_gb_override: float | None,
     gpu_memory_gb_override: float | None = None,
+    *,
+    execution_device: str,
 ) -> dict[str, Any]:
+    """Build the normalized `hardware` object for what actually performed inference.
+
+    execution_device decides how GPUs are handled, independent of what the
+    machine happens to have: a "cpu" run always records an empty gpus list
+    and a null driver_version, even when the saved environment snapshot
+    shows an installed GPU, because that GPU did not perform inference. The
+    full detected hardware (including any idle GPU) still lives in the
+    environment.json artifact; it is just not promoted into this object.
+    """
     cpu = required_text(cpu_override or environment.get("cpu"), "CPU")
     ram_gb_value = ram_gb_override if ram_gb_override is not None else environment.get("ram_gb")
     if isinstance(ram_gb_value, bool) or not isinstance(ram_gb_value, int | float):
@@ -664,6 +679,23 @@ def hardware_from_environment(
     ram_gb = float(ram_gb_value)
     if not math.isfinite(ram_gb) or ram_gb <= 0:
         raise ValueError("RAM must be a finite positive number.")
+    os_name = required_text(environment.get("operating_system"), "Operating system")
+
+    if execution_device == "cpu":
+        if gpu_memory_gb_override is not None:
+            raise ValueError("--gpu-memory-gb cannot be used when --execution-device is cpu.")
+        return {
+            "os": os_name,
+            "cpu": cpu,
+            "ram_gb": ram_gb,
+            "gpus": [],
+            "driver_version": None,
+            "detection": {
+                "hardware": "user-confirmed" if (cpu_override or ram_gb_override is not None) else "auto",
+                "model": "manual",
+                "runtime": "manual",
+            },
+        }
 
     if gpu_memory_gb_override is not None and (
         isinstance(gpu_memory_gb_override, bool)
@@ -750,7 +782,7 @@ def hardware_from_environment(
         for (vendor, model, memory_gb), count in sorted(grouped_gpus.items())
     ]
     return {
-        "os": required_text(environment.get("operating_system"), "Operating system"),
+        "os": os_name,
         "cpu": cpu,
         "ram_gb": ram_gb,
         "gpus": gpus,
@@ -917,7 +949,11 @@ def package_local_run(args: argparse.Namespace) -> int:
         if not isinstance(environment, dict):
             raise ValueError("environment.json must contain an object at its root.")
         hardware = hardware_from_environment(
-            environment, args.cpu, args.ram_gb, getattr(args, "gpu_memory_gb", None)
+            environment,
+            args.cpu,
+            args.ram_gb,
+            getattr(args, "gpu_memory_gb", None),
+            execution_device=args.execution_device,
         )
         profile_path = root / "benchmarks" / "profiles" / f"{args.profile}.yaml"
         if not profile_path.is_file():
@@ -949,6 +985,14 @@ def package_local_run(args: argparse.Namespace) -> int:
             "runner": "guidellm",
             "runner_version": normalized["runner_version"],
         }
+        # execution_device is deliberately excluded from this payload: a gpu run's
+        # fingerprint must stay identical to what pre-execution_device code
+        # computed for the same configuration, so an old GPU bundle and a newly
+        # repackaged equivalent GPU run still collide under the validator's
+        # (configuration_fingerprint, raw_output_sha256) duplicate check. CPU vs
+        # GPU and CPU vs CPU identity are still distinguished below: a cpu run
+        # always has an empty hardware.gpus (schema-enforced), and a cpu run's
+        # own hardware.cpu/ram_gb/os still vary per machine.
         fingerprint_payload = {
             "model": model,
             "runtime": runtime,
@@ -969,6 +1013,7 @@ def package_local_run(args: argparse.Namespace) -> int:
             "run_id": run_id,
             "started_at": normalized["started_at"],
             "configuration_fingerprint": sha256_json(fingerprint_payload),
+            "execution_device": args.execution_device,
             "model": model,
             "runtime": runtime,
             "hardware": hardware,
@@ -1190,7 +1235,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--execution-device",
         required=True,
         choices=["cpu", "gpu"],
-        help="where inference ran; OmoBench v1 packages GPU-backed runs only",
+        help=(
+            "what performed inference for this run; both cpu and gpu are publishable "
+            "OmoBench results, and this is a contributor declaration, not independent proof"
+        ),
     )
     package.add_argument("--runtime-arg", action="append", default=[], help="one normalized framework startup argument; repeat as needed")
     package.add_argument("--profile", required=True, choices=sorted(PROFILE_SPECS), help="versioned OmoBench profile")

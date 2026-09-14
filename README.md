@@ -9,9 +9,9 @@ can submit complete evidence bundles through pull requests for comparison on
 the website.
 
 You can now control a benchmark through a **local browser panel**. Its buttons
-run the existing CLI and pinned GuideLLM runner. CPU measurements are available
-locally; public v1 submissions require confirmed GPU execution and a model in
-the [eligible-model catalog](catalog/models/seed-v1.yaml).
+run the existing CLI and pinned GuideLLM runner. CPU and GPU executions are both
+first-class, publishable OmoBench results, provided the model is in the
+[eligible-model catalog](catalog/models/seed-v1.yaml).
 
 ## Start here
 
@@ -97,17 +97,19 @@ On WSL, use your normal Windows browser.
 1. Enter the **Server address** and **Server model identifier** from your running
    server. Its address is different from the panel's port `8765`.
 2. Click **Test connection** and wait for the streaming connection confirmation.
-3. Choose `chat-small-v1` for a first run. Select **CPU · local measurements**
-   only after configuring CPU execution in the server, or select GPU after
-   confirming GPU inference in its logs or telemetry. Tick the confirmation.
+3. Choose `chat-small-v1` for a first run. Select **CPU** only after configuring
+   CPU execution in the server, or select **GPU** after confirming GPU inference
+   in its logs or telemetry. Tick the confirmation.
 4. Click **Run benchmark**, watch the logs, and inspect the final measurements.
    The fixed workload can take several minutes, particularly on CPU.
-5. Use **Download local summary** to save measurements. A completed GPU run also
-   offers **Review & submit**: packaging, validation, ZIP download, and PR creation.
+5. Use **Download local summary** to save measurements. A completed run also
+   offers **Review & submit**: packaging, validation, ZIP download, and PR
+   creation, for CPU and GPU alike.
 
 Selecting CPU or GPU in OmoBench records your declaration; it does not change
-the model server. CPU runs measure language-model inference on your CPU, not a
-general-purpose CPU score. They cannot currently become public v1 results.
+the model server. A CPU run measures language-model inference on your CPU, not
+a general-purpose CPU score. CPU and GPU results are both first-class,
+publishable OmoBench results.
 
 See [troubleshooting](docs/troubleshooting.md) for missing commands, WSL paths,
 incorrect identifiers, streaming errors, and interrupted runs.

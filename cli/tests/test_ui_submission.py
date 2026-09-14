@@ -13,7 +13,7 @@ from unittest.mock import patch
 from omobench.cli import package_local_run
 from omobench.ui import Controller, UIError
 from omobench.ui_submission import (
-    BUNDLE_FILES, GitHub, bundle_archive, bundle_snapshot, destination, prepare_submission,
+    BUNDLE_FILES, GitHub, bundle_archive, bundle_snapshot, description, destination, prepare_submission,
     submit_pull_request, validate_bundle,
 )
 from test_cli import base_package_args, build_staged_run_directory
@@ -222,6 +222,102 @@ class SubmissionTests(unittest.TestCase):
         with self.assertRaisesRegex(UIError, "confirm submission"):
             controller.submit(job_id, {})
         controller.close()
+
+    def test_controller_cpu_packaging_is_enabled_and_reviewable(self) -> None:
+        """CPU results are first-class: the panel's package/review/submit workflow must
+        accept them the same way it already accepts GPU results."""
+        controller = Controller(self.root)
+        controller.environment["PYTHONPATH"] = str(ROOT / "cli" / "src")
+        job_id = "job-" + "b" * 16
+        directory = controller.storage / job_id
+        directory.mkdir()
+        shutil.rmtree(self.run)  # setUp already staged an unrelated GPU-oriented run at this fixed path
+        cpu_run_source = build_staged_run_directory(
+            self.root,
+            environment={"operating_system": "Test Linux", "cpu": "Test CPU", "ram_gb": 64},
+        )
+        cpu_run = directory / cpu_run_source.name
+        shutil.move(cpu_run_source, cpu_run)
+        controller.jobs[job_id] = {
+            "id": job_id,
+            "created_at": "2026-09-10T12:00:00Z",
+            "status": "completed",
+            "model": "test-alias",
+            "profile": "chat-small-v1",
+            "execution_device": "cpu",
+            "summary": {"results": {}},
+            "validation": None,
+            "submission": None,
+        }
+        data = {
+            "model": "Qwen/Qwen3-4B",
+            "model_revision": "abc123",
+            "framework": "llama.cpp",
+            "framework_version": "test-build",
+            "submitter": "tester",
+            "quantization": "Q4_0",
+            "runtime_args": ["--ctx-size=2048"],
+        }
+        packaged = controller.package(job_id, data)
+        self.assertTrue(packaged["validation"]["valid"], packaged)
+        result = json.loads((cpu_run / "result.json").read_text())
+        self.assertEqual(result["execution_device"], "cpu")
+        self.assertEqual(result["hardware"]["gpus"], [])
+        self.assertIsNone(result["hardware"]["driver_version"])
+
+        preview = prepare_submission(self.root, cpu_run)
+        self.assertEqual(len(preview["files"]), 5)
+        self.assertIn("CPU", preview["body"])
+        controller.close()
+
+    def test_controller_rejects_gpu_memory_override_for_a_cpu_job(self) -> None:
+        controller = Controller(self.root)
+        controller.environment["PYTHONPATH"] = str(ROOT / "cli" / "src")
+        job_id = "job-" + "c" * 16
+        directory = controller.storage / job_id
+        directory.mkdir()
+        shutil.rmtree(self.run)  # setUp already staged an unrelated GPU-oriented run at this fixed path
+        cpu_run_source = build_staged_run_directory(
+            self.root,
+            environment={"operating_system": "Test Linux", "cpu": "Test CPU", "ram_gb": 64},
+        )
+        cpu_run = directory / cpu_run_source.name
+        shutil.move(cpu_run_source, cpu_run)
+        controller.jobs[job_id] = {
+            "id": job_id,
+            "created_at": "2026-09-10T12:00:00Z",
+            "status": "completed",
+            "model": "test-alias",
+            "profile": "chat-small-v1",
+            "execution_device": "cpu",
+            "summary": {"results": {}},
+            "validation": None,
+            "submission": None,
+        }
+        data = {
+            "model": "Qwen/Qwen3-4B",
+            "model_revision": "abc123",
+            "framework": "llama.cpp",
+            "framework_version": "test-build",
+            "submitter": "tester",
+            "gpu_memory_gb": 16.0,
+        }
+        with self.assertRaisesRegex(UIError, "does not apply to a CPU run"):
+            controller.package(job_id, data)
+        self.assertFalse((cpu_run / "result.json").exists())
+        controller.close()
+
+    def test_pull_request_description_labels_execution_device(self) -> None:
+        gpu_result, _, _ = bundle_snapshot(self.root, self.run)
+        self.assertEqual(gpu_result["execution_device"], "gpu")
+        _, gpu_body = description(gpu_result, "results/example")
+        self.assertIn("Execution device: GPU", gpu_body)
+        self.assertIn("confirms GPU execution", gpu_body)
+
+        cpu_result = dict(gpu_result, execution_device="cpu")
+        _, cpu_body = description(cpu_result, "results/example")
+        self.assertIn("Execution device: CPU", cpu_body)
+        self.assertIn("confirms CPU execution", cpu_body)
 
 
 if __name__ == "__main__":

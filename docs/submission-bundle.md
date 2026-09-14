@@ -5,9 +5,11 @@
 OmoBench v1 covers open-weight text-generation models served through an
 OpenAI-compatible chat-completions endpoint.
 
-Public v1 records require actual GPU inference. CPU runs can be benchmarked and
-downloaded locally through the [browser panel](browser-control.md), but its local
-summary is not a public `result.json` and must not be placed under `results/`.
+CPU and GPU runs are both eligible for public v1 records: `--execution-device`
+declares what actually performed inference, not merely what hardware is
+installed. A CPU run's quick **Download local summary** JSON is still not a
+public `result.json` and must not be placed under `results/` by hand — use
+packaging (CLI or panel) to produce a schema-ready bundle instead.
 
 There are two submission routes: **Review & submit** in `omobench ui`, or the
 [manual PR workflow](#manual-pull-request-workflow). Both preserve the same five
@@ -75,10 +77,10 @@ endpoint redaction is not a substitute for reviewing all files and startup argum
 
 ## Create the local normalized summary
 
-After a confirmed GPU run finishes successfully, package its staging directory
-into a local `result.json`. This is a metadata template: replace the model,
-revision, quantization, version, paths, submitter, and every runtime argument
-with the actual values from that run. It is not the CPU demo's configuration.
+After a confirmed CPU or GPU run finishes successfully, package its staging
+directory into a local `result.json`. This is a metadata template: replace the
+model, revision, quantization, version, paths, submitter, and every runtime
+argument with the actual values from that run.
 
 ```bash
 omobench package \
@@ -115,13 +117,14 @@ The model revision, quantization, framework version, and startup arguments are
 deliberately supplied by the operator. An OpenAI-compatible endpoint cannot
 reliably report those reproducibility-critical facts itself.
 
-OmoBench v1 packages GPU-backed results only. The operator must pass
-`--execution-device gpu` after confirming that the model server **genuinely
-ran on the GPU** — `--execution-device gpu` records that confirmation, it
-does not itself verify or cause GPU execution.
-
-CPU-only runs may be useful for local testing, but they are not publishable
-records yet.
+CPU and GPU results are both publishable. `--execution-device` describes what
+actually performed inference, not merely what hardware is installed: pass
+`--execution-device gpu` only after confirming the model server **genuinely
+ran on the GPU** (the flag records that confirmation; it does not itself
+verify or cause GPU execution), or `--execution-device cpu` for a confirmed
+CPU-only run. A CPU package does not need GPU detection, VRAM, or a driver —
+its `hardware.gpus` is recorded empty even when the machine has an idle,
+unused GPU, because that GPU did not perform inference.
 
 ## GPU vendor and memory
 

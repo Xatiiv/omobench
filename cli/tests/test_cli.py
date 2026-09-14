@@ -28,6 +28,7 @@ from omobench.cli import (
     package_local_run,
     print_doctor,
     redact_endpoint,
+    sha256_json,
     validate_execution_device,
     write_run_intent,
 )
@@ -256,7 +257,7 @@ class HardwareFromEnvironmentTests(unittest.TestCase):
             "ram_gb": 64,
             "nvidia_gpus": [{"model": "NVIDIA Test GPU", "memory_gb": 24, "driver_version": "555.1"}],
         }
-        hardware = hardware_from_environment(environment, None, None)
+        hardware = hardware_from_environment(environment, None, None, execution_device="gpu")
         self.assertEqual(hardware["gpus"], [{"vendor": "nvidia", "model": "NVIDIA Test GPU", "memory_gb": 24.0, "count": 1}])
 
     def test_generic_amd_environment_packages_and_emits_vendor_amd(self) -> None:
@@ -266,7 +267,7 @@ class HardwareFromEnvironmentTests(unittest.TestCase):
             "ram_gb": 64,
             "gpus": [{"vendor": "amd", "model": "AMD Instinct MI300X", "memory_gb": 192, "driver_version": "6.2.1"}],
         }
-        hardware = hardware_from_environment(environment, None, None)
+        hardware = hardware_from_environment(environment, None, None, execution_device="gpu")
         self.assertEqual(
             hardware["gpus"],
             [{"vendor": "amd", "model": "AMD Instinct MI300X", "memory_gb": 192.0, "count": 1}],
@@ -275,7 +276,7 @@ class HardwareFromEnvironmentTests(unittest.TestCase):
     def test_missing_detected_gpu_blocks_packaging(self) -> None:
         environment = {"operating_system": "Test Linux", "cpu": "Test CPU", "ram_gb": 64, "gpus": []}
         with self.assertRaisesRegex(ValueError, "No GPUs were detected"):
-            hardware_from_environment(environment, None, None)
+            hardware_from_environment(environment, None, None, execution_device="gpu")
 
     def test_single_unknown_memory_amd_gpu_requires_gpu_memory_gb(self) -> None:
         environment = {
@@ -285,9 +286,9 @@ class HardwareFromEnvironmentTests(unittest.TestCase):
             "gpus": [{"vendor": "amd", "model": "AMD Radeon RX 9070", "memory_gb": None, "driver_version": "31.0"}],
         }
         with self.assertRaisesRegex(ValueError, "unknown memory"):
-            hardware_from_environment(environment, None, None)
+            hardware_from_environment(environment, None, None, execution_device="gpu")
 
-        hardware = hardware_from_environment(environment, None, None, gpu_memory_gb_override=16.0)
+        hardware = hardware_from_environment(environment, None, None, gpu_memory_gb_override=16.0, execution_device="gpu")
         self.assertEqual(
             hardware["gpus"],
             [{"vendor": "amd", "model": "AMD Radeon RX 9070", "memory_gb": 16.0, "count": 1}],
@@ -305,7 +306,7 @@ class HardwareFromEnvironmentTests(unittest.TestCase):
             ],
         }
         with self.assertRaisesRegex(ValueError, "more than one"):
-            hardware_from_environment(environment, None, None, gpu_memory_gb_override=16.0)
+            hardware_from_environment(environment, None, None, gpu_memory_gb_override=16.0, execution_device="gpu")
 
     def test_invalid_gpu_memory_gb_override_types_raise_value_error(self) -> None:
         environment = {
@@ -317,7 +318,7 @@ class HardwareFromEnvironmentTests(unittest.TestCase):
         for invalid_value in ("16", True):
             with self.subTest(invalid_value=invalid_value):
                 with self.assertRaisesRegex(ValueError, "--gpu-memory-gb must be a finite positive number."):
-                    hardware_from_environment(environment, None, None, gpu_memory_gb_override=invalid_value)
+                    hardware_from_environment(environment, None, None, gpu_memory_gb_override=invalid_value, execution_device="gpu")
 
     def test_gpu_memory_gb_rejected_when_not_needed(self) -> None:
         environment = {
@@ -327,7 +328,53 @@ class HardwareFromEnvironmentTests(unittest.TestCase):
             "gpus": [{"vendor": "nvidia", "model": "NVIDIA Test GPU", "memory_gb": 24, "driver_version": "555.1"}],
         }
         with self.assertRaisesRegex(ValueError, "already has a known memory value"):
-            hardware_from_environment(environment, None, None, gpu_memory_gb_override=16.0)
+            hardware_from_environment(environment, None, None, gpu_memory_gb_override=16.0, execution_device="gpu")
+
+    def test_cpu_execution_device_records_no_gpus_and_no_driver(self) -> None:
+        environment = {"operating_system": "Test Linux", "cpu": "Test CPU", "ram_gb": 64}
+        hardware = hardware_from_environment(environment, None, None, execution_device="cpu")
+        self.assertEqual(hardware["gpus"], [])
+        self.assertIsNone(hardware["driver_version"])
+        self.assertEqual(hardware["cpu"], "Test CPU")
+        self.assertEqual(hardware["ram_gb"], 64.0)
+
+    def test_cpu_execution_device_does_not_require_any_detected_gpu(self) -> None:
+        """A CPU packaging must not need GPU detection, VRAM, or drivers at all."""
+        environment = {"operating_system": "Test Linux", "cpu": "Test CPU", "ram_gb": 64}
+        self.assertNotIn("gpus", environment)
+        hardware = hardware_from_environment(environment, None, None, execution_device="cpu")
+        self.assertEqual(hardware["gpus"], [])
+
+    def test_gpu_equipped_machine_running_cpu_only_does_not_report_the_gpu(self) -> None:
+        """A GPU-equipped machine that performed CPU-only inference must not have its idle
+        GPU promoted into the normalized hardware; that GPU did not perform inference."""
+        environment = {
+            "operating_system": "Test Linux",
+            "cpu": "Test CPU",
+            "ram_gb": 64,
+            "gpus": [
+                {
+                    "vendor": "nvidia",
+                    "model": "NVIDIA RTX 500 Ada Generation Laptop GPU",
+                    "memory_gb": 4.0,
+                    "driver_version": "596.71",
+                }
+            ],
+        }
+        hardware = hardware_from_environment(environment, None, None, execution_device="cpu")
+        self.assertEqual(hardware["gpus"], [])
+        self.assertIsNone(hardware["driver_version"])
+
+    def test_gpu_memory_gb_override_is_rejected_for_cpu_execution(self) -> None:
+        environment = {"operating_system": "Test Linux", "cpu": "Test CPU", "ram_gb": 64}
+        with self.assertRaisesRegex(ValueError, "cannot be used when --execution-device is cpu"):
+            hardware_from_environment(environment, None, None, gpu_memory_gb_override=16.0, execution_device="cpu")
+
+    def test_cpu_override_marks_hardware_detection_user_confirmed(self) -> None:
+        environment = {"operating_system": "Test Linux", "cpu": "Detected CPU", "ram_gb": 64}
+        hardware = hardware_from_environment(environment, "Overridden CPU", None, execution_device="cpu")
+        self.assertEqual(hardware["cpu"], "Overridden CPU")
+        self.assertEqual(hardware["detection"]["hardware"], "user-confirmed")
 
 
 def build_staged_run_directory(root: Path, environment: dict | None = None) -> Path:
@@ -483,11 +530,12 @@ class ResultPackagingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no successful requests"):
             normalize_guidellm_report(report)
 
-    def test_v1_blocks_cpu_only_packaging(self) -> None:
-        with self.assertRaisesRegex(ValueError, "GPU-backed runs only"):
-            validate_execution_device("cpu")
-
+    def test_cpu_and_gpu_are_both_valid_execution_devices(self) -> None:
+        """CPU-only benchmarks are first-class, publishable OmoBench results."""
+        validate_execution_device("cpu")
         validate_execution_device("gpu")
+        with self.assertRaisesRegex(ValueError, "must be 'cpu' or 'gpu'"):
+            validate_execution_device("auto")
 
     def test_package_creates_a_schema_ready_local_result(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -668,6 +716,199 @@ class ResultPackagingTests(unittest.TestCase):
             self.assertNotEqual(
                 result["configuration_fingerprint"],
                 vllm_result["configuration_fingerprint"],
+            )
+
+    def test_gpu_fingerprint_matches_the_pre_execution_device_historical_format(self) -> None:
+        """A gpu result's configuration_fingerprint must still equal what pre-change
+        code (whose payload never had an execution_device key) would have computed
+        for the same model/runtime/hardware/benchmark. Otherwise an old GPU bundle
+        and a newly repackaged, otherwise-identical GPU run would never collide under
+        the validator's (configuration_fingerprint, raw_output_sha256) duplicate key,
+        silently breaking duplicate detection across the schema change."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            run_directory = build_staged_run_directory(root)
+            args = base_package_args(run_directory)
+            original_directory = Path.cwd()
+            os.chdir(root)
+            try:
+                with patch("omobench.cli.current_git_commit", return_value="a" * 40):
+                    self.assertEqual(package_local_run(args), 0)
+            finally:
+                os.chdir(original_directory)
+            result = json.loads((run_directory / "result.json").read_text(encoding="utf-8"))
+
+            # The exact pre-execution_device fingerprint payload shape, built from
+            # this same run's normalized fields.
+            historical_payload = {
+                "model": result["model"],
+                "runtime": result["runtime"],
+                "hardware": {
+                    "os": result["hardware"]["os"],
+                    "cpu": result["hardware"]["cpu"],
+                    "ram_gb": result["hardware"]["ram_gb"],
+                    "gpus": result["hardware"]["gpus"],
+                    "driver_version": result["hardware"]["driver_version"],
+                },
+                "benchmark": {
+                    "profile_id": result["benchmark"]["profile_id"],
+                    "profile_sha256": result["benchmark"]["profile_sha256"],
+                },
+            }
+            self.assertEqual(result["configuration_fingerprint"], sha256_json(historical_payload))
+
+    def test_cpu_execution_device_packages_without_any_gpu_evidence(self) -> None:
+        """CPU results must not require GPU detection, VRAM, or GPU drivers."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            run_directory = build_staged_run_directory(
+                root,
+                environment={"operating_system": "Test Linux", "cpu": "Test CPU", "ram_gb": 64},
+            )
+            args = base_package_args(run_directory, execution_device="cpu")
+            original_directory = Path.cwd()
+            os.chdir(root)
+            try:
+                with patch("omobench.cli.current_git_commit", return_value="a" * 40):
+                    self.assertEqual(package_local_run(args), 0)
+            finally:
+                os.chdir(original_directory)
+
+            result = json.loads((run_directory / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["execution_device"], "cpu")
+            self.assertEqual(result["hardware"]["gpus"], [])
+            self.assertIsNone(result["hardware"]["driver_version"])
+            self.assertTrue(result["configuration_fingerprint"].startswith("sha256:"))
+
+    def test_gpu_equipped_machine_performing_cpu_only_inference_does_not_report_the_gpu(self) -> None:
+        """A machine with a real, detected GPU that nonetheless ran inference on the CPU
+        must not have that idle GPU represented as having performed inference."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            run_directory = build_staged_run_directory(
+                root,
+                environment={
+                    "operating_system": "Test Linux",
+                    "cpu": "Test CPU",
+                    "ram_gb": 64,
+                    "gpus": [
+                        {
+                            "vendor": "nvidia",
+                            "model": "NVIDIA RTX 500 Ada Generation Laptop GPU",
+                            "memory_gb": 4.0,
+                            "driver_version": "596.71",
+                        }
+                    ],
+                },
+            )
+            args = base_package_args(run_directory, execution_device="cpu")
+            original_directory = Path.cwd()
+            os.chdir(root)
+            try:
+                with patch("omobench.cli.current_git_commit", return_value="a" * 40):
+                    self.assertEqual(package_local_run(args), 0)
+            finally:
+                os.chdir(original_directory)
+
+            result = json.loads((run_directory / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["execution_device"], "cpu")
+            self.assertEqual(result["hardware"]["gpus"], [])
+            self.assertIsNone(result["hardware"]["driver_version"])
+
+    def test_gpu_memory_gb_override_is_rejected_when_packaging_a_cpu_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            run_directory = build_staged_run_directory(
+                root,
+                environment={"operating_system": "Test Linux", "cpu": "Test CPU", "ram_gb": 64},
+            )
+            args = base_package_args(run_directory, execution_device="cpu", gpu_memory_gb=16.0)
+            original_directory = Path.cwd()
+            os.chdir(root)
+            try:
+                with patch("omobench.cli.current_git_commit", return_value="a" * 40):
+                    stderr = io.StringIO()
+                    with redirect_stderr(stderr):
+                        exit_code = package_local_run(args)
+            finally:
+                os.chdir(original_directory)
+            self.assertEqual(exit_code, 2)
+            self.assertIn("cannot be used when --execution-device is cpu", stderr.getvalue())
+            self.assertFalse((run_directory / "result.json").exists())
+
+    def test_cpu_and_gpu_runs_with_identical_settings_are_distinct_configurations(self) -> None:
+        """Execution device must be part of configuration identity: an otherwise-identical
+        CPU and GPU run must not collapse into the same configuration_fingerprint."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            run_directory = build_staged_run_directory(
+                root,
+                environment={
+                    "operating_system": "Test Linux",
+                    "cpu": "Test CPU",
+                    "ram_gb": 64,
+                    "gpus": [{"vendor": "nvidia", "model": "NVIDIA Test GPU", "memory_gb": 24, "driver_version": "555.1"}],
+                },
+            )
+            original_directory = Path.cwd()
+
+            os.chdir(root)
+            try:
+                with patch("omobench.cli.current_git_commit", return_value="a" * 40):
+                    self.assertEqual(package_local_run(base_package_args(run_directory, execution_device="gpu")), 0)
+            finally:
+                os.chdir(original_directory)
+            gpu_result = json.loads((run_directory / "result.json").read_text(encoding="utf-8"))
+
+            os.chdir(root)
+            try:
+                with patch("omobench.cli.current_git_commit", return_value="a" * 40):
+                    self.assertEqual(
+                        package_local_run(base_package_args(run_directory, execution_device="cpu", force=True)), 0
+                    )
+            finally:
+                os.chdir(original_directory)
+            cpu_result = json.loads((run_directory / "result.json").read_text(encoding="utf-8"))
+
+            self.assertNotEqual(gpu_result["configuration_fingerprint"], cpu_result["configuration_fingerprint"])
+
+    def test_different_cpu_configurations_do_not_collapse_to_one_identity(self) -> None:
+        """Two different CPU machines/configs must not share a configuration_fingerprint
+        just because they both have an empty gpus list."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            run_directory = build_staged_run_directory(
+                root,
+                environment={"operating_system": "Test Linux", "cpu": "CPU A", "ram_gb": 64},
+            )
+            original_directory = Path.cwd()
+
+            os.chdir(root)
+            try:
+                with patch("omobench.cli.current_git_commit", return_value="a" * 40):
+                    self.assertEqual(package_local_run(base_package_args(run_directory, execution_device="cpu")), 0)
+            finally:
+                os.chdir(original_directory)
+            first_result = json.loads((run_directory / "result.json").read_text(encoding="utf-8"))
+
+            os.chdir(root)
+            try:
+                with patch("omobench.cli.current_git_commit", return_value="a" * 40):
+                    self.assertEqual(
+                        package_local_run(
+                            base_package_args(run_directory, execution_device="cpu", cpu="CPU B", force=True)
+                        ),
+                        0,
+                    )
+            finally:
+                os.chdir(original_directory)
+            second_result = json.loads((run_directory / "result.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(first_result["hardware"]["gpus"], [])
+            self.assertEqual(second_result["hardware"]["gpus"], [])
+            self.assertNotEqual(first_result["hardware"]["cpu"], second_result["hardware"]["cpu"])
+            self.assertNotEqual(
+                first_result["configuration_fingerprint"], second_result["configuration_fingerprint"]
             )
 
 

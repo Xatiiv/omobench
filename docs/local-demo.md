@@ -107,10 +107,9 @@ TTFT p50/p95, output throughput, and errors. Use **Download local summary** to
 save the actual measured values. The complete local runner evidence stays in
 the path shown below the log.
 
-This is a real CPU language-model inference benchmark. CPU results remain local
-under the current public v1 rules; the GPU packaging/submission controls are
-unavailable. It is not a general CPU score, model-quality test, or fabricated
-comparison-table row.
+This is a real CPU language-model inference benchmark. Like a GPU run, it can be
+packaged, reviewed, and submitted through **Review & submit**. It is not a
+general CPU score, model-quality test, or fabricated comparison-table row.
 
 For a short presentation, run it beforehand and select the genuine completed
 entry under **Recent runs**. Say it was measured earlier. You can show the

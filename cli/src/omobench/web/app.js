@@ -140,7 +140,9 @@ function renderRun(job) {
       metric("Total tokens / second", r.total_tokens_per_second), metric("Successful / attempted", `${r.requests.succeeded} / ${r.requests.attempted}`),
       metric("Error rate", r.error_rate_percent, "%"));
   }
-  $("package-panel").hidden = !job.summary || job.execution_device !== "gpu";
+  $("package-panel").hidden = !job.summary;
+  $("package-panel-device").textContent = `${job.execution_device.toUpperCase()} evidence`;
+  $("gpu-memory-field").hidden = job.execution_device === "cpu";
   $("validation-result").hidden = !job.validation;
   if (job.validation) {
     $("validation-result").textContent = job.validation.valid ? "Bundle validation passed. Review the files before submission." : job.validation.errors.join("\n");
@@ -199,7 +201,8 @@ $("package-form").addEventListener("submit", (event) => {
   event.preventDefault(); action(async () => {
     const data = Object.fromEntries(new FormData(event.target));
     data.runtime_args = data.runtime_args.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-    data.gpu_memory_gb = data.gpu_memory_gb ? Number(data.gpu_memory_gb) : null;
+    const currentJob = jobs.find((job) => job.id === selected);
+    data.gpu_memory_gb = data.gpu_memory_gb && currentJob?.execution_device !== "cpu" ? Number(data.gpu_memory_gb) : null;
     if (data.framework !== "openai-compatible-other") data.server_description = "";
     preview = null; $("submission-preview").hidden = true; $("submit-confirmed").checked = false;
     renderRun(await api(`/api/runs/${selected}/package`, data));

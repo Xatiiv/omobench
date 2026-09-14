@@ -27,9 +27,10 @@ export default function RunPage() {
               The local panel tests the connection, runs the benchmark, and shows measurements and live logs.</p>
           </li>
           <li><h2 className="text-lg font-medium text-zinc-50">4. Review the evidence</h2>
-            <p>CPU measurements can be viewed and downloaded locally. For a confirmed GPU run,
-              enter the model and runtime details, validate the bundle, and review the files.
-              You can download the bundle or create a GitHub pull request using your local GitHub CLI login and repository write access.
+            <p>CPU and GPU measurements can both be viewed, packaged, and submitted. For a
+              confirmed run on either device, enter the model and runtime details, validate the
+              bundle, and review the files. You can download the bundle or create a GitHub pull
+              request using your local GitHub CLI login and repository write access.
               CI and maintainer review still decide what enters the public registry.</p>
           </li>
         </ol>

@@ -241,7 +241,9 @@ class ExecutionTests(unittest.TestCase):
         wait_for(lambda: not self.controller.busy)
         return self.controller.detail(job["id"])
 
-    def test_cpu_uses_real_cli_evidence_and_local_summary_only(self):
+    def test_cpu_uses_real_cli_evidence_and_can_be_packaged_and_reviewed(self):
+        """CPU benchmarks are first-class: real evidence, then real packaging and review,
+        through the same panel workflow GPU runs already use."""
         self.runner()
         job = self.finished(self.controller.start(RUN_CONFIG))
         self.assertEqual(job["status"], "completed", job)
@@ -251,8 +253,23 @@ class ExecutionTests(unittest.TestCase):
         self.assertTrue((run / "guidellm-benchmarks.json.gz").is_file())
         self.assertFalse((run / "result.json").exists())
         for action in ["prepare", "bundle"]:
-            with self.subTest(action=action), self.assertRaisesRegex(UIError, "CPU measurements"):
+            with self.subTest(action=action), self.assertRaisesRegex(UIError, "result.json"):
                 getattr(self.controller, action)(job["id"])
+
+        packaged = self.controller.package(job["id"], {
+            "model": "Qwen/Qwen3-4B", "model_revision": "abc123", "framework": "llama.cpp",
+            "framework_version": "test-build", "submitter": "tester",
+        })
+        self.assertTrue(packaged["validation"]["valid"], packaged)
+        result = json.loads((run / "result.json").read_text())
+        self.assertEqual(result["execution_device"], "cpu")
+        self.assertEqual(result["hardware"]["gpus"], [])
+
+        preview = self.controller.prepare(job["id"])
+        self.assertEqual(len(preview["files"]), 5)
+        self.assertIn("CPU", preview["body"])
+        self.assertTrue(self.controller.bundle(job["id"]).startswith(b"PK"))
+
         recovered = Controller(self.root)
         self.assertEqual(recovered.detail(job["id"])["summary"], job["summary"])
 

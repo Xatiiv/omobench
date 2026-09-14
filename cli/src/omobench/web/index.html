@@ -9,7 +9,7 @@
 </head>
 <body>
   <header class="topbar"><a class="brand" href="/">Omo<span>Bench</span><span class="brand-mark">▥</span></a><span class="pill"><span class="dot"></span> Local workspace</span></header>
-  <p class="guided-link"><a href="/guided">New: guided CPU setup →</a> Download and verify one reviewed model + runtime recipe, then run this same benchmark engine. Development milestone; CPU results stay local.</p>
+  <p class="guided-link"><a href="/guided">New: guided CPU setup →</a> Download and verify one reviewed model + runtime recipe, then run this same benchmark engine. Development milestone: this page runs the benchmark only; package a resulting run for review and submission from this panel or the CLI.</p>
   <div class="layout">
     <aside>
       <div class="aside-head"><h2>This machine</h2><button id="refresh-setup" class="quiet" type="button">Refresh</button></div>
@@ -32,11 +32,11 @@
             <label>Server address<input id="endpoint" name="endpoint" value="http://127.0.0.1:8092" required spellcheck="false"><span class="hint">Localhost address; an optional /v1 suffix is accepted.</span></label>
             <label>Server model identifier<input id="model" name="model" placeholder="Identifier shown by your server" required spellcheck="false"><span class="hint">Use the model name or alias accepted by the server API.</span></label>
             <label>Benchmark profile<select id="profile" name="profile"></select></label>
-            <label>Server execution device<select id="execution-device" name="execution_device"><option value="cpu">CPU · local measurements</option><option value="gpu">GPU · eligible for submission review</option></select></label>
+            <label>Server execution device<select id="execution-device" name="execution_device"><option value="cpu">CPU</option><option value="gpu">GPU</option></select></label>
           </div>
           <p id="profile-detail" class="profile-detail"></p>
-          <label class="check"><input id="device-confirmed" type="checkbox" required><span>I have configured this device in my model server. For a GPU run, I have confirmed GPU inference in the server logs or telemetry.</span></label>
-          <p class="hint">Selecting CPU or GPU records your declaration. Change the model server settings to change where inference runs.</p>
+          <label class="check"><input id="device-confirmed" type="checkbox" required><span>I have configured this device in my model server and confirmed inference actually runs there (in the server logs or telemetry).</span></label>
+          <p class="hint">Selecting CPU or GPU records your declaration; it does not change the model server. CPU and GPU results are both eligible for packaging and submission.</p>
           <div class="actions"><button id="test-connection" type="button" class="secondary">Test connection</button><button id="start-run" type="submit">Run benchmark <span aria-hidden="true">↗</span></button></div>
           <p id="connection-result" class="hint" role="status"></p>
         </form>
@@ -46,13 +46,13 @@
         <p id="run-meta" class="muted"></p>
         <p id="run-error" class="notice error" role="status" hidden></p>
         <div id="metrics" class="grid metrics" hidden></div>
-        <p id="local-note" class="notice" hidden>These are local CPU measurements. Public v1 submissions require GPU execution. You can download this summary for your demo.</p>
+        <p id="local-note" class="notice" hidden>These are CPU measurements. Package and review them below the same way as a GPU run, or download this summary for a quick local record.</p>
         <div class="actions"><button id="cancel-run" type="button" class="danger" hidden>Cancel benchmark</button><button id="download-summary" type="button" class="secondary" hidden>Download local summary</button></div>
         <details id="log-details" open><summary>Live runner log <span class="hint">Latest output · refreshes automatically</span></summary><pre id="log" tabindex="0">Waiting for the runner…</pre></details>
         <p id="run-path" class="hint path"></p>
       </section>
       <section id="package-panel" class="panel" hidden>
-        <div class="section-head"><div><span class="step">03</span><h2>Review &amp; submit</h2></div><span class="pill">GPU evidence</span></div>
+        <div class="section-head"><div><span class="step">03</span><h2>Review &amp; submit</h2></div><span id="package-panel-device" class="pill">Evidence</span></div>
         <p class="muted">Record the model and serving configuration used for this run. Packaging uses the existing CLI and registry validator.</p>
         <form id="package-form">
           <div class="grid two">
@@ -65,7 +65,7 @@
           </div>
           <label id="description-field" hidden>Server description<input name="server_description" id="server-description" placeholder="Name and details of the generic server"></label>
           <label>Runtime startup arguments<textarea name="runtime_args" rows="3" placeholder="One argument per line, e.g. --ctx-size=2048"></textarea><span class="hint">Record the actual server settings, including GPU offload. Do not include tokens or passwords.</span></label>
-          <details><summary>Hardware details, if detection is incomplete</summary><div class="grid two"><label>GPU memory per card (GB)<input name="gpu_memory_gb" type="number" min="0.01" step="any" placeholder="Only if detected VRAM is unknown"></label><label>CPU description<input name="cpu" placeholder="Leave blank to use detected CPU"></label></div></details>
+          <details><summary>Hardware details, if detection is incomplete</summary><div class="grid two"><label id="gpu-memory-field">GPU memory per card (GB)<input name="gpu_memory_gb" type="number" min="0.01" step="any" placeholder="Only if detected VRAM is unknown"></label><label>CPU description<input name="cpu" placeholder="Leave blank to use detected CPU"></label></div></details>
           <div class="actions"><button id="package-button" type="submit">Package &amp; validate</button></div>
         </form>
         <p id="validation-result" class="notice" role="status" hidden></p>
@@ -77,7 +77,7 @@
           <details><summary>Pull request description</summary><pre id="pr-description" tabindex="0"></pre></details>
           <div class="actions"><button id="download-bundle" type="button" class="secondary">Download complete bundle</button></div>
           <p id="github-message" class="hint"></p>
-          <label class="check"><input id="submit-confirmed" type="checkbox"><span>I reviewed the complete bundle, confirmed real GPU execution, and checked that the evidence contains no secrets. Create a branch and pull request in the repository shown above.</span></label>
+          <label class="check"><input id="submit-confirmed" type="checkbox"><span>I reviewed the complete bundle, confirmed real inference on the declared execution device, and checked that the evidence contains no secrets. Create a branch and pull request in the repository shown above.</span></label>
           <button id="submit-button" type="button" disabled>Create pull request</button>
         </div>
         <p id="submission-link" class="notice" hidden></p>

@@ -4,8 +4,8 @@ This module never runs an installer, never alters system packages, and never
 starts a benchmark by itself. It only prepares verified files under a
 contributor-chosen storage folder so the existing launcher/CLI/runner can use
 them. Benchmark profiles, GuideLLM command construction, normalization,
-packaging, schema, and public GPU-only publication rules are unrelated to
-this module and are not touched by it.
+packaging, schema, and public v1 execution-device publication rules are
+unrelated to this module and are not touched by it.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import contextlib
 import hashlib
 import json
 import os
+import posixpath
 import re
 import shutil
 import sys
@@ -590,6 +591,61 @@ def resumable_download(
 # --------------------------------------------------------------------------
 
 
+def _validate_symlink_target(linkname: str, label: str) -> None:
+    """Reject anything but a relative, in-archive symlink target.
+
+    Absolute targets, backslashes, and any '../' segment are refused here so
+    a symlink can never be used to point outside the archive namespace.
+    """
+    if not linkname or "\x00" in linkname:
+        raise ManagedSetupError(f"{label}: symlink has an invalid target {linkname!r}.")
+    if "\\" in linkname:
+        raise ManagedSetupError(f"{label}: symlink target {linkname!r} contains a backslash.")
+    if linkname.startswith("/") or linkname.startswith("~") or WINDOWS_STYLE_PATH_PATTERN.match(linkname):
+        raise ManagedSetupError(f"{label}: symlink target {linkname!r} is absolute.")
+    if any(segment == ".." for segment in linkname.split("/")):
+        raise ManagedSetupError(f"{label}: symlink target {linkname!r} escapes the archive.")
+
+
+def _resolve_symlink_archive_path(name: str, linkname: str) -> str:
+    """Resolve a symlink's target relative to the symlink's own containing directory."""
+    directory = name.rsplit("/", 1)[0] if "/" in name else ""
+    combined = f"{directory}/{linkname}" if directory else linkname
+    resolved = posixpath.normpath(combined)
+    if resolved == ".." or resolved.startswith("../") or resolved.startswith("/"):
+        raise ManagedSetupError(f"Runtime archive: symlink target {linkname!r} resolves outside the archive.")
+    return resolved
+
+
+def _resolve_symlink_source(
+    name: str,
+    members_by_name: dict[str, tarfile.TarInfo],
+    label: str,
+) -> tarfile.TarInfo:
+    """Follow a chain of internal symlinks to the regular file that provides its bytes.
+
+    Raises on a missing target, a target that is not (eventually) a regular
+    file, or a cycle. Never returns a symlink.
+    """
+    visited: set[str] = set()
+    current = name
+    for _ in range(len(members_by_name) + 1):
+        if current in visited:
+            raise ManagedSetupError(f"{label}: symlink {name!r} forms a cycle.")
+        visited.add(current)
+        member = members_by_name.get(current)
+        if member is None:
+            raise ManagedSetupError(f"{label}: symlink {name!r} target {current!r} does not exist in the archive.")
+        if member.issym():
+            _validate_symlink_target(member.linkname, label)
+            current = _resolve_symlink_archive_path(current, member.linkname)
+            continue
+        if member.isfile():
+            return member
+        raise ManagedSetupError(f"{label}: symlink {name!r} target {current!r} is not a regular file.")
+    raise ManagedSetupError(f"{label}: symlink {name!r} target chain is too long.")
+
+
 def safe_extract_tar_gz(
     archive_path: Path,
     dest_dir: Path,
@@ -601,15 +657,25 @@ def safe_extract_tar_gz(
     """Extract archive_path into dest_dir, rejecting anything unsafe.
 
     Rejects absolute paths, ../ traversal, backslashes, device files, hard
-    links, symlinks, duplicate archive paths, and archives that exceed the
-    configured entry-count or extracted-byte bounds.
+    links, duplicate archive paths, and archives that exceed the configured
+    entry-count or extracted-byte bounds.
+
+    A tar symlink is allowed only when its target is a relative, in-archive
+    path (no leading '/', no '../', no backslashes, no absolute drive form)
+    that resolves - relative to the symlink's own containing directory,
+    possibly through further internal symlinks - to a regular file in this
+    same archive. No symlink is ever written to disk: the resolved target's
+    bytes are copied to the symlink's own path instead. A missing target, a
+    target that is not eventually a regular file, or a symlink cycle is
+    rejected.
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
     resolved_dest = dest_dir.resolve()
     seen_paths: set[str] = set()
-    total_bytes = 0
     entry_count = 0
-    executable_found = False
+    entries: list[tarfile.TarInfo] = []
+    members_by_name: dict[str, tarfile.TarInfo] = {}
+    label = "Runtime archive"
 
     with tarfile.open(archive_path, "r:gz") as archive:
         while True:
@@ -620,30 +686,44 @@ def safe_extract_tar_gz(
             if entry_count > max_entries:
                 raise ManagedSetupError(f"Archive has more than {max_entries} entries; refusing to extract it.")
             name = member.name
-            _validate_archive_member_name(name, "Runtime archive")
+            _validate_archive_member_name(name, label)
             if name in seen_paths:
-                raise ManagedSetupError(f"Runtime archive contains a duplicate path: {name!r}.")
+                raise ManagedSetupError(f"{label} contains a duplicate path: {name!r}.")
             seen_paths.add(name)
-            if member.issym() or member.islnk():
-                raise ManagedSetupError(f"Runtime archive contains a symlink or hard link: {name!r}.")
+            if member.islnk():
+                raise ManagedSetupError(f"{label} contains a hard link: {name!r}.")
             if member.isdev() or member.ischr() or member.isblk() or member.isfifo():
-                raise ManagedSetupError(f"Runtime archive contains a device file: {name!r}.")
-            if member.isdir():
-                continue
-            if not member.isfile():
-                raise ManagedSetupError(f"Runtime archive contains an unsupported entry type: {name!r}.")
-            total_bytes += member.size
-            if total_bytes > max_extracted_bytes:
-                raise ManagedSetupError("Runtime archive exceeds its extracted-size limit; refusing to extract it.")
+                raise ManagedSetupError(f"{label} contains a device file: {name!r}.")
+            if not (member.isfile() or member.isdir() or member.issym()):
+                raise ManagedSetupError(f"{label} contains an unsupported entry type: {name!r}.")
+            entries.append(member)
+            members_by_name[name] = member
+
+        total_bytes = 0
+        executable_found = False
+        for member in entries:
+            name = member.name
             target = (dest_dir / name).resolve()
             if target != resolved_dest and resolved_dest not in target.parents:
-                raise ManagedSetupError(f"Runtime archive path escapes the destination folder: {name!r}.")
+                raise ManagedSetupError(f"{label} path escapes the destination folder: {name!r}.")
+
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+
+            source_member = _resolve_symlink_source(name, members_by_name, label) if member.issym() else member
+
+            total_bytes += source_member.size
+            if total_bytes > max_extracted_bytes:
+                raise ManagedSetupError(f"{label} exceeds its extracted-size limit; refusing to extract it.")
             target.parent.mkdir(parents=True, exist_ok=True)
-            source = archive.extractfile(member)
+            source = archive.extractfile(source_member)
             if source is None:
-                raise ManagedSetupError(f"Could not read runtime archive member: {name!r}.")
+                raise ManagedSetupError(f"Could not read {label.lower()} member: {source_member.name!r}.")
             with source, target.open("wb") as destination_file:
                 shutil.copyfileobj(source, destination_file)
+            if source_member.mode & 0o111:
+                target.chmod(0o755)
             if name == executable_path:
                 executable_found = True
                 target.chmod(0o755)

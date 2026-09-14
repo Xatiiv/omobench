@@ -501,6 +501,131 @@ models:
         self.assertEqual(exit_code, 1)
         self.assertIn("vendor", stderr)
 
+    def test_legacy_bundle_without_execution_device_still_passes(self) -> None:
+        """A result.json published before execution-device tracking has no
+        execution_device field at all and must remain valid."""
+        result_overrides = {}
+        self.assertNotIn("execution_device", VALID_RESULT_TEMPLATE)
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+            result_overrides=result_overrides,
+        )
+        exit_code, stdout, _ = self.run_main()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Validated 1 OmoBench result bundle(s).", stdout)
+
+    def test_cpu_execution_device_with_empty_gpus_and_null_driver_is_accepted(self) -> None:
+        hardware = copy.deepcopy(VALID_RESULT_TEMPLATE["hardware"])
+        hardware["gpus"] = []
+        hardware["driver_version"] = None
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+            result_overrides={"execution_device": "cpu", "hardware": hardware},
+        )
+        exit_code, stdout, _ = self.run_main()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Validated 1 OmoBench result bundle(s).", stdout)
+
+    def test_cpu_execution_device_may_not_list_a_gpu(self) -> None:
+        """A cpu run must not represent an installed-but-unused GPU as having performed inference."""
+        hardware = copy.deepcopy(VALID_RESULT_TEMPLATE["hardware"])
+        hardware["driver_version"] = None
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+            result_overrides={"execution_device": "cpu", "hardware": hardware},
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("hardware.gpus", stderr)
+
+    def test_cpu_execution_device_may_not_carry_a_driver_version(self) -> None:
+        hardware = copy.deepcopy(VALID_RESULT_TEMPLATE["hardware"])
+        hardware["gpus"] = []
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+            result_overrides={"execution_device": "cpu", "hardware": hardware},
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("hardware.driver_version", stderr)
+
+    def test_gpu_execution_device_still_requires_at_least_one_gpu(self) -> None:
+        hardware = copy.deepcopy(VALID_RESULT_TEMPLATE["hardware"])
+        hardware["gpus"] = []
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+            result_overrides={"execution_device": "gpu", "hardware": hardware},
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("hardware.gpus", stderr)
+
+    def test_invalid_execution_device_value_is_rejected(self) -> None:
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+            result_overrides={"execution_device": "tpu"},
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("execution_device", stderr)
+
+    def test_cpu_and_gpu_bundles_with_same_raw_output_are_not_duplicates(self) -> None:
+        """Configuration identity distinguishes cpu and gpu; the fingerprint values used
+        here differ, as omobench package itself would produce for otherwise-identical runs."""
+        cpu_hardware = copy.deepcopy(VALID_RESULT_TEMPLATE["hardware"])
+        cpu_hardware["gpus"] = []
+        cpu_hardware["driver_version"] = None
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+            result_overrides={
+                "execution_device": "cpu",
+                "hardware": cpu_hardware,
+                "configuration_fingerprint": "sha256:" + "a" * 64,
+            },
+        )
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-31-run-fixture-5678",
+            result_overrides={
+                "run_id": "run-fixture-5678",
+                "execution_device": "gpu",
+                "configuration_fingerprint": "sha256:" + "d" * 64,
+            },
+        )
+        exit_code, stdout, _ = self.run_main()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Validated 2 OmoBench result bundle(s).", stdout)
+
+    def test_legacy_gpu_bundle_and_newly_packaged_equivalent_gpu_run_are_duplicates(self) -> None:
+        """A GPU bundle predating execution_device tracking and a freshly packaged,
+        otherwise-identical GPU run of the same raw-runner output must still collide
+        under the duplicate-configuration check, even though only the new one carries
+        execution_device. This models the real compatibility requirement: cli.py's
+        fingerprint algorithm for a gpu run is unchanged, so both bundles legitimately
+        share the same configuration_fingerprint value in practice."""
+        shared_fingerprint = "sha256:" + "e" * 64
+        shared_raw_output = gzip.compress(b'{"a": "same-config"}')
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-legacy-0001",
+            result_overrides={
+                "run_id": "run-legacy-0001",
+                "configuration_fingerprint": shared_fingerprint,
+                # No execution_device key at all: this predates the field.
+            },
+            artifact_contents={"raw_runner_output": shared_raw_output},
+        )
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-31-run-new-0002",
+            result_overrides={
+                "run_id": "run-new-0002",
+                "execution_device": "gpu",
+                "configuration_fingerprint": shared_fingerprint,
+            },
+            artifact_contents={"raw_runner_output": shared_raw_output},
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("duplicate configuration and raw-runner output", stderr)
+
     def test_invalid_models_structure_is_rejected(self) -> None:
         cases = {
             "root_not_a_mapping": "- just\n- a\n- list\n",

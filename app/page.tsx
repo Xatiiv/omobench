@@ -68,6 +68,13 @@ const registryModelOptions = getRegistryOptions((result) => result.model);
 const registryHardwareOptions = getRegistryOptions((result) => result.hardware.display);
 const registryFrameworkOptions = getRegistryOptions((result) => result.framework);
 const registryProfileOptions = getRegistryOptions((result) => result.profile);
+const registryExecutionDeviceOptions = getRegistryOptions((result) => result.executionDevice.toUpperCase());
+
+function deviceBadgeClassName(executionDevice: RegistryResult["executionDevice"]): string {
+  return executionDevice === "cpu"
+    ? "border-sky-300/30 bg-sky-300/10 text-sky-200"
+    : "border-emerald-400/30 bg-emerald-400/10 text-emerald-200";
+}
 
 type DemoFilterProps = {
   id: string;
@@ -111,6 +118,7 @@ function LocalRegistry() {
   const [hardware, setHardware] = useState("all");
   const [framework, setFramework] = useState("all");
   const [profile, setProfile] = useState("all");
+  const [device, setDevice] = useState("all");
 
   const filteredResults = useMemo(
     () =>
@@ -119,9 +127,10 @@ function LocalRegistry() {
           (model === "all" || result.model === model) &&
           (hardware === "all" || result.hardware.display === hardware) &&
           (framework === "all" || result.framework === framework) &&
-          (profile === "all" || result.profile === profile),
+          (profile === "all" || result.profile === profile) &&
+          (device === "all" || result.executionDevice.toUpperCase() === device),
       ),
-    [framework, hardware, model, profile],
+    [device, framework, hardware, model, profile],
   );
 
   const hasResults = registryResults.length > 0;
@@ -151,8 +160,9 @@ function LocalRegistry() {
           </div>
         ) : (
           <>
-            <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
               <DemoFilter id="registry-model-filter" label="Model" onValueChange={setModel} options={registryModelOptions} value={model} />
+              <DemoFilter id="registry-device-filter" label="Execution device" onValueChange={setDevice} options={registryExecutionDeviceOptions} value={device} />
               <DemoFilter id="registry-hardware-filter" label="Hardware" onValueChange={setHardware} options={registryHardwareOptions} value={hardware} />
               <DemoFilter id="registry-framework-filter" label="Framework" onValueChange={setFramework} options={registryFrameworkOptions} value={framework} />
               <DemoFilter id="registry-profile-filter" label="Profile" onValueChange={setProfile} options={registryProfileOptions} value={profile} />
@@ -164,6 +174,7 @@ function LocalRegistry() {
               <Table>
                 <TableHeader>
                   <TableRow className="border-white/10 hover:bg-transparent">
+                    <TableHead className="text-zinc-400">Device</TableHead>
                     <TableHead className="text-zinc-400">Hardware</TableHead>
                     <TableHead className="text-zinc-400">Framework</TableHead>
                     <TableHead className="text-zinc-400">Quantization</TableHead>
@@ -175,13 +186,18 @@ function LocalRegistry() {
                 <TableBody>
                   {filteredResults.length === 0 ? (
                     <TableRow className="border-white/10 hover:bg-transparent">
-                      <TableCell className="py-8 text-center text-sm text-zinc-400" colSpan={6}>
+                      <TableCell className="py-8 text-center text-sm text-zinc-400" colSpan={7}>
                         No packaged local results match this combination.
                       </TableCell>
                     </TableRow>
                   ) : (
                     filteredResults.map((result) => (
                       <TableRow className="border-white/10 hover:bg-white/[0.035]" key={result.id}>
+                        <TableCell>
+                          <Badge className={deviceBadgeClassName(result.executionDevice)} variant="outline">
+                            {result.executionDevice.toUpperCase()}
+                          </Badge>
+                        </TableCell>
                         <TableCell>
                           <p className="font-medium text-zinc-100">{result.hardware.display}</p>
                           <p className="mt-1 font-mono text-xs text-zinc-500">{result.model}</p>

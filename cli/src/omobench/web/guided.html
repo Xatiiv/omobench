@@ -17,9 +17,11 @@
       <p class="intro">
         This guided path downloads and verifies one reviewed model + runtime recipe, then runs the
         <strong>same, unchanged</strong> benchmark engine as the <a href="/">advanced panel</a>. It is a development
-        milestone, not an installer: it does not touch system packages, and CPU results stay local — they cannot be
-        submitted as public results, which require confirmed GPU execution. <a href="/">Use the advanced panel</a> to
-        connect to a model server you already run yourself.
+        milestone, not an installer: it does not touch system packages, and this page only runs the CPU benchmark —
+        it does not package or submit results itself. The evidence it produces is a normal local run, and CPU and
+        GPU results are both eligible for packaging and submission from <a href="/">the advanced panel</a> or the
+        <code>omobench package</code> CLI command. <a href="/">Use the advanced panel</a> to connect to a model
+        server you already run yourself, or to package a run from this page.
       </p>
       <div id="notice" class="notice" role="status" hidden></div>
 
@@ -82,9 +84,11 @@
       </section>
 
       <section class="panel" id="stage-9" hidden>
-        <div class="section-head"><div><span class="step">09</span><h2>Local-only results</h2></div></div>
-        <p class="notice">These are local CPU measurements. Public v1 submissions require confirmed GPU execution and are not
-          available from this guided path. Use <a href="/">the advanced panel</a> for GPU packaging and submission.</p>
+        <div class="section-head"><div><span class="step">09</span><h2>Results</h2></div></div>
+        <p class="notice">These are real CPU measurements from the managed server, staged as a normal local evidence
+          directory. Packaging and submission are not available from this guided page; use
+          <a href="/">the advanced panel</a>, or run <code>omobench package --execution-device cpu</code> from the
+          CLI against this run's directory, to review and submit it.</p>
         <div id="guided-metrics" class="grid metrics" hidden></div>
         <div class="actions"><button id="guided-download-summary" type="button" class="secondary" hidden>Download local summary</button></div>
       </section>

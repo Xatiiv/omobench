@@ -80,7 +80,7 @@ For a CPU demonstration, load a small model with CPU execution explicitly
 enabled in your server, choose **chat-small-v1**, select **CPU**, and run. This is a
 real inference workload on your CPU, not a general CPU hardware test. Slower CPUs
 may reach the profile's time limit; the UI does not shorten or alter the workload.
-CPU results can be demonstrated and downloaded locally; public v1 packaging remains GPU-only.
+CPU and GPU results are both eligible for packaging and submission through the panel.
 The [CPU demo walkthrough](local-demo.md) gives the two-terminal launch sequence
 and exact form values. [Troubleshooting](troubleshooting.md) covers connection
 failures, missing commands, and slow runs.
@@ -90,17 +90,19 @@ server stays running. Cancelled, failed, and interrupted runs are labelled accor
 partial output is kept locally and is not eligible for packaging through the panel.
 The panel allows only one instance per checkout, including across different ports.
 
-## GPU packaging and pull requests
+## Packaging and pull requests
 
-After a completed GPU run, **Review & submit** becomes available:
+After a completed CPU or GPU run, **Review & submit** becomes available:
 
 1. Enter the canonical model ID, immutable model revision, framework and exact
    version, quantization, submitter, and the server's actual startup arguments.
    The API alias used to make requests can differ from the canonical model ID.
    Generic servers require a meaningful server description. Do not enter secrets.
-2. Use the optional hardware fields only if detection was incomplete. A GPU memory
-   value can fill unknown VRAM for one detected vendor/model class; it cannot invent
-   a GPU or replace already-detected VRAM. The CLI enforces these rules.
+2. Use the optional hardware fields only if detection was incomplete. The GPU
+   memory field only applies to a GPU run and is hidden for a CPU run — no GPU
+   performed inference, so there is nothing to fill in. A GPU memory value can
+   fill unknown VRAM for one detected vendor/model class; it cannot invent a
+   GPU or replace already-detected VRAM. The CLI enforces these rules.
 3. Click **Package & validate**. The panel invokes the CLI packager, then the
    repository's validator for schema, model catalog, revisions, artifact paths/hashes,
    and duplicates against the local registry. Failures remain local and are displayed.
@@ -112,8 +114,9 @@ After a completed GPU run, **Review & submit** becomes available:
    and base branch before you confirm. Authentication credentials stay with GitHub CLI.
    If `origin` is your fork, the panel opens the PR there; it does not open a
    cross-fork PR against the upstream project. Use the manual workflow for upstream.
-6. After reviewing the bundle and confirming GPU execution and absence of secrets,
-   click **Create pull request**. This uploads only the five standard evidence files
+6. After reviewing the bundle and confirming inference on the declared device
+   and absence of secrets, click **Create pull request**. This uploads only the
+   five standard evidence files
    into a new `submit/<run-id>` branch and opens a PR against the repository's default
    branch. It does not stage local changes, switch branches, or push to `main`.
 7. Review the PR's CI checks and follow the normal maintainer review process. The

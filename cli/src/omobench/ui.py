@@ -367,8 +367,6 @@ class Controller:
             job = self._get(job_id)
             if self.busy or job["status"] != "completed":
                 raise UIError("Wait for a successful run before preparing a submission.", 409)
-            if job["execution_device"] != "gpu":
-                raise UIError("CPU measurements are available locally. Public v1 packaging and submission require GPU execution.")
             submission = job.get("submission") or {}
             if submission.get("commit_sha") and status == "packaging":
                 raise UIError("Submission has started for this bundle. Retry submission or start a new run to change its evidence.")
@@ -396,10 +394,17 @@ class Controller:
                 raise UIError("GPU memory must be a positive number.")
         job = self._begin_action(job_id, "packaging")
         try:
+            if memory is not None and job["execution_device"] == "cpu":
+                raise UIError("GPU memory does not apply to a CPU run; no GPU performed inference.")
             job["validation"] = None
             self._save(job)
             run = self.run_directory(job_id)
-            arguments = ["package", f"--run-dir={run}", f"--profile={job['profile']}", "--execution-device=gpu"]
+            arguments = [
+                "package",
+                f"--run-dir={run}",
+                f"--profile={job['profile']}",
+                f"--execution-device={job['execution_device']}",
+            ]
             arguments.extend(f"--{key.replace('_', '-')}={value}" for key, value in {**values, **optional}.items() if value)
             arguments.extend(f"--runtime-arg={value}" for value in runtime_args)
             if memory is not None:

@@ -5,8 +5,8 @@ The guided path (`omobench prepare`, `omobench launch`, and the panel's
 reviewed, verified way to get one small CPU model running so you can try the
 benchmark without hand-installing a model server first. It does not change
 the benchmark engine: profiles, GuideLLM command construction, normalization,
-packaging, the result schema, and the GPU-only public v1 rule are exactly the
-same ones the [advanced panel](browser-control.md) and
+packaging, and the result schema are exactly the same ones the
+[advanced panel](browser-control.md) and
 [CLI workflow](quickstart.md#run-directly-from-the-cli) already use. Use this
 page alongside [setup](quickstart.md), [the CPU demo](local-demo.md), and
 [browser control](browser-control.md); it does not replace them, and the
@@ -25,9 +25,9 @@ available in the advanced panel and from the CLI.
   verified files and extracts one archive under a storage folder you choose,
   below `omobench-managed-v1/`.
 - It never starts a model server for you outside of `omobench launch`/the
-  guided page's own smoke test and benchmark run, and it never submits a
-  result. CPU results stay local; see
-  [CPU results are local-only](#cpu-results-are-local-only) below.
+  guided page's own smoke test and benchmark run, and it never packages or
+  submits a result itself; see
+  [packaging a managed CPU run](#packaging-a-managed-cpu-run) below.
 - More models arrive later as additional reviewed entries in that same JSON
   catalog, not as hard-coded logic per model; see
   [adding models later](#adding-models-later).
@@ -67,7 +67,7 @@ keep them explicit rather than collapsing them into one "just run it" button:
 | Download | `omobench prepare --recipe qwen3-4b-cpu-v1 --storage-dir /mnt/d/OmoBench --download` | Downloads (resumably) and verifies both files by size and SHA-256, then atomically installs them under the storage folder. Corrupted downloads are quarantined, not used. |
 | Smoke test | `omobench launch --recipe qwen3-4b-cpu-v1 --storage-dir /mnt/d/OmoBench --smoke` | Re-verifies the installed files, starts the verified server with fixed CPU-only settings, confirms it reports the expected model alias, then stops it. **No inference. No performance result.** |
 | Execute | `omobench launch --recipe qwen3-4b-cpu-v1 --storage-dir /mnt/d/OmoBench --execute` | Re-verifies the installed files, starts the same server, then runs the existing, unchanged `chat-small-v1` benchmark against it with the existing CLI/GuideLLM runner and normalizer, and stops the server afterward. |
-| Package | `omobench package ...` (see [submission-bundle.md](submission-bundle.md)) | Unavailable for this recipe: it declares `execution_device: cpu`, and OmoBench v1 packages GPU-backed runs only. |
+| Package | `omobench package --execution-device cpu ...` (see [submission-bundle.md](submission-bundle.md)) | Not offered as a guided-page step, but the run it produces is a normal `.omobench-runs/` directory: package it from the CLI or the [advanced panel](browser-control.md), the same as any CPU or GPU run. |
 
 `omobench launch` binds the managed server to `127.0.0.1` only, uses the
 canonical model ID as its API alias, and applies fixed CPU-only settings
@@ -80,18 +80,19 @@ to the run directory.
 The guided page (`/guided` in the local panel) walks through the same five
 steps as stages: select the test, select the reviewed model, choose a storage
 folder, review the downloads, confirm preparation, watch download progress
-(with cancellation), verify readiness, run the benchmark, and see the
-local-only results and logs. It requires the same panel token as the advanced
-page, stays loopback-only, and makes no external browser requests of its own.
+(with cancellation), verify readiness, run the benchmark, and see the results
+and logs. It requires the same panel token as the advanced page, stays
+loopback-only, and makes no external browser requests of its own.
 
-## CPU results are local-only
+## Packaging a managed CPU run
 
 This recipe's `execution_device` is `cpu`. Exactly like a CPU run through the
-advanced panel or `omobench run --execute`, its results are useful for local
-inspection and demonstration, but they cannot be packaged or submitted as a
-public v1 result: v1 requires confirmed GPU execution. The guided page never
-shows a "package" or "submit" step for a managed CPU run, and never implies
-GPU qualification.
+advanced panel or `omobench run --execute`, its results are real evidence: a
+normal `.omobench-runs/` staging directory that can be packaged, reviewed, and
+submitted, the same way a GPU run can. The guided page itself never shows a
+"package" or "submit" step for a managed CPU run — use the
+[advanced panel](browser-control.md) or `omobench package --execution-device cpu`
+against the run directory the guided page reports.
 
 ## Adding models later
 
