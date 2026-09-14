@@ -15,6 +15,7 @@ the [eligible-model catalog](catalog/models/seed-v1.yaml).
 
 ## Start here
 
+- **Preview the easier launcher being developed:** [Guided launcher milestone](docs/guided-launcher.md) — an interactive design and an experimental CPU launch command; the installer and automatic downloads are still in development.
 - **Install or update OmoBench:** [Setup guide](docs/quickstart.md).
 - **Run a real CPU benchmark, including starting the model:** [CPU demo walkthrough](docs/local-demo.md).
 - **Use the panel or submit a GPU run:** [Browser control guide](docs/browser-control.md).
@@ -125,6 +126,11 @@ incorrect identifiers, streaming errors, and interrupted runs.
   without a GitHub account. Authentication is needed for direct PR upload.
 - Quality/accuracy evaluation, model installation, cloud hardware provisioning,
   and native Windows benchmark execution are outside the current workflow.
+
+An experimental `omobench launch` command can start an already-installed local
+llama-server and run the unchanged CPU `chat-small-v1` workload. It is a development
+experiment, separate from the current browser panel. See the
+[launcher milestone](docs/guided-launcher.md) for its limits and verification.
 
 ## Fixed workloads and measurements
 

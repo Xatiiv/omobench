@@ -12,7 +12,10 @@ OmoBench is a GitHub-backed evidence registry and test harness for self-hosted, 
 workloads and export local measurements; public v1 packaging remains GPU-only.
 The comparison website and its `/run` launch guide are separate from this panel.
 
-It is **not** a model host, model downloader, cloud GPU provider, or automatic proof that a model server used a GPU.
+It is not a model downloader, cloud GPU provider, or automatic proof that a model server used a GPU.
+The experimental `omobench launch` command can manage an already-installed local
+llama-server for a CPU `chat-small-v1` run. The regular browser panel still connects
+to a separately started server. See `docs/guided-launcher.md` for the milestone's limits.
 
 ## V1 scope and invariants
 
@@ -45,6 +48,12 @@ The panel submits only the five standard evidence files after explicit review,
 using existing `gh` authentication and a new branch in the displayed `origin`.
 It does not merge PRs, create forks, start models, or change local Git branches.
 Keep localhost/token/origin protections and the one-panel-per-checkout lock.
+
+Launcher experiments must invoke the existing CLI and normalizer, stop only
+process groups they created, and keep launcher diagnostics outside the standard
+run bundle. Prototype screens must not fabricate measurements or imply that a
+simulated download/run actually happened. Models and profile values in design
+previews are read from the repository's existing sources of truth.
 
 ## Repository map
 
