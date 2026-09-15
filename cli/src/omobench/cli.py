@@ -562,10 +562,15 @@ def normalize_guidellm_report(raw_report: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(benchmark, dict):
         raise ValueError("GuideLLM benchmark entry must be an object.")
 
-    successful = report_count(benchmark, "scheduler_metrics", "requests_made", "successful")
-    incomplete = report_count(benchmark, "scheduler_metrics", "requests_made", "incomplete")
-    errored = report_count(benchmark, "scheduler_metrics", "requests_made", "errored")
-    attempted = report_count(benchmark, "scheduler_metrics", "requests_made", "total")
+    # scheduler_metrics.requests_made spans the entire scheduler lifecycle, including
+    # warmup and cooldown; the profile's report.exclude_warmup_and_cooldown requires
+    # excluding both. metrics.request_totals is GuideLLM's own measured-window-only
+    # count (filtered by measure_start_time/measure_end_time via get_within_range),
+    # the same window the percentile/throughput metrics below already come from.
+    successful = report_count(benchmark, "metrics", "request_totals", "successful")
+    incomplete = report_count(benchmark, "metrics", "request_totals", "incomplete")
+    errored = report_count(benchmark, "metrics", "request_totals", "errored")
+    attempted = report_count(benchmark, "metrics", "request_totals", "total")
     failed = incomplete + errored
     if attempted != successful + failed:
         raise ValueError("GuideLLM request counts are inconsistent.")

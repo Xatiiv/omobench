@@ -247,7 +247,7 @@ class ExecutionTests(unittest.TestCase):
         self.runner()
         job = self.finished(self.controller.start(RUN_CONFIG))
         self.assertEqual(job["status"], "completed", job)
-        self.assertEqual(job["summary"]["results"]["requests"]["succeeded"], 49)
+        self.assertEqual(job["summary"]["results"]["requests"]["succeeded"], 50)
         self.assertNotIn("http://127.0.0.1", job["log"])
         run = self.controller.run_directory(job["id"])
         self.assertTrue((run / "guidellm-benchmarks.json.gz").is_file())
@@ -297,7 +297,7 @@ class ExecutionTests(unittest.TestCase):
 
     def test_nonzero_missing_and_zero_success_reports_are_failed(self):
         bad = copy.deepcopy(GUIDELLM_REPORT_V2)
-        bad["benchmarks"][0]["scheduler_metrics"]["requests_made"] = {"successful": 0, "incomplete": 0, "errored": 50, "total": 50}
+        bad["benchmarks"][0]["metrics"]["request_totals"] = {"successful": 0, "incomplete": 0, "errored": 50, "total": 50}
         for mode, report in [("fail", None), ("missing", None), ("success", bad)]:
             with self.subTest(mode=mode):
                 self.runner(mode, report)

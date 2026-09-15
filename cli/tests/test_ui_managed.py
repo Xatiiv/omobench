@@ -321,7 +321,7 @@ class GuidedRunLifecycleTests(unittest.TestCase):
         detail = wait_for(completed, timeout=20)
         self.assertEqual(detail["status"], "completed", detail)
         self.assertIsNotNone(detail["benchmark_job_id"])
-        self.assertEqual(detail["result"]["results"]["requests"]["succeeded"], 49)
+        self.assertEqual(detail["result"]["results"]["requests"]["succeeded"], 50)
 
         benchmark_status, _, benchmark_body = self.request(f"/api/runs/{detail['benchmark_job_id']}", self.auth())
         self.assertEqual(benchmark_status, 200)

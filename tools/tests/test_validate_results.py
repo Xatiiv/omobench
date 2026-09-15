@@ -48,7 +48,7 @@ VALID_RESULT_TEMPLATE = {
     },
     "benchmark": {
         "profile_id": "chat-small-v1",
-        "profile_sha256": "sha256:" + "b" * 64,
+        "profile_sha256": None,  # filled in below once the fixture profile file's real hash is known
         "runner": "guidellm",
         "runner_version": "0.7.3",
     },
@@ -76,6 +76,26 @@ VALID_RESULT_TEMPLATE = {
         "source_commit": None,
     },
 }
+
+# A fixture profile, deliberately permissive so VALID_RESULT_TEMPLATE's own
+# results (49 succeeded, 2.0% errors) satisfy it; specific acceptance-boundary
+# tests below write their own tighter profile fixtures instead of relying on this.
+DEFAULT_PROFILE_YAML = (
+    "id: chat-small-v1\n"
+    "acceptance:\n"
+    "  minimum_successful_requests: 40\n"
+    "  maximum_error_rate_percent: 5\n"
+)
+DEFAULT_PROFILE_SHA256 = sha256_of(DEFAULT_PROFILE_YAML.encode())
+VALID_RESULT_TEMPLATE["benchmark"]["profile_sha256"] = DEFAULT_PROFILE_SHA256
+
+
+def write_profile(profiles_dir: Path, profile_id: str, contents: str) -> str:
+    """Write a fixture profile YAML and return its sha256 (matching benchmark.profile_sha256)."""
+    profiles_dir.mkdir(parents=True, exist_ok=True)
+    (profiles_dir / f"{profile_id}.yaml").write_text(contents, encoding="utf-8")
+    return sha256_of(contents.encode())
+
 
 ARTIFACT_CONTENTS = {
     "raw_runner_output": gzip.compress(b'{"metadata": {"version": 2}}'),
@@ -131,20 +151,26 @@ class ValidateResultsTests(unittest.TestCase):
         self.root = Path(self._temp_directory.name)
         self.results_path = self.root / "results"
         self.catalog_path = self.root / "catalog" / "models"
+        self.profiles_path = self.root / "benchmarks" / "profiles"
         self.addCleanup(self._temp_directory.cleanup)
 
         patcher_root = patch.object(validate_results, "ROOT", self.root)
         patcher_results = patch.object(validate_results, "RESULTS_PATH", self.results_path)
         patcher_catalog = patch.object(validate_results, "CATALOG_PATH", self.catalog_path)
+        patcher_profiles = patch.object(validate_results, "PROFILES_PATH", self.profiles_path)
         patcher_root.start()
         patcher_results.start()
         patcher_catalog.start()
+        patcher_profiles.start()
         self.addCleanup(patcher_root.stop)
         self.addCleanup(patcher_results.stop)
         self.addCleanup(patcher_catalog.stop)
+        self.addCleanup(patcher_profiles.stop)
 
         # A valid default catalog so tests unrelated to catalog behavior keep passing.
         write_catalog(self.catalog_path)
+        # A permissive default profile so tests unrelated to acceptance keep passing.
+        write_profile(self.profiles_path, "chat-small-v1", DEFAULT_PROFILE_YAML)
 
     def run_main(self) -> tuple[int, str, str]:
         stdout, stderr = io.StringIO(), io.StringIO()
@@ -661,6 +687,176 @@ models:
                 self.assertEqual(exit_code, 1)
                 self.assertIn("Model catalog error", stderr)
 
+
+class AcceptanceValidationTests(unittest.TestCase):
+    """Every profile (CPU or GPU, any workload) supplies its own acceptance
+    thresholds; nothing here is hardcoded to a specific profile's numbers."""
+
+    def setUp(self) -> None:
+        self._temp_directory = tempfile.TemporaryDirectory()
+        self.root = Path(self._temp_directory.name)
+        self.results_path = self.root / "results"
+        self.catalog_path = self.root / "catalog" / "models"
+        self.profiles_path = self.root / "benchmarks" / "profiles"
+        self.addCleanup(self._temp_directory.cleanup)
+
+        for name, path in [
+            ("ROOT", self.root),
+            ("RESULTS_PATH", self.results_path),
+            ("CATALOG_PATH", self.catalog_path),
+            ("PROFILES_PATH", self.profiles_path),
+        ]:
+            patcher = patch.object(validate_results, name, path)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+        write_catalog(self.catalog_path)
+
+    def run_main(self) -> tuple[int, str, str]:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            exit_code = validate_results.main()
+        return exit_code, stdout.getvalue(), stderr.getvalue()
+
+    def write_result(self, *, succeeded: int, attempted: int, error_rate_percent: float, execution_device: str,
+                      profile_yaml: str, run_id: str = "run-fixture-1234") -> None:
+        profile_sha256 = write_profile(self.profiles_path, "chat-small-v1", profile_yaml)
+        hardware = copy.deepcopy(VALID_RESULT_TEMPLATE["hardware"])
+        overrides: dict = {
+            "run_id": run_id,
+            "execution_device": execution_device,
+            "benchmark": {**VALID_RESULT_TEMPLATE["benchmark"], "profile_sha256": profile_sha256},
+            "results": {
+                **VALID_RESULT_TEMPLATE["results"],
+                "requests": {"attempted": attempted, "succeeded": succeeded, "failed": attempted - succeeded},
+                "error_rate_percent": error_rate_percent,
+            },
+        }
+        if execution_device == "cpu":
+            hardware["gpus"] = []
+            hardware["driver_version"] = None
+            overrides["hardware"] = hardware
+        write_bundle(self.results_path / "qwen3-4b" / f"2026-08-30-{run_id}", result_overrides=overrides)
+
+    BOUNDARY_PROFILE = (
+        "id: chat-small-v1\n"
+        "acceptance:\n"
+        "  minimum_successful_requests: 40\n"
+        "  maximum_error_rate_percent: 1\n"
+    )
+
+    def test_cpu_bundle_meeting_requirements_passes(self) -> None:
+        self.write_result(
+            succeeded=45, attempted=45, error_rate_percent=0.0, execution_device="cpu",
+            profile_yaml=self.BOUNDARY_PROFILE,
+        )
+        exit_code, stdout, _ = self.run_main()
+        self.assertEqual(exit_code, 0, stdout)
+        self.assertIn("Validated 1 OmoBench result bundle(s).", stdout)
+
+    def test_gpu_bundle_meeting_requirements_passes(self) -> None:
+        self.write_result(
+            succeeded=45, attempted=45, error_rate_percent=0.0, execution_device="gpu",
+            profile_yaml=self.BOUNDARY_PROFILE,
+        )
+        exit_code, stdout, _ = self.run_main()
+        self.assertEqual(exit_code, 0, stdout)
+        self.assertIn("Validated 1 OmoBench result bundle(s).", stdout)
+
+    def test_exactly_the_minimum_successful_requests_passes(self) -> None:
+        """Exactly 40 successes against minimum_successful_requests: 40 must pass, not fail."""
+        self.write_result(
+            succeeded=40, attempted=40, error_rate_percent=0.0, execution_device="cpu",
+            profile_yaml=self.BOUNDARY_PROFILE,
+        )
+        exit_code, stdout, stderr = self.run_main()
+        self.assertEqual(exit_code, 0, stderr)
+
+    def test_exactly_the_maximum_error_rate_passes(self) -> None:
+        """Exactly 1% errors against maximum_error_rate_percent: 1 must pass, not fail."""
+        self.write_result(
+            succeeded=40, attempted=41, error_rate_percent=1.0, execution_device="cpu",
+            profile_yaml=self.BOUNDARY_PROFILE,
+        )
+        exit_code, stdout, stderr = self.run_main()
+        self.assertEqual(exit_code, 0, stderr)
+
+    def test_one_below_minimum_successful_requests_is_rejected(self) -> None:
+        self.write_result(
+            succeeded=39, attempted=39, error_rate_percent=0.0, execution_device="cpu",
+            profile_yaml=self.BOUNDARY_PROFILE,
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("acceptance:", stderr)
+        self.assertIn("39 successful requests is below", stderr)
+        self.assertIn("minimum_successful_requests (40)", stderr)
+        self.assertIn("does not meet submission requirements", stderr)
+
+    def test_insufficient_successful_requests_is_rejected(self) -> None:
+        """The real-world case: this run's actual counts, far short of 40."""
+        self.write_result(
+            succeeded=13, attempted=13, error_rate_percent=0.0, execution_device="cpu",
+            profile_yaml=self.BOUNDARY_PROFILE,
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("13 successful requests is below", stderr)
+
+    def test_error_rate_just_above_maximum_is_rejected(self) -> None:
+        self.write_result(
+            succeeded=40, attempted=41, error_rate_percent=1.1, execution_device="cpu",
+            profile_yaml=self.BOUNDARY_PROFILE,
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("acceptance:", stderr)
+        self.assertIn("error rate 1.1%", stderr)
+        self.assertIn("maximum_error_rate_percent (1%)", stderr)
+        self.assertIn("does not meet submission requirements", stderr)
+
+    def test_excessive_error_rate_is_rejected(self) -> None:
+        self.write_result(
+            succeeded=40, attempted=50, error_rate_percent=20.0, execution_device="cpu",
+            profile_yaml=self.BOUNDARY_PROFILE,
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("error rate 20.0%", stderr)
+
+    def test_missing_profile_file_is_rejected_clearly(self) -> None:
+        profile_sha256 = "sha256:" + "f" * 64
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+            result_overrides={"benchmark": {**VALID_RESULT_TEMPLATE["benchmark"], "profile_sha256": profile_sha256}},
+        )
+        # No profile file written at all in self.profiles_path.
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("profile file is missing", stderr)
+
+    def test_profile_hash_mismatch_is_rejected_clearly(self) -> None:
+        """Guards against judging a result against a profile that has since changed."""
+        write_profile(self.profiles_path, "chat-small-v1", self.BOUNDARY_PROFILE)
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+            result_overrides={
+                "benchmark": {**VALID_RESULT_TEMPLATE["benchmark"], "profile_sha256": "sha256:" + "0" * 64}
+            },
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("does not match the current contents", stderr)
+
+    def test_profile_without_acceptance_section_is_rejected_clearly(self) -> None:
+        profile_sha256 = write_profile(self.profiles_path, "chat-small-v1", "id: chat-small-v1\n")
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+            result_overrides={"benchmark": {**VALID_RESULT_TEMPLATE["benchmark"], "profile_sha256": profile_sha256}},
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("missing an 'acceptance' section", stderr)
 
 if __name__ == "__main__":
     unittest.main()

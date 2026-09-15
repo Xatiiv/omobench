@@ -41,14 +41,29 @@ GUIDELLM_REPORT_V2 = {
         {
             "scheduler_metrics": {
                 "measure_start_time": 1767225600,
+                # Deliberately different from metrics.request_totals below: this field
+                # spans the full scheduler lifecycle (including warmup/cooldown) and
+                # must NOT be what the normalizer reports, per
+                # report.exclude_warmup_and_cooldown in every OmoBench profile.
                 "requests_made": {
-                    "successful": 49,
-                    "incomplete": 0,
-                    "errored": 1,
-                    "total": 50,
+                    "successful": 52,
+                    "incomplete": 3,
+                    "errored": 2,
+                    "total": 57,
                 },
             },
             "metrics": {
+                # The measured-window-only counts (GuideLLM's own
+                # get_within_range(measure_start_time, measure_end_time) filtering):
+                # this is what the normalizer must report. Zero errors so this fixture
+                # satisfies the real chat-small-v1 profile's maximum_error_rate_percent
+                # (1%) wherever tests use the real profile via make_root().
+                "request_totals": {
+                    "successful": 50,
+                    "incomplete": 0,
+                    "errored": 0,
+                    "total": 50,
+                },
                 "time_to_first_token_ms": {
                     "successful": {"percentiles": {"p50": 210.0, "p95": 315.0}}
                 },
@@ -378,15 +393,22 @@ class HardwareFromEnvironmentTests(unittest.TestCase):
         self.assertEqual(hardware["detection"]["hardware"], "user-confirmed")
 
 
-def build_staged_run_directory(root: Path, environment: dict | None = None) -> Path:
+def build_staged_run_directory(root: Path, environment: dict | None = None, report: dict | None = None) -> Path:
     """Create a complete .omobench-runs/ staging directory with valid evidence."""
     profile_path = root / "benchmarks" / "profiles" / "chat-small-v1.yaml"
     profile_path.parent.mkdir(parents=True, exist_ok=True)
-    profile_path.write_text("id: chat-small-v1\n", encoding="utf-8")
+    # Permissive but real acceptance section: GUIDELLM_REPORT_V2's measured-window
+    # counts (50 succeeded, 0.0% errors) must satisfy it, so existing tests that
+    # only care about non-acceptance behavior keep passing while still genuinely
+    # exercising the acceptance check rather than bypassing it.
+    profile_path.write_text(
+        "id: chat-small-v1\nacceptance:\n  minimum_successful_requests: 40\n  maximum_error_rate_percent: 5\n",
+        encoding="utf-8",
+    )
     run_directory = root / ".omobench-runs" / "run-fixture-1234"
     run_directory.mkdir(parents=True)
     with gzip.open(run_directory / "guidellm-benchmarks.json.gz", "wt", encoding="utf-8") as raw_file:
-        json.dump(GUIDELLM_REPORT_V2, raw_file)
+        json.dump(report if report is not None else GUIDELLM_REPORT_V2, raw_file)
     (run_directory / "guidellm.stdout.log").write_text("completed\n", encoding="utf-8")
     (run_directory / "reproduce.md").write_text("# Reproduce\n", encoding="utf-8")
     default_environment = {
@@ -591,7 +613,7 @@ class ResultPackagingTests(unittest.TestCase):
 
     def test_normalizer_rejects_a_report_with_no_successful_requests(self) -> None:
         report = json.loads(json.dumps(GUIDELLM_REPORT_V2))
-        requests = report["benchmarks"][0]["scheduler_metrics"]["requests_made"]
+        requests = report["benchmarks"][0]["metrics"]["request_totals"]
         requests.update(
             {
                 "successful": 0,
@@ -603,6 +625,16 @@ class ResultPackagingTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "no successful requests"):
             normalize_guidellm_report(report)
+
+    def test_normalizer_uses_measured_window_counts_not_full_lifecycle_counts(self) -> None:
+        """The profile requires excluding warmup and cooldown from the report.
+        scheduler_metrics.requests_made spans the full lifecycle; metrics.request_totals
+        is GuideLLM's own measured-window-only count. The normalizer must report the
+        latter, even when they disagree (as the fixture deliberately makes them)."""
+        report = json.loads(json.dumps(GUIDELLM_REPORT_V2))
+        normalized = normalize_guidellm_report(report)
+        self.assertEqual(normalized["results"]["requests"], {"attempted": 50, "succeeded": 50, "failed": 0})
+        self.assertEqual(normalized["results"]["error_rate_percent"], 0.0)
 
     def test_cpu_and_gpu_are_both_valid_execution_devices(self) -> None:
         """CPU-only benchmarks are first-class, publishable OmoBench results."""
@@ -628,7 +660,7 @@ class ResultPackagingTests(unittest.TestCase):
             self.assertEqual(result["schema_version"], "1.0")
             self.assertEqual(result["run_id"], "run-fixture-1234")
             self.assertEqual(result["results"]["latency_ms"]["ttft"]["p95"], 315.0)
-            self.assertEqual(result["results"]["error_rate_percent"], 2.0)
+            self.assertEqual(result["results"]["error_rate_percent"], 0.0)
             self.assertEqual(result["hardware"]["gpus"][0]["count"], 2)
             self.assertEqual(result["hardware"]["gpus"][0]["vendor"], "nvidia")
             self.assertEqual(

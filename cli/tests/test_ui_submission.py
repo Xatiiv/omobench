@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -16,7 +19,7 @@ from omobench.ui_submission import (
     BUNDLE_FILES, GitHub, bundle_archive, bundle_snapshot, description, destination, prepare_submission,
     submit_pull_request, validate_bundle,
 )
-from test_cli import base_package_args, build_staged_run_directory
+from test_cli import GUIDELLM_REPORT_V2, base_package_args, build_staged_run_directory
 from test_ui import ROOT, make_root
 
 
@@ -318,6 +321,82 @@ class SubmissionTests(unittest.TestCase):
         _, cpu_body = description(cpu_result, "results/example")
         self.assertIn("Execution device: CPU", cpu_body)
         self.assertIn("confirms CPU execution", cpu_body)
+
+
+class AcceptanceGateTests(unittest.TestCase):
+    """The gap this closes: a benchmark that finished (produced a schema-valid,
+    hash-correct result.json) is not the same thing as a result that meets its
+    profile's own acceptance requirements. Both the local panel and the registry/CI
+    validator share the identical check in tools/validate_results.py, so they must
+    reject an under-performing bundle the same way."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        make_root(self.root)
+        self.addCleanup(self.temporary.cleanup)
+
+    def package_under_performing_cpu_run(self) -> Path:
+        """Mirrors the real incident: a CPU run that finished (16 measured-window
+        requests, 0 errors) but falls far short of minimum_successful_requests: 40."""
+        report = json.loads(json.dumps(GUIDELLM_REPORT_V2))
+        report["benchmarks"][0]["metrics"]["request_totals"] = {
+            "successful": 13,
+            "incomplete": 0,
+            "errored": 0,
+            "total": 13,
+        }
+        run = build_staged_run_directory(self.root, report=report)
+        args = base_package_args(run, execution_device="cpu")
+        original_directory = Path.cwd()
+        os.chdir(self.root)
+        try:
+            with patch("omobench.cli.current_git_commit", return_value="a" * 40), redirect_stdout(io.StringIO()):
+                self.assertEqual(package_local_run(args), 0)
+        finally:
+            os.chdir(original_directory)
+        result = json.loads((run / "result.json").read_text())
+        self.assertEqual(result["results"]["requests"]["succeeded"], 13)
+        return run
+
+    def test_local_submission_flow_rejects_it(self):
+        run = self.package_under_performing_cpu_run()
+        errors = validate_bundle(self.root, run)
+        self.assertTrue(any("acceptance:" in error for error in errors), errors)
+        self.assertTrue(any("13 successful requests is below" in error for error in errors), errors)
+        self.assertTrue(any("minimum_successful_requests (40)" in error for error in errors), errors)
+
+    def test_registry_ci_validator_rejects_the_same_bundle(self):
+        run = self.package_under_performing_cpu_run()
+        destination_dir = self.root / "results" / "qwen3-4b" / "2026-09-16-run-fixture-1234"
+        shutil.copytree(run, destination_dir)
+        completed = subprocess.run(
+            [sys.executable, str(self.root / "tools" / "validate_results.py")],
+            cwd=self.root, capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(completed.returncode, 1, completed.stdout + completed.stderr)
+        self.assertIn("acceptance:", completed.stderr)
+        self.assertIn("13 successful requests is below", completed.stderr)
+
+    def test_both_paths_reject_the_bundle_for_the_same_acceptance_reason(self):
+        """The two entry points must not diverge: same bundle, same acceptance verdict."""
+        run = self.package_under_performing_cpu_run()
+        panel_errors = validate_bundle(self.root, run)
+        panel_message = next(error for error in panel_errors if "acceptance:" in error)
+
+        destination_dir = self.root / "results" / "qwen3-4b" / "2026-09-16-run-fixture-1234"
+        shutil.copytree(run, destination_dir)
+        completed = subprocess.run(
+            [sys.executable, str(self.root / "tools" / "validate_results.py")],
+            cwd=self.root, capture_output=True, text=True, timeout=30,
+        )
+        registry_message = next(line for line in completed.stderr.splitlines() if "acceptance:" in line)
+
+        # Same profile, same counts, same thresholds: the human-readable reason matches.
+        self.assertIn("13 successful requests is below", panel_message)
+        self.assertIn("13 successful requests is below", registry_message)
+        self.assertIn("minimum_successful_requests (40)", panel_message)
+        self.assertIn("minimum_successful_requests (40)", registry_message)
 
 
 if __name__ == "__main__":
