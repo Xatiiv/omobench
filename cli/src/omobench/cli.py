@@ -17,6 +17,7 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from . import __version__
@@ -480,6 +481,25 @@ def required_text(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{label} must be a non-empty string.")
     return value.strip()
+
+
+def require_https_source_url(value: Any, label: str) -> str:
+    """Validate a generic, operator-supplied weights-source URL.
+
+    Unlike managed_setup's ALLOWED_DOWNLOAD_HOSTS, this applies to any
+    supported model or runtime, not a specific reviewed recipe: it only
+    requires https and a complete, credential-free URL, without a host
+    allowlist.
+    """
+    text = required_text(value, label)
+    parts = urlsplit(text)
+    if parts.scheme != "https":
+        raise ValueError(f"{label} must use https.")
+    if not parts.hostname:
+        raise ValueError(f"{label} must be a complete URL.")
+    if parts.username or parts.password:
+        raise ValueError(f"{label} must not carry credentials.")
+    return text
 
 
 def validate_execution_device(execution_device: str) -> None:
@@ -968,6 +988,11 @@ def package_local_run(args: argparse.Namespace) -> int:
                 else None
             ),
         }
+        model_source = getattr(args, "model_source", None)
+        if model_source:
+            # When supplied, model.revision refers to this source's own repository,
+            # not necessarily model.id's canonical catalog/upstream repository.
+            model["source"] = require_https_source_url(model_source, "--model-source")
         runtime = {
             "framework": required_text(args.framework, "Framework"),
             "version": required_text(args.framework_version, "Framework version"),
@@ -1221,6 +1246,15 @@ def build_parser() -> argparse.ArgumentParser:
     package.add_argument("--run-dir", required=True, help="local staging directory created by omobench run --execute")
     package.add_argument("--model", required=True, help="canonical model ID")
     package.add_argument("--model-revision", required=True, help="immutable model revision or commit SHA")
+    package.add_argument(
+        "--model-source",
+        help=(
+            "optional https URL identifying the actual weights source, ideally the exact "
+            "download URL pinned to an immutable revision and filename; when supplied, "
+            "--model-revision refers to this source's own repository, not necessarily "
+            "the canonical --model repository"
+        ),
+    )
     package.add_argument("--quantization", help="quantization label, such as BF16 or Q4_K_M")
     package.add_argument("--framework", required=True, choices=RUNTIME_FRAMEWORKS, help="inference framework")
     package.add_argument("--framework-version", required=True, help="exact framework version")

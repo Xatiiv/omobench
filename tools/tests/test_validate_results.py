@@ -569,6 +569,28 @@ models:
         self.assertEqual(exit_code, 1)
         self.assertIn("execution_device", stderr)
 
+    def test_model_source_is_accepted_alongside_canonical_model_id(self) -> None:
+        """model.id stays the canonical catalog identity; model.source records the
+        actual weights source and is accepted as additional, optional metadata."""
+        model = copy.deepcopy(VALID_RESULT_TEMPLATE["model"])
+        model["source"] = "https://huggingface.co/ggml-org/Qwen3-4B-GGUF/resolve/abc123/Qwen3-4B-Q4_K_M.gguf"
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+            result_overrides={"model": model},
+        )
+        exit_code, stdout, _ = self.run_main()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Validated 1 OmoBench result bundle(s).", stdout)
+
+    def test_bundle_without_model_source_remains_valid(self) -> None:
+        """A result.json that predates model.source, or simply omits it, must
+        keep validating exactly as before."""
+        self.assertNotIn("source", VALID_RESULT_TEMPLATE["model"])
+        write_bundle(self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234")
+        exit_code, stdout, _ = self.run_main()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Validated 1 OmoBench result bundle(s).", stdout)
+
     def test_cpu_and_gpu_bundles_with_same_raw_output_are_not_duplicates(self) -> None:
         """Configuration identity distinguishes cpu and gpu; the fingerprint values used
         here differ, as omobench package itself would produce for otherwise-identical runs."""

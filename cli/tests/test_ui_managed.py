@@ -235,9 +235,15 @@ class GuidedRunLifecycleTests(unittest.TestCase):
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 
+        self.fixture_model_source = "https://huggingface.co/fixture-org/Fixture-Model-GGUF/resolve/abc123/fixture.gguf"
         self.get_recipe_patch = patch(
             "omobench.managed_setup.get_recipe",
-            return_value={"id": "fixture-recipe", "model_id": "Fixture/Alias", "benchmark_profile": "chat-small-v1"},
+            return_value={
+                "id": "fixture-recipe",
+                "model_id": "Fixture/Alias",
+                "benchmark_profile": "chat-small-v1",
+                "model": {"url": self.fixture_model_source},
+            },
         )
         self.verify_patch = patch(
             "omobench.managed_setup.verify_installed",
@@ -322,6 +328,9 @@ class GuidedRunLifecycleTests(unittest.TestCase):
         benchmark_detail = json.loads(benchmark_body)
         self.assertEqual(benchmark_detail["execution_device"], "cpu")
         self.assertEqual(benchmark_detail["status"], "completed")
+        # The recipe's own pinned download URL prefills model_source, so packaging
+        # this run through the advanced panel never requires typing a source by hand.
+        self.assertEqual(benchmark_detail["model_source"], self.fixture_model_source)
 
 
 if __name__ == "__main__":

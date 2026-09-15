@@ -98,6 +98,10 @@ After a completed CPU or GPU run, **Review & submit** becomes available:
    version, quantization, submitter, and the server's actual startup arguments.
    The API alias used to make requests can differ from the canonical model ID.
    Generic servers require a meaningful server description. Do not enter secrets.
+   Leave **Model weights source** blank when the weights came from the model
+   ID's own repository; set it only when they came from elsewhere (for example
+   a quantized re-export) — the panel prefills it automatically for a run
+   started from a reviewed managed recipe.
 2. Use the optional hardware fields only if detection was incomplete. The GPU
    memory field only applies to a GPU run and is hidden for a CPU run — no GPU
    performed inference, so there is nothing to fill in. A GPU memory value can

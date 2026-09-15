@@ -273,6 +273,28 @@ class ExecutionTests(unittest.TestCase):
         recovered = Controller(self.root)
         self.assertEqual(recovered.detail(job["id"])["summary"], job["summary"])
 
+    def test_set_prefill_surfaces_a_model_source_the_package_form_can_use(self):
+        """A managed run's recipe can attach a suggested model_source to the
+        underlying job; the package form can read it back and still submit it like
+        any other operator-supplied field."""
+        self.runner()
+        job = self.finished(self.controller.start(RUN_CONFIG))
+        source_url = "https://huggingface.co/ggml-org/Qwen3-4B-GGUF/resolve/abc123/Qwen3-4B-Q4_K_M.gguf"
+        self.controller.set_prefill(job["id"], model_source=source_url)
+        self.assertEqual(self.controller.detail(job["id"])["model_source"], source_url)
+
+        packaged = self.controller.package(job["id"], {
+            "model": "Qwen/Qwen3-4B", "model_revision": "abc123", "framework": "llama.cpp",
+            "framework_version": "test-build", "submitter": "tester", "model_source": source_url,
+        })
+        self.assertTrue(packaged["validation"]["valid"], packaged)
+        run = self.controller.run_directory(job["id"])
+        result = json.loads((run / "result.json").read_text())
+        self.assertEqual(result["model"]["source"], source_url)
+
+        recovered = Controller(self.root)
+        self.assertEqual(recovered.detail(job["id"])["summary"], job["summary"])
+
     def test_nonzero_missing_and_zero_success_reports_are_failed(self):
         bad = copy.deepcopy(GUIDELLM_REPORT_V2)
         bad["benchmarks"][0]["scheduler_metrics"]["requests_made"] = {"successful": 0, "incomplete": 0, "errored": 50, "total": 50}

@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
@@ -339,6 +340,16 @@ class Controller:
             raise UIError("This operation has no single completed evidence directory.")
         return self._inside(runs[0])
 
+    def set_prefill(self, job_id: str, **fields: Any) -> None:
+        """Attach optional, editable prefill metadata to a job (for example a managed
+        recipe's own pinned download URL as model_source), so the package form can
+        display it without requiring the operator to type it. Never affects packaging
+        by itself: the operator still submits (and may change) the package form."""
+        with self.lock:
+            job = self._get(job_id)
+            job.update(fields)
+            self._save(job)
+
     def detail(self, job_id: str) -> dict:
         with self.lock:
             job = dict(self._get(job_id))
@@ -382,7 +393,10 @@ class Controller:
         values = {name: text_field(data, name) for name in names}
         if values["framework"] not in cli.RUNTIME_FRAMEWORKS:
             raise UIError("Choose a supported framework.")
-        optional = {name: text_field(data, name, optional=True) for name in ["quantization", "server_description", "cpu"]}
+        optional = {
+            name: text_field(data, name, optional=True)
+            for name in ["quantization", "server_description", "cpu", "model_source"]
+        }
         runtime_args = data.get("runtime_args", [])
         if not isinstance(runtime_args, list) or len(runtime_args) > 100:
             raise UIError("Enter one runtime argument per line.")

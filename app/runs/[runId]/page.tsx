@@ -51,7 +51,8 @@ function DetailShell({
 
 function LocalRunDetails({ result }: Readonly<{ result: RegistryResult }>) {
   const reproducibilityFields = [
-    ["Model revision", result.modelRevision],
+    [result.modelSource ? "Model revision (of weights source)" : "Model revision", result.modelRevision],
+    ...(result.modelSource ? [["Weights source", result.modelSource]] : []),
     ["Runtime", `${result.framework} ${result.frameworkVersion}`],
     ["Runtime arguments", result.runtimeArguments.length ? result.runtimeArguments.join(" ") : "None recorded"],
     ["GuideLLM", result.runnerVersion],

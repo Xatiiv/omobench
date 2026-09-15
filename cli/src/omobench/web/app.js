@@ -162,6 +162,8 @@ async function selectRun(id) {
   $("submission-preview").hidden = true; $("submit-confirmed").checked = false;
   const job = await api(`/api/runs/${id}`);
   $("package-form").reset(); $("package-model").value = job.model; $("framework").value = "llama.cpp"; frameworkChanged();
+  // Verified managed-run metadata, when present, so packaging never requires typing a source by hand.
+  $("package-model-source").value = job.model_source || "";
   renderRun(job); renderJobs();
 }
 

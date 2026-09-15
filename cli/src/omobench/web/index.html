@@ -63,6 +63,7 @@
             <label>Quantization<input name="quantization" placeholder="For example BF16 or Q4_K_M"></label>
             <label>Submitter<input name="submitter" required placeholder="GitHub username or organization"></label>
           </div>
+          <label>Model weights source (optional)<input name="model_source" id="package-model-source" type="url" placeholder="Exact pinned download URL, if different from a generic catalog reference" spellcheck="false"><span class="hint">When set, the model revision above is understood as this source's own repository, not necessarily the canonical model ID's repository. Prefilled automatically for a managed CPU run.</span></label>
           <label id="description-field" hidden>Server description<input name="server_description" id="server-description" placeholder="Name and details of the generic server"></label>
           <label>Runtime startup arguments<textarea name="runtime_args" rows="3" placeholder="One argument per line, e.g. --ctx-size=2048"></textarea><span class="hint">Record the actual server settings, including GPU offload. Do not include tokens or passwords.</span></label>
           <details><summary>Hardware details, if detection is incomplete</summary><div class="grid two"><label id="gpu-memory-field">GPU memory per card (GB)<input name="gpu_memory_gb" type="number" min="0.01" step="any" placeholder="Only if detected VRAM is unknown"></label><label>CPU description<input name="cpu" placeholder="Leave blank to use detected CPU"></label></div></details>

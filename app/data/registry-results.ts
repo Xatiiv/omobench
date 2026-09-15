@@ -25,6 +25,7 @@ export type RegistryResult = {
   id: string;
   model: string;
   modelRevision: string;
+  modelSource: string | null;
   outputTokensPerSecond: number;
   profile: string;
   quantization: string | null;
@@ -184,6 +185,7 @@ function readRegistryResult(sourcePath: string, value: unknown): RegistryResult 
     id: textField(value, "run_id", sourcePath),
     model: textField(model, "id", sourcePath),
     modelRevision: textField(model, "revision", sourcePath),
+    modelSource: optionalTextField(model, "source", sourcePath),
     outputTokensPerSecond: numberField(results, "output_tokens_per_second", sourcePath),
     profile: textField(benchmark, "profile_id", sourcePath),
     quantization: optionalTextField(model, "quantization", sourcePath),

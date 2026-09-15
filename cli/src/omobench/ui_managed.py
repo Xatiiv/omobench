@@ -236,6 +236,12 @@ class ManagedController:
                 )
                 with self.lock:
                     job["benchmark_job_id"] = benchmark_job["id"]
+                # Prefill the advanced panel's package form with this reviewed recipe's
+                # own pinned download URL, so packaging this run never requires typing
+                # a weights source by hand.
+                model_source = recipe.get("model", {}).get("url")
+                if model_source:
+                    self.benchmark_controller.set_prefill(benchmark_job["id"], model_source=model_source)
                 while True:
                     detail = self.benchmark_controller.detail(benchmark_job["id"])
                     if detail["status"] not in {"running", "cancelling"}:

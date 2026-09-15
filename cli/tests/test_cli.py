@@ -28,6 +28,7 @@ from omobench.cli import (
     package_local_run,
     print_doctor,
     redact_endpoint,
+    require_https_source_url,
     sha256_json,
     validate_execution_device,
     write_run_intent,
@@ -409,6 +410,7 @@ def base_package_args(run_directory: Path, **overrides: object) -> argparse.Name
         run_dir=str(run_directory),
         model="Qwen/Qwen3-4B",
         model_revision="abc123",
+        model_source=None,
         quantization="BF16",
         framework="vllm",
         framework_version="0.11.0",
@@ -506,6 +508,78 @@ class RuntimeFrameworkParserTests(unittest.TestCase):
             ]
         )
         self.assertIsNone(args.server_description)
+
+    def test_model_source_argument_is_optional_and_defaults_to_none(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "package",
+                "--run-dir",
+                ".omobench-runs/run-fixture-1234",
+                "--model",
+                "Qwen/Qwen3-4B",
+                "--model-revision",
+                "abc123",
+                "--framework",
+                "vllm",
+                "--framework-version",
+                "1.0.0",
+                "--execution-device",
+                "gpu",
+                "--profile",
+                "chat-small-v1",
+                "--submitter",
+                "local-tester",
+            ]
+        )
+        self.assertIsNone(args.model_source)
+
+        args = parser.parse_args(
+            [
+                "package",
+                "--run-dir",
+                ".omobench-runs/run-fixture-1234",
+                "--model",
+                "Qwen/Qwen3-4B",
+                "--model-revision",
+                "abc123",
+                "--model-source",
+                "https://huggingface.co/ggml-org/Qwen3-4B-GGUF/resolve/2f3b082b1356a6123f7ed71e65aea340da25d53c/Qwen3-4B-Q4_K_M.gguf",
+                "--framework",
+                "vllm",
+                "--framework-version",
+                "1.0.0",
+                "--execution-device",
+                "gpu",
+                "--profile",
+                "chat-small-v1",
+                "--submitter",
+                "local-tester",
+            ]
+        )
+        self.assertTrue(args.model_source.startswith("https://huggingface.co/ggml-org/"))
+
+
+class ModelSourceValidationTests(unittest.TestCase):
+    def test_valid_https_url_is_accepted(self) -> None:
+        url = "https://huggingface.co/ggml-org/Qwen3-4B-GGUF/resolve/abc123/Qwen3-4B-Q4_K_M.gguf"
+        self.assertEqual(require_https_source_url(url, "--model-source"), url)
+
+    def test_non_https_scheme_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must use https"):
+            require_https_source_url("http://huggingface.co/x/y", "--model-source")
+
+    def test_credentials_in_url_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must not carry credentials"):
+            require_https_source_url("https://user:pass@huggingface.co/x/y", "--model-source")
+
+    def test_incomplete_url_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must be a complete URL"):
+            require_https_source_url("https://", "--model-source")
+
+    def test_empty_value_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            require_https_source_url("", "--model-source")
 
 
 class ResultPackagingTests(unittest.TestCase):
@@ -756,6 +830,99 @@ class ResultPackagingTests(unittest.TestCase):
                 },
             }
             self.assertEqual(result["configuration_fingerprint"], sha256_json(historical_payload))
+
+    def test_model_source_is_omitted_by_default_and_fingerprint_is_unaffected(self) -> None:
+        """Omitting --model-source must leave result.json and its fingerprint exactly
+        as they were before --model-source existed."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            run_directory = build_staged_run_directory(root)
+            args = base_package_args(run_directory)
+            self.assertIsNone(args.model_source)
+            original_directory = Path.cwd()
+            os.chdir(root)
+            try:
+                with patch("omobench.cli.current_git_commit", return_value="a" * 40):
+                    self.assertEqual(package_local_run(args), 0)
+            finally:
+                os.chdir(original_directory)
+            result = json.loads((run_directory / "result.json").read_text(encoding="utf-8"))
+            self.assertNotIn("source", result["model"])
+
+            historical_payload = {
+                "model": result["model"],
+                "runtime": result["runtime"],
+                "hardware": {
+                    "os": result["hardware"]["os"],
+                    "cpu": result["hardware"]["cpu"],
+                    "ram_gb": result["hardware"]["ram_gb"],
+                    "gpus": result["hardware"]["gpus"],
+                    "driver_version": result["hardware"]["driver_version"],
+                },
+                "benchmark": {
+                    "profile_id": result["benchmark"]["profile_id"],
+                    "profile_sha256": result["benchmark"]["profile_sha256"],
+                },
+            }
+            self.assertEqual(result["configuration_fingerprint"], sha256_json(historical_payload))
+
+    def test_model_source_is_recorded_and_changes_the_fingerprint(self) -> None:
+        """Supplying --model-source records model.source and, since it is genuinely
+        new metadata about this specific run's configuration, changes the
+        configuration_fingerprint relative to an otherwise-identical run without it —
+        the same way --server-description already behaves."""
+        source_url = (
+            "https://huggingface.co/ggml-org/Qwen3-4B-GGUF/resolve/"
+            "2f3b082b1356a6123f7ed71e65aea340da25d53c/Qwen3-4B-Q4_K_M.gguf"
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            run_directory = build_staged_run_directory(root)
+            original_directory = Path.cwd()
+
+            os.chdir(root)
+            try:
+                with patch("omobench.cli.current_git_commit", return_value="a" * 40):
+                    self.assertEqual(package_local_run(base_package_args(run_directory)), 0)
+            finally:
+                os.chdir(original_directory)
+            without_source = json.loads((run_directory / "result.json").read_text(encoding="utf-8"))
+
+            os.chdir(root)
+            try:
+                with patch("omobench.cli.current_git_commit", return_value="a" * 40):
+                    self.assertEqual(
+                        package_local_run(base_package_args(run_directory, model_source=source_url, force=True)),
+                        0,
+                    )
+            finally:
+                os.chdir(original_directory)
+            with_source = json.loads((run_directory / "result.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(with_source["model"]["source"], source_url)
+            self.assertEqual(with_source["model"]["id"], without_source["model"]["id"])
+            self.assertEqual(with_source["model"]["revision"], without_source["model"]["revision"])
+            self.assertNotEqual(
+                with_source["configuration_fingerprint"], without_source["configuration_fingerprint"]
+            )
+
+    def test_invalid_model_source_is_rejected_and_does_not_package(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            run_directory = build_staged_run_directory(root)
+            args = base_package_args(run_directory, model_source="http://not-https.example/weights.gguf")
+            original_directory = Path.cwd()
+            os.chdir(root)
+            try:
+                with patch("omobench.cli.current_git_commit", return_value="a" * 40):
+                    stderr = io.StringIO()
+                    with redirect_stderr(stderr):
+                        exit_code = package_local_run(args)
+            finally:
+                os.chdir(original_directory)
+            self.assertEqual(exit_code, 2)
+            self.assertIn("must use https", stderr.getvalue())
+            self.assertFalse((run_directory / "result.json").exists())
 
     def test_cpu_execution_device_packages_without_any_gpu_evidence(self) -> None:
         """CPU results must not require GPU detection, VRAM, or GPU drivers."""

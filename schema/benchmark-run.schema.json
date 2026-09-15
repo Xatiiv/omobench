@@ -33,7 +33,7 @@
     },
     "configuration_fingerprint": {
       "type": "string",
-      "description": "SHA-256 of normalized model, runtime, hardware, driver, execution device, arguments, and profile metadata.",
+      "description": "SHA-256 of normalized model (including source, when supplied), runtime, hardware, driver, arguments, and profile metadata. Deliberately excludes the top-level execution_device: hardware.gpus (always empty for a cpu run) already separates cpu and gpu configurations, so a legacy result predating execution_device and a freshly packaged, otherwise-identical gpu result still fingerprint identically.",
       "pattern": "^sha256:[a-f0-9]{64}$"
     },
     "execution_device": {
@@ -46,14 +46,22 @@
       "additionalProperties": false,
       "required": ["id", "revision", "quantization"],
       "properties": {
-        "id": { "type": "string", "minLength": 3 },
+        "id": {
+          "type": "string",
+          "minLength": 3,
+          "description": "Canonical catalog model identity, used for eligibility and comparison. Independent of source: it never changes when source is present or absent."
+        },
         "revision": {
           "type": "string",
           "minLength": 1,
-          "description": "Immutable model revision or commit SHA. Mutable labels such as main, master, or latest are rejected by registry validation."
+          "description": "Immutable model revision or commit SHA. Mutable labels such as main, master, or latest are rejected by registry validation. When source is present, this revision refers to source's own repository; it is not presented as a verified revision of id's canonical upstream repository."
         },
         "quantization": { "type": ["string", "null"] },
-        "source": { "type": "string", "format": "uri" }
+        "source": {
+          "type": "string",
+          "format": "uri",
+          "description": "The actual weights source, ideally the exact download URL pinned to an immutable revision and filename (for example a quantized re-export repository distinct from id's canonical repository). Optional: absent on results that predate this field, and on any result where the operator did not supply one; both remain valid and keep their existing interpretation, with revision then understood as id's own repository."
+        }
       }
     },
     "runtime": {
