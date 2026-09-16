@@ -51,13 +51,14 @@ function DetailShell({
 
 function LocalRunDetails({ result }: Readonly<{ result: RegistryResult }>) {
   const reproducibilityFields = [
-    ["Model revision", result.modelRevision],
+    [result.modelSource ? "Model revision (of weights source)" : "Model revision", result.modelRevision],
+    ...(result.modelSource ? [["Weights source", result.modelSource]] : []),
     ["Runtime", `${result.framework} ${result.frameworkVersion}`],
     ["Runtime arguments", result.runtimeArguments.length ? result.runtimeArguments.join(" ") : "None recorded"],
     ["GuideLLM", result.runnerVersion],
     ["CPU / RAM", `${result.hardware.cpu} · ${formatMetric(result.hardware.ramGb, " GB")}`],
     ["Operating system", result.hardware.os],
-    ["GPU driver", result.hardware.driverVersion ?? "Not reported"],
+    ["Driver version", result.hardware.driverVersion ?? "Not reported"],
     ["Configuration fingerprint", result.configurationFingerprint],
     ["Source commit", result.sourceCommit ?? "Not recorded"],
   ];
@@ -83,8 +84,9 @@ function LocalRunDetails({ result }: Readonly<{ result: RegistryResult }>) {
         </p>
       </section>
 
-      <section className="grid gap-4 py-10 sm:grid-cols-2 lg:grid-cols-4">
+      <section className="grid gap-4 py-10 sm:grid-cols-2 lg:grid-cols-5">
         {[
+          ["Execution device", result.executionDevice.toUpperCase()],
           ["Profile", result.profile],
           ["Framework", `${result.framework} ${result.frameworkVersion}`],
           ["Quantization", result.quantization ?? "Unspecified"],

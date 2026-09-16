@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "schema" / "benchmark-run.schema.json"
 RESULTS_PATH = ROOT / "results"
 CATALOG_PATH = ROOT / "catalog" / "models"
+PROFILES_PATH = ROOT / "benchmarks" / "profiles"
 ELIGIBLE_MODALITY = "text-generation"
 MUTABLE_REVISION_LABELS = {"main", "master", "latest"}
 
@@ -88,6 +89,52 @@ def sha256(path: Path) -> str:
         for block in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(block)
     return f"sha256:{digest.hexdigest()}"
+
+
+def load_profile_acceptance(
+    profiles_path: Path, profile_id: str, profile_sha256: str
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Load the publication acceptance thresholds from the exact profile a result claims to use.
+
+    Never hardcodes thresholds: every profile (CPU or GPU, any workload) supplies
+    its own 'acceptance' section, matched by profile_id and reconciled against
+    profile_sha256 so a since-edited profile file is never used to judge an older
+    result. Returns (acceptance_dict, None) on success, or (None, message) when the
+    profile is missing, unreadable, hash-mismatched, or missing a usable
+    'acceptance' section.
+    """
+    profile_path = profiles_path / f"{profile_id}.yaml"
+    if not profile_path.is_file():
+        return None, f"benchmark.profile_id: profile file is missing: {profile_path}"
+    try:
+        actual_hash = sha256(profile_path)
+    except OSError as error:
+        return None, f"benchmark.profile_id: could not read profile file {profile_path}: {error}"
+    if actual_hash != profile_sha256:
+        return None, (
+            f"benchmark.profile_sha256: does not match the current contents of {profile_path}; "
+            "the profile may have changed since this result was packaged"
+        )
+    try:
+        document = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as error:
+        return None, f"benchmark.profile_id: malformed profile YAML at {profile_path} ({error})"
+    acceptance = document.get("acceptance") if isinstance(document, dict) else None
+    if not isinstance(acceptance, dict):
+        return None, f"benchmark.profile_id: profile {profile_path} is missing an 'acceptance' section"
+    minimum = acceptance.get("minimum_successful_requests")
+    maximum = acceptance.get("maximum_error_rate_percent")
+    if isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 0:
+        return None, (
+            f"benchmark.profile_id: profile {profile_path} acceptance.minimum_successful_requests "
+            "must be a non-negative integer"
+        )
+    if isinstance(maximum, bool) or not isinstance(maximum, (int, float)) or maximum < 0:
+        return None, (
+            f"benchmark.profile_id: profile {profile_path} acceptance.maximum_error_rate_percent "
+            "must be a non-negative number"
+        )
+    return {"minimum_successful_requests": minimum, "maximum_error_rate_percent": maximum}, None
 
 
 def safe_artifact_path(result_path: Path, artifact_path: str) -> Path | None:
@@ -171,6 +218,35 @@ def validate_result(
         if actual_hash != artifact["sha256"]:
             errors.append(
                 f"{result_path.relative_to(ROOT)}: hash mismatch for {artifact_name}"
+            )
+
+    # Publication acceptance: distinct from the checks above. A schema-valid,
+    # hash-correct bundle with intact evidence still may not meet its own
+    # profile's acceptance thresholds; the benchmark having finished does not by
+    # itself mean the result is ready to submit. Every profile (CPU or GPU)
+    # supplies its own thresholds here; none are hardcoded.
+    acceptance, acceptance_error = load_profile_acceptance(
+        PROFILES_PATH, result["benchmark"]["profile_id"], result["benchmark"]["profile_sha256"]
+    )
+    if acceptance_error:
+        errors.append(f"{result_path.relative_to(ROOT)}: {acceptance_error}")
+    else:
+        profile_id = result["benchmark"]["profile_id"]
+        succeeded = result["results"]["requests"]["succeeded"]
+        error_rate = result["results"]["error_rate_percent"]
+        minimum_successful = acceptance["minimum_successful_requests"]
+        maximum_error_rate = acceptance["maximum_error_rate_percent"]
+        if succeeded < minimum_successful:
+            errors.append(
+                f"{result_path.relative_to(ROOT)}: acceptance: {succeeded} successful requests is below "
+                f"the {profile_id!r} profile's minimum_successful_requests ({minimum_successful}); "
+                "the benchmark finished, but this result does not meet submission requirements"
+            )
+        if error_rate > maximum_error_rate:
+            errors.append(
+                f"{result_path.relative_to(ROOT)}: acceptance: error rate {error_rate}% exceeds the "
+                f"{profile_id!r} profile's maximum_error_rate_percent ({maximum_error_rate}%); "
+                "the benchmark finished, but this result does not meet submission requirements"
             )
 
     return errors

@@ -9,22 +9,28 @@ The [README](README.md) is the user-facing contributor guide. This file explains
 OmoBench is a GitHub-backed evidence registry and test harness for self-hosted, open-weight language-model inference. A contributor runs a fixed profile against their own OpenAI-compatible server, preserves raw evidence, packages a normalized result, and submits the complete bundle through a GitHub pull request.
 
 `omobench ui` is a local browser controller around the same CLI. It can run CPU
-workloads and export local measurements; public v1 packaging remains GPU-only.
+or GPU workloads; both are eligible for public v1 packaging and submission.
 The comparison website and its `/run` launch guide are separate from this panel.
 
-It is **not** a model host, model downloader, cloud GPU provider, or automatic proof that a model server used a GPU.
+It is **not** a model host, model downloader, cloud GPU provider, or automatic proof that a model server used the declared execution device.
+
+`omobench prepare`/`omobench launch` and the panel's `/guided` page add a reviewed,
+managed CPU setup path (a development milestone, not an installer): they download
+and verify one pinned model + runtime recipe from `catalog/downloads/`, then run
+the same unchanged benchmark engine described below. See
+[guided-launcher.md](docs/guided-launcher.md).
 
 ## V1 scope and invariants
 
 - Public results are for catalogued open-weight, text-generation models.
 - Requests use streaming OpenAI-compatible `/v1/chat/completions`.
-- Public v1 results must be genuinely GPU-backed.
+- Public v1 results must be genuinely executed on their declared device. CPU and GPU are both first-class, publishable execution devices; `execution_device` describes what actually performed inference, not merely what hardware is installed.
 - Benchmark profiles in `benchmarks/profiles/` are versioned workload definitions. Do not silently change their load, token counts, or metrics.
 - A model revision must be immutable; do not accept `main`, `master`, or `latest`.
 - The model catalog in `catalog/models/` is the source of truth for eligible public models. Do not hard-code a competing model list.
 - Runtime provenance matters. Preserve the exact framework, version, startup arguments, and a meaningful description for `openai-compatible-other`.
 - GPU metadata is vendor-neutral. Do not make NVIDIA-only assumptions or infer VRAM from an unreliable source.
-- `--execution-device gpu` records a contributor's declaration; it does not create or independently prove GPU execution.
+- `--execution-device` records a contributor's declaration; it does not create or independently prove execution on that device. A CPU result must not represent an installed-but-unused GPU as having performed inference — its `hardware.gpus` stays empty even when the machine has an idle GPU.
 
 ## Evidence and result integrity
 
@@ -34,7 +40,7 @@ Treat `results/` as append-only public evidence.
 - Preserve the complete bundle: `result.json`, raw runner output, runner log, environment snapshot, and reproduction instructions.
 - Keep artifact paths and SHA-256 hashes valid.
 - Never place API keys, tokens, private hostnames, private prompts, model weights, or other secrets in a bundle, log, or documentation.
-- Do not claim that a run is publishable unless the server's own logs or hardware telemetry confirm real GPU inference.
+- Do not claim that a run is publishable unless the server's own logs or hardware telemetry confirm real inference on the declared execution device.
 
 Local staging data belongs in `.omobench-runs/`; UI jobs use
 `.omobench-runs/ui/job-<id>/run-<id>/`. Running or packaging does not upload data.
@@ -52,6 +58,7 @@ Keep localhost/token/origin protections and the one-panel-per-checkout lock.
 | --- | --- |
 | `benchmarks/profiles/` | Fixed, versioned benchmark workloads |
 | `catalog/models/` | Eligible-model registry |
+| `catalog/downloads/` | Reviewed managed download recipes (model + runtime provenance for `omobench prepare`/`launch`); see [guided-launcher.md](docs/guided-launcher.md) |
 | `cli/` | `omobench` CLI, browser controller/assets, and tests |
 | `schema/` | Public `result.json` contract |
 | `tools/` | Result validator and validator tests |

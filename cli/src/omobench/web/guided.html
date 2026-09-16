@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OmoBench · Guided CPU setup</title>
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/guided.css">
+  <script src="/guided.js" defer></script>
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="/">Omo<span>Bench</span><span class="brand-mark">▥</span></a><span class="pill"><span class="dot"></span> Guided CPU setup · development milestone</span></header>
+  <div class="guided-layout">
+    <main>
+      <div class="eyebrow">GUIDED CPU SETUP</div>
+      <h1>Set up a reviewed CPU model, step by step.</h1>
+      <p class="intro">
+        This guided path downloads and verifies one reviewed model + runtime recipe, then runs the
+        <strong>same, unchanged</strong> benchmark engine as the <a href="/">advanced panel</a>. It is a development
+        milestone, not an installer: it does not touch system packages, and this page only runs the CPU benchmark —
+        it does not package or submit results itself. The evidence it produces is a normal local run, and CPU and
+        GPU results are both eligible for packaging and submission from <a href="/">the advanced panel</a> or the
+        <code>omobench package</code> CLI command. <a href="/">Use the advanced panel</a> to connect to a model
+        server you already run yourself, or to package a run from this page.
+      </p>
+      <div id="notice" class="notice" role="status" hidden></div>
+
+      <section class="panel" id="stage-platform">
+        <div class="section-head"><div><span class="step">•</span><h2>Environment check</h2></div></div>
+        <p id="platform-status" class="muted">Checking this environment…</p>
+      </section>
+
+      <section class="panel" id="stage-1">
+        <div class="section-head"><div><span class="step">01</span><h2>Select test</h2></div></div>
+        <p class="muted">This milestone ships two reviewed recipes for the same downloaded model and runtime, on CPU: the standard <code>chat-small-v1</code> profile, and an extended-duration <code>chat-small-extended-v1</code> variant with the same workload for hardware that needs more than 15 minutes to collect enough measured samples.</p>
+        <div id="recipe-list"></div>
+      </section>
+
+      <section class="panel" id="stage-2" hidden>
+        <div class="section-head"><div><span class="step">02</span><h2>Reviewed model &amp; configuration</h2></div></div>
+        <dl id="recipe-detail" class="kv"></dl>
+      </section>
+
+      <section class="panel" id="stage-3" hidden>
+        <div class="section-head"><div><span class="step">03</span><h2>Storage folder</h2></div></div>
+        <p class="muted">Large model and runtime files are kept here, under <code>omobench-managed-v1/</code>. Use an absolute
+          path in the form your current environment expects (WSL/Linux: <code>/mnt/d/OmoBench</code>; native Windows setup/review only).</p>
+        <label>Storage folder<input id="storage-dir" spellcheck="false" placeholder="/mnt/d/OmoBench"></label>
+        <div class="actions"><button id="review-button" type="button">Review downloads</button></div>
+      </section>
+
+      <section class="panel" id="stage-4" hidden>
+        <div class="section-head"><div><span class="step">04</span><h2>Review downloads</h2></div></div>
+        <div id="review-report"></div>
+      </section>
+
+      <section class="panel" id="stage-5" hidden>
+        <div class="section-head"><div><span class="step">05</span><h2>Confirm preparation</h2></div></div>
+        <label class="check"><input id="confirm-download" type="checkbox"><span>I reviewed the exact files, sizes, licences, and SHA-256 hashes above, and I have enough free space. Download and verify them now.</span></label>
+        <div class="actions"><button id="prepare-button" type="button" disabled>Download &amp; install</button></div>
+      </section>
+
+      <section class="panel" id="stage-6" hidden>
+        <div class="section-head"><div><span class="step">06</span><h2>Download progress</h2></div><span id="setup-status" class="pill"></span></div>
+        <div id="download-progress"></div>
+        <p id="setup-error" class="notice error" role="status" hidden></p>
+        <div class="actions"><button id="cancel-setup" type="button" class="danger" hidden>Cancel download</button></div>
+      </section>
+
+      <section class="panel" id="stage-7" hidden>
+        <div class="section-head"><div><span class="step">07</span><h2>Verify readiness</h2></div></div>
+        <p class="muted">Starts the verified server, confirms it reports the expected model alias, then stops it. This performs no inference and reports no performance result.</p>
+        <div class="actions"><button id="smoke-button" type="button">Check readiness</button></div>
+        <p id="smoke-result" class="notice" role="status" hidden></p>
+      </section>
+
+      <section class="panel" id="stage-8" hidden>
+        <div class="section-head"><div><span class="step">08</span><h2>Run the CPU benchmark</h2></div><span id="run-status" class="pill"></span></div>
+        <p class="muted">Runs the existing <code>chat-small-v1</code> profile through the unchanged CLI/GuideLLM runner against the managed server.</p>
+        <div class="actions"><button id="execute-button" type="button">Run benchmark</button><button id="cancel-run" type="button" class="danger" hidden>Cancel</button></div>
+        <p id="run-error" class="notice error" role="status" hidden></p>
+        <details id="server-log-details"><summary>Managed server diagnostic log</summary><pre id="server-log"></pre></details>
+        <details id="benchmark-log-details" open><summary>Live runner log</summary><pre id="benchmark-log">Waiting for the runner…</pre></details>
+      </section>
+
+      <section class="panel" id="stage-9" hidden>
+        <div class="section-head"><div><span class="step">09</span><h2>Results</h2></div></div>
+        <p class="notice">These are real CPU measurements from the managed server, staged as a normal local evidence
+          directory. Packaging and submission are not available from this guided page; use
+          <a href="/">the advanced panel</a>, or run <code>omobench package --execution-device cpu</code> from the
+          CLI against this run's directory, to review and submit it.</p>
+        <div id="guided-metrics" class="grid metrics" hidden></div>
+        <div class="actions"><button id="guided-download-summary" type="button" class="secondary" hidden>Download local summary</button></div>
+      </section>
+
+      <footer>Reviewed recipes. Verified downloads. The same fixed benchmark engine as the advanced panel.</footer>
+    </main>
+  </div>
+</body>
+</html>

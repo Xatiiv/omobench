@@ -1,0 +1,14 @@
+.guided-layout{max-width:900px;margin:auto}
+.guided-layout main{padding:38px 24px}
+.kv{margin:0;font-size:13px}
+.kv dt{color:var(--muted);margin-top:14px}
+.kv dd{margin:4px 0 0;overflow-wrap:anywhere}
+.recipe-card{border:1px solid var(--line);border-radius:9px;padding:16px;margin:10px 0;cursor:pointer}
+.recipe-card.selected{border-color:var(--accent);background:var(--soft)}
+.recipe-card h3{margin:0 0 6px;font-size:14px}
+.file-card{border:1px solid var(--line);border-radius:8px;padding:14px;margin:10px 0;font-size:12px}
+.file-card .path{margin-top:6px}
+.progress-row{margin:10px 0;font-size:12px}
+.progress-bar{height:8px;border-radius:4px;background:#17271e;border:1px solid var(--line);overflow:hidden;margin-top:6px}
+.progress-bar > span{display:block;height:100%;background:var(--accent)}
+@media(max-width:620px){.guided-layout main{padding:22px 16px}}

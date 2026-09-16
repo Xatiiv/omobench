@@ -5,9 +5,11 @@
 OmoBench v1 covers open-weight text-generation models served through an
 OpenAI-compatible chat-completions endpoint.
 
-Public v1 records require actual GPU inference. CPU runs can be benchmarked and
-downloaded locally through the [browser panel](browser-control.md), but its local
-summary is not a public `result.json` and must not be placed under `results/`.
+CPU and GPU runs are both eligible for public v1 records: `--execution-device`
+declares what actually performed inference, not merely what hardware is
+installed. A CPU run's quick **Download local summary** JSON is still not a
+public `result.json` and must not be placed under `results/` by hand — use
+packaging (CLI or panel) to produce a schema-ready bundle instead.
 
 There are two submission routes: **Review & submit** in `omobench ui`, or the
 [manual PR workflow](#manual-pull-request-workflow). Both preserve the same five
@@ -44,6 +46,19 @@ Registry validation rejects an empty revision and clearly mutable labels —
 different weights over time and break reproducibility. Normal SHA-based (or
 otherwise content-addressed) revisions are accepted.
 
+`model.id` always stays the canonical catalog identity used for eligibility
+and comparison, regardless of where the weights actually came from. The
+optional `model.source` (set with `--model-source`) records the actual
+weights source — ideally the exact download URL pinned to an immutable
+revision and filename — for cases like a quantized re-export repository that
+differs from `model.id`'s own repository (for example a GGUF conversion
+maintained under a different namespace). **When `model.source` is supplied,
+`model.revision` refers to that source's own repository, not to `model.id`'s
+canonical upstream repository** — do not present it as a verified revision of
+the upstream repo. Omitting `--model-source` keeps the historical
+interpretation (`model.revision` refers to `model.id`'s own repository) and
+existing bundles without `model.source` remain valid exactly as before.
+
 Each benchmark submission occupies one directory:
 
 ```text
@@ -75,10 +90,10 @@ endpoint redaction is not a substitute for reviewing all files and startup argum
 
 ## Create the local normalized summary
 
-After a confirmed GPU run finishes successfully, package its staging directory
-into a local `result.json`. This is a metadata template: replace the model,
-revision, quantization, version, paths, submitter, and every runtime argument
-with the actual values from that run. It is not the CPU demo's configuration.
+After a confirmed CPU or GPU run finishes successfully, package its staging
+directory into a local `result.json`. This is a metadata template: replace the
+model, revision, quantization, version, paths, submitter, and every runtime
+argument with the actual values from that run.
 
 ```bash
 omobench package \
@@ -93,6 +108,14 @@ omobench package \
   --profile chat-small-v1 \
   --submitter YOUR_GITHUB_USERNAME
 ```
+
+Add `--model-source https://...` (an https URL, no embedded credentials) only
+when the weights actually came from somewhere other than `--model`'s own
+repository — for example a quantized re-export. Omit it entirely when the
+weights came directly from `--model`'s own repository at `--model-revision`;
+omitting it changes nothing about how the bundle is interpreted. The advanced
+panel's package form prefills this field automatically for a run started from
+a reviewed managed recipe, using that recipe's own pinned download URL.
 
 The command reads the raw compressed GuideLLM report, local environment
 snapshot, runner log, and reproduction file. It writes `result.json` beside
@@ -115,13 +138,14 @@ The model revision, quantization, framework version, and startup arguments are
 deliberately supplied by the operator. An OpenAI-compatible endpoint cannot
 reliably report those reproducibility-critical facts itself.
 
-OmoBench v1 packages GPU-backed results only. The operator must pass
-`--execution-device gpu` after confirming that the model server **genuinely
-ran on the GPU** — `--execution-device gpu` records that confirmation, it
-does not itself verify or cause GPU execution.
-
-CPU-only runs may be useful for local testing, but they are not publishable
-records yet.
+CPU and GPU results are both publishable. `--execution-device` describes what
+actually performed inference, not merely what hardware is installed: pass
+`--execution-device gpu` only after confirming the model server **genuinely
+ran on the GPU** (the flag records that confirmation; it does not itself
+verify or cause GPU execution), or `--execution-device cpu` for a confirmed
+CPU-only run. A CPU package does not need GPU detection, VRAM, or a driver —
+its `hardware.gpus` is recorded empty even when the machine has an idle,
+unused GPU, because that GPU did not perform inference.
 
 ## GPU vendor and memory
 
@@ -184,17 +208,30 @@ a new configuration. Existing `result.json` files without
 `schema/benchmark-run.schema.json` except when `runtime.framework` is
 `openai-compatible-other`.
 
+`--model-source` behaves the same way: when supplied, it is recorded as
+`model.source` and included in the `configuration_fingerprint`, so packaging
+the same run once with a source and once without produces two different
+configurations. Omitting `--model-source` leaves `model` exactly as before —
+the fingerprint for a run packaged without a source is unaffected by this
+option's existence.
+
 ## Repeats and duplicates
 
 A `configuration_fingerprint` is a SHA-256 digest of the normalized model
-revision, quantization, framework and version, startup arguments, hardware
-class, driver, and profile. A `run_id` identifies one execution session.
+revision, quantization, source (when supplied), framework and version,
+startup arguments, hardware class, driver, and profile. A `run_id` identifies
+one execution session. `execution_device` is deliberately **not** part of
+this digest: `hardware.gpus` (always empty for a `cpu` run) already separates
+a `cpu` configuration from a `gpu` one, which keeps a `gpu` result's
+fingerprint identical to what pre-`execution_device` code computed for the
+same configuration — an old GPU bundle and a freshly repackaged, otherwise
+identical GPU run still collide under the duplicate check below.
 
 - Same fingerprint and same raw-runner hash: accidental duplicate; rejected.
 - Same fingerprint but a different raw-runner hash: valid repeat.
 - Different submitter or host with the same configuration: valid replication.
-- Changed model revision, quantization, runtime, driver, hardware, arguments,
-  or benchmark profile: a new configuration.
+- Changed model revision, quantization, model source, runtime, driver,
+  hardware, arguments, or benchmark profile: a new configuration.
 
 ## Manual pull request workflow
 

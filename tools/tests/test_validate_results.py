@@ -48,7 +48,7 @@ VALID_RESULT_TEMPLATE = {
     },
     "benchmark": {
         "profile_id": "chat-small-v1",
-        "profile_sha256": "sha256:" + "b" * 64,
+        "profile_sha256": None,  # filled in below once the fixture profile file's real hash is known
         "runner": "guidellm",
         "runner_version": "0.7.3",
     },
@@ -76,6 +76,26 @@ VALID_RESULT_TEMPLATE = {
         "source_commit": None,
     },
 }
+
+# A fixture profile, deliberately permissive so VALID_RESULT_TEMPLATE's own
+# results (49 succeeded, 2.0% errors) satisfy it; specific acceptance-boundary
+# tests below write their own tighter profile fixtures instead of relying on this.
+DEFAULT_PROFILE_YAML = (
+    "id: chat-small-v1\n"
+    "acceptance:\n"
+    "  minimum_successful_requests: 40\n"
+    "  maximum_error_rate_percent: 5\n"
+)
+DEFAULT_PROFILE_SHA256 = sha256_of(DEFAULT_PROFILE_YAML.encode())
+VALID_RESULT_TEMPLATE["benchmark"]["profile_sha256"] = DEFAULT_PROFILE_SHA256
+
+
+def write_profile(profiles_dir: Path, profile_id: str, contents: str) -> str:
+    """Write a fixture profile YAML and return its sha256 (matching benchmark.profile_sha256)."""
+    profiles_dir.mkdir(parents=True, exist_ok=True)
+    (profiles_dir / f"{profile_id}.yaml").write_text(contents, encoding="utf-8")
+    return sha256_of(contents.encode())
+
 
 ARTIFACT_CONTENTS = {
     "raw_runner_output": gzip.compress(b'{"metadata": {"version": 2}}'),
@@ -131,20 +151,26 @@ class ValidateResultsTests(unittest.TestCase):
         self.root = Path(self._temp_directory.name)
         self.results_path = self.root / "results"
         self.catalog_path = self.root / "catalog" / "models"
+        self.profiles_path = self.root / "benchmarks" / "profiles"
         self.addCleanup(self._temp_directory.cleanup)
 
         patcher_root = patch.object(validate_results, "ROOT", self.root)
         patcher_results = patch.object(validate_results, "RESULTS_PATH", self.results_path)
         patcher_catalog = patch.object(validate_results, "CATALOG_PATH", self.catalog_path)
+        patcher_profiles = patch.object(validate_results, "PROFILES_PATH", self.profiles_path)
         patcher_root.start()
         patcher_results.start()
         patcher_catalog.start()
+        patcher_profiles.start()
         self.addCleanup(patcher_root.stop)
         self.addCleanup(patcher_results.stop)
         self.addCleanup(patcher_catalog.stop)
+        self.addCleanup(patcher_profiles.stop)
 
         # A valid default catalog so tests unrelated to catalog behavior keep passing.
         write_catalog(self.catalog_path)
+        # A permissive default profile so tests unrelated to acceptance keep passing.
+        write_profile(self.profiles_path, "chat-small-v1", DEFAULT_PROFILE_YAML)
 
     def run_main(self) -> tuple[int, str, str]:
         stdout, stderr = io.StringIO(), io.StringIO()
@@ -501,6 +527,153 @@ models:
         self.assertEqual(exit_code, 1)
         self.assertIn("vendor", stderr)
 
+    def test_legacy_bundle_without_execution_device_still_passes(self) -> None:
+        """A result.json published before execution-device tracking has no
+        execution_device field at all and must remain valid."""
+        result_overrides = {}
+        self.assertNotIn("execution_device", VALID_RESULT_TEMPLATE)
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+            result_overrides=result_overrides,
+        )
+        exit_code, stdout, _ = self.run_main()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Validated 1 OmoBench result bundle(s).", stdout)
+
+    def test_cpu_execution_device_with_empty_gpus_and_null_driver_is_accepted(self) -> None:
+        hardware = copy.deepcopy(VALID_RESULT_TEMPLATE["hardware"])
+        hardware["gpus"] = []
+        hardware["driver_version"] = None
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+            result_overrides={"execution_device": "cpu", "hardware": hardware},
+        )
+        exit_code, stdout, _ = self.run_main()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Validated 1 OmoBench result bundle(s).", stdout)
+
+    def test_cpu_execution_device_may_not_list_a_gpu(self) -> None:
+        """A cpu run must not represent an installed-but-unused GPU as having performed inference."""
+        hardware = copy.deepcopy(VALID_RESULT_TEMPLATE["hardware"])
+        hardware["driver_version"] = None
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+            result_overrides={"execution_device": "cpu", "hardware": hardware},
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("hardware.gpus", stderr)
+
+    def test_cpu_execution_device_may_not_carry_a_driver_version(self) -> None:
+        hardware = copy.deepcopy(VALID_RESULT_TEMPLATE["hardware"])
+        hardware["gpus"] = []
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+            result_overrides={"execution_device": "cpu", "hardware": hardware},
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("hardware.driver_version", stderr)
+
+    def test_gpu_execution_device_still_requires_at_least_one_gpu(self) -> None:
+        hardware = copy.deepcopy(VALID_RESULT_TEMPLATE["hardware"])
+        hardware["gpus"] = []
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+            result_overrides={"execution_device": "gpu", "hardware": hardware},
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("hardware.gpus", stderr)
+
+    def test_invalid_execution_device_value_is_rejected(self) -> None:
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+            result_overrides={"execution_device": "tpu"},
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("execution_device", stderr)
+
+    def test_model_source_is_accepted_alongside_canonical_model_id(self) -> None:
+        """model.id stays the canonical catalog identity; model.source records the
+        actual weights source and is accepted as additional, optional metadata."""
+        model = copy.deepcopy(VALID_RESULT_TEMPLATE["model"])
+        model["source"] = "https://huggingface.co/ggml-org/Qwen3-4B-GGUF/resolve/abc123/Qwen3-4B-Q4_K_M.gguf"
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+            result_overrides={"model": model},
+        )
+        exit_code, stdout, _ = self.run_main()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Validated 1 OmoBench result bundle(s).", stdout)
+
+    def test_bundle_without_model_source_remains_valid(self) -> None:
+        """A result.json that predates model.source, or simply omits it, must
+        keep validating exactly as before."""
+        self.assertNotIn("source", VALID_RESULT_TEMPLATE["model"])
+        write_bundle(self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234")
+        exit_code, stdout, _ = self.run_main()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Validated 1 OmoBench result bundle(s).", stdout)
+
+    def test_cpu_and_gpu_bundles_with_same_raw_output_are_not_duplicates(self) -> None:
+        """Configuration identity distinguishes cpu and gpu; the fingerprint values used
+        here differ, as omobench package itself would produce for otherwise-identical runs."""
+        cpu_hardware = copy.deepcopy(VALID_RESULT_TEMPLATE["hardware"])
+        cpu_hardware["gpus"] = []
+        cpu_hardware["driver_version"] = None
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+            result_overrides={
+                "execution_device": "cpu",
+                "hardware": cpu_hardware,
+                "configuration_fingerprint": "sha256:" + "a" * 64,
+            },
+        )
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-31-run-fixture-5678",
+            result_overrides={
+                "run_id": "run-fixture-5678",
+                "execution_device": "gpu",
+                "configuration_fingerprint": "sha256:" + "d" * 64,
+            },
+        )
+        exit_code, stdout, _ = self.run_main()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Validated 2 OmoBench result bundle(s).", stdout)
+
+    def test_legacy_gpu_bundle_and_newly_packaged_equivalent_gpu_run_are_duplicates(self) -> None:
+        """A GPU bundle predating execution_device tracking and a freshly packaged,
+        otherwise-identical GPU run of the same raw-runner output must still collide
+        under the duplicate-configuration check, even though only the new one carries
+        execution_device. This models the real compatibility requirement: cli.py's
+        fingerprint algorithm for a gpu run is unchanged, so both bundles legitimately
+        share the same configuration_fingerprint value in practice."""
+        shared_fingerprint = "sha256:" + "e" * 64
+        shared_raw_output = gzip.compress(b'{"a": "same-config"}')
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-legacy-0001",
+            result_overrides={
+                "run_id": "run-legacy-0001",
+                "configuration_fingerprint": shared_fingerprint,
+                # No execution_device key at all: this predates the field.
+            },
+            artifact_contents={"raw_runner_output": shared_raw_output},
+        )
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-31-run-new-0002",
+            result_overrides={
+                "run_id": "run-new-0002",
+                "execution_device": "gpu",
+                "configuration_fingerprint": shared_fingerprint,
+            },
+            artifact_contents={"raw_runner_output": shared_raw_output},
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("duplicate configuration and raw-runner output", stderr)
+
     def test_invalid_models_structure_is_rejected(self) -> None:
         cases = {
             "root_not_a_mapping": "- just\n- a\n- list\n",
@@ -513,6 +686,224 @@ models:
                 exit_code, _, stderr = self.run_main()
                 self.assertEqual(exit_code, 1)
                 self.assertIn("Model catalog error", stderr)
+
+
+class AcceptanceValidationTests(unittest.TestCase):
+    """Every profile (CPU or GPU, any workload) supplies its own acceptance
+    thresholds; nothing here is hardcoded to a specific profile's numbers."""
+
+    def setUp(self) -> None:
+        self._temp_directory = tempfile.TemporaryDirectory()
+        self.root = Path(self._temp_directory.name)
+        self.results_path = self.root / "results"
+        self.catalog_path = self.root / "catalog" / "models"
+        self.profiles_path = self.root / "benchmarks" / "profiles"
+        self.addCleanup(self._temp_directory.cleanup)
+
+        for name, path in [
+            ("ROOT", self.root),
+            ("RESULTS_PATH", self.results_path),
+            ("CATALOG_PATH", self.catalog_path),
+            ("PROFILES_PATH", self.profiles_path),
+        ]:
+            patcher = patch.object(validate_results, name, path)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+        write_catalog(self.catalog_path)
+
+    def run_main(self) -> tuple[int, str, str]:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            exit_code = validate_results.main()
+        return exit_code, stdout.getvalue(), stderr.getvalue()
+
+    def write_result(self, *, succeeded: int, attempted: int, error_rate_percent: float, execution_device: str,
+                      profile_yaml: str, run_id: str = "run-fixture-1234") -> None:
+        profile_sha256 = write_profile(self.profiles_path, "chat-small-v1", profile_yaml)
+        hardware = copy.deepcopy(VALID_RESULT_TEMPLATE["hardware"])
+        overrides: dict = {
+            "run_id": run_id,
+            "execution_device": execution_device,
+            "benchmark": {**VALID_RESULT_TEMPLATE["benchmark"], "profile_sha256": profile_sha256},
+            "results": {
+                **VALID_RESULT_TEMPLATE["results"],
+                "requests": {"attempted": attempted, "succeeded": succeeded, "failed": attempted - succeeded},
+                "error_rate_percent": error_rate_percent,
+            },
+        }
+        if execution_device == "cpu":
+            hardware["gpus"] = []
+            hardware["driver_version"] = None
+            overrides["hardware"] = hardware
+        write_bundle(self.results_path / "qwen3-4b" / f"2026-08-30-{run_id}", result_overrides=overrides)
+
+    BOUNDARY_PROFILE = (
+        "id: chat-small-v1\n"
+        "acceptance:\n"
+        "  minimum_successful_requests: 40\n"
+        "  maximum_error_rate_percent: 1\n"
+    )
+
+    def test_cpu_bundle_meeting_requirements_passes(self) -> None:
+        self.write_result(
+            succeeded=45, attempted=45, error_rate_percent=0.0, execution_device="cpu",
+            profile_yaml=self.BOUNDARY_PROFILE,
+        )
+        exit_code, stdout, _ = self.run_main()
+        self.assertEqual(exit_code, 0, stdout)
+        self.assertIn("Validated 1 OmoBench result bundle(s).", stdout)
+
+    def test_gpu_bundle_meeting_requirements_passes(self) -> None:
+        self.write_result(
+            succeeded=45, attempted=45, error_rate_percent=0.0, execution_device="gpu",
+            profile_yaml=self.BOUNDARY_PROFILE,
+        )
+        exit_code, stdout, _ = self.run_main()
+        self.assertEqual(exit_code, 0, stdout)
+        self.assertIn("Validated 1 OmoBench result bundle(s).", stdout)
+
+    def test_exactly_the_minimum_successful_requests_passes(self) -> None:
+        """Exactly 40 successes against minimum_successful_requests: 40 must pass, not fail."""
+        self.write_result(
+            succeeded=40, attempted=40, error_rate_percent=0.0, execution_device="cpu",
+            profile_yaml=self.BOUNDARY_PROFILE,
+        )
+        exit_code, stdout, stderr = self.run_main()
+        self.assertEqual(exit_code, 0, stderr)
+
+    def test_exactly_the_maximum_error_rate_passes(self) -> None:
+        """Exactly 1% errors against maximum_error_rate_percent: 1 must pass, not fail."""
+        self.write_result(
+            succeeded=40, attempted=41, error_rate_percent=1.0, execution_device="cpu",
+            profile_yaml=self.BOUNDARY_PROFILE,
+        )
+        exit_code, stdout, stderr = self.run_main()
+        self.assertEqual(exit_code, 0, stderr)
+
+    def test_one_below_minimum_successful_requests_is_rejected(self) -> None:
+        self.write_result(
+            succeeded=39, attempted=39, error_rate_percent=0.0, execution_device="cpu",
+            profile_yaml=self.BOUNDARY_PROFILE,
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("acceptance:", stderr)
+        self.assertIn("39 successful requests is below", stderr)
+        self.assertIn("minimum_successful_requests (40)", stderr)
+        self.assertIn("does not meet submission requirements", stderr)
+
+    def test_insufficient_successful_requests_is_rejected(self) -> None:
+        """The real-world case: this run's actual counts, far short of 40."""
+        self.write_result(
+            succeeded=13, attempted=13, error_rate_percent=0.0, execution_device="cpu",
+            profile_yaml=self.BOUNDARY_PROFILE,
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("13 successful requests is below", stderr)
+
+    def test_error_rate_just_above_maximum_is_rejected(self) -> None:
+        self.write_result(
+            succeeded=40, attempted=41, error_rate_percent=1.1, execution_device="cpu",
+            profile_yaml=self.BOUNDARY_PROFILE,
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("acceptance:", stderr)
+        self.assertIn("error rate 1.1%", stderr)
+        self.assertIn("maximum_error_rate_percent (1%)", stderr)
+        self.assertIn("does not meet submission requirements", stderr)
+
+    def test_excessive_error_rate_is_rejected(self) -> None:
+        self.write_result(
+            succeeded=40, attempted=50, error_rate_percent=20.0, execution_device="cpu",
+            profile_yaml=self.BOUNDARY_PROFILE,
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("error rate 20.0%", stderr)
+
+    def test_missing_profile_file_is_rejected_clearly(self) -> None:
+        profile_sha256 = "sha256:" + "f" * 64
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+            result_overrides={"benchmark": {**VALID_RESULT_TEMPLATE["benchmark"], "profile_sha256": profile_sha256}},
+        )
+        # No profile file written at all in self.profiles_path.
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("profile file is missing", stderr)
+
+    def test_profile_hash_mismatch_is_rejected_clearly(self) -> None:
+        """Guards against judging a result against a profile that has since changed."""
+        write_profile(self.profiles_path, "chat-small-v1", self.BOUNDARY_PROFILE)
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+            result_overrides={
+                "benchmark": {**VALID_RESULT_TEMPLATE["benchmark"], "profile_sha256": "sha256:" + "0" * 64}
+            },
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("does not match the current contents", stderr)
+
+    def test_profile_without_acceptance_section_is_rejected_clearly(self) -> None:
+        profile_sha256 = write_profile(self.profiles_path, "chat-small-v1", "id: chat-small-v1\n")
+        write_bundle(
+            self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+            result_overrides={"benchmark": {**VALID_RESULT_TEMPLATE["benchmark"], "profile_sha256": profile_sha256}},
+        )
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("missing an 'acceptance' section", stderr)
+
+
+class RealChatSmallExtendedProfileTests(unittest.TestCase):
+    """Exercises the actual shipped benchmarks/profiles/chat-small-extended-v1.yaml
+    (unpatched PROFILES_PATH, the real repo), not an isolated fixture."""
+
+    def test_real_profile_file_has_the_required_acceptance_thresholds(self) -> None:
+        digest = validate_results.sha256(validate_results.PROFILES_PATH / "chat-small-extended-v1.yaml")
+        acceptance, error = validate_results.load_profile_acceptance(
+            validate_results.PROFILES_PATH, "chat-small-extended-v1", digest
+        )
+        self.assertIsNone(error)
+        self.assertEqual(acceptance["minimum_successful_requests"], 40)
+        self.assertEqual(acceptance["maximum_error_rate_percent"], 1)
+
+    def test_real_profile_matches_chat_small_v1s_acceptance_bar_exactly(self) -> None:
+        """Same acceptance requirements as chat-small-v1 -- preserved, not loosened."""
+        classic_digest = validate_results.sha256(validate_results.PROFILES_PATH / "chat-small-v1.yaml")
+        classic, _ = validate_results.load_profile_acceptance(
+            validate_results.PROFILES_PATH, "chat-small-v1", classic_digest
+        )
+        extended_digest = validate_results.sha256(validate_results.PROFILES_PATH / "chat-small-extended-v1.yaml")
+        extended, _ = validate_results.load_profile_acceptance(
+            validate_results.PROFILES_PATH, "chat-small-extended-v1", extended_digest
+        )
+        self.assertEqual(classic, extended)
+
+    def test_real_profile_only_changes_the_duration_ceiling(self) -> None:
+        """workload/execution/acceptance/report stay the same shape as chat-small-v1
+        except maximum_duration_seconds and the request-count warmup/cooldown note."""
+        classic = yaml.safe_load(
+            (validate_results.PROFILES_PATH / "chat-small-v1.yaml").read_text(encoding="utf-8")
+        )
+        extended = yaml.safe_load(
+            (validate_results.PROFILES_PATH / "chat-small-extended-v1.yaml").read_text(encoding="utf-8")
+        )
+        self.assertEqual(classic["workload"], extended["workload"])
+        self.assertEqual(classic["execution"]["concurrency"], extended["execution"]["concurrency"])
+        self.assertEqual(classic["execution"]["measured_requests"], extended["execution"]["measured_requests"])
+        self.assertEqual(classic["execution"]["warmup_requests"], extended["execution"]["warmup_requests"])
+        self.assertEqual(classic["execution"]["cooldown_requests"], extended["execution"]["cooldown_requests"])
+        self.assertEqual(classic["acceptance"], extended["acceptance"])
+        self.assertEqual(classic["report"], extended["report"])
+        self.assertNotEqual(
+            classic["execution"]["maximum_duration_seconds"], extended["execution"]["maximum_duration_seconds"]
+        )
+        self.assertEqual(extended["execution"]["maximum_duration_seconds"], 5400)
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from . import __version__
@@ -94,6 +95,30 @@ PROFILE_SPECS: dict[str, dict[str, Any]] = {
         "profile": "kind=concurrent,streams=16,max_concurrency=16,warmup=0.1,cooldown=0.1",
         "max_requests": 160,
         "max_duration_seconds": 900,
+    },
+    # Same chat-small workload; a longer duration ceiling so slower hardware
+    # (chiefly CPU) can collect enough measured samples. Uses explicit
+    # request-count warmup/cooldown (mode=requests), not chat-small-v1's
+    # percentage/prefer_duration scheme, so the sample size holds regardless
+    # of how long each request takes.
+    #
+    # cooldown.value=4, not 5: GuideLLM 0.7.3's own request-count cooldown
+    # boundary excludes phase_requests + 1 trailing requests, not
+    # phase_requests -- confirmed by driving the real scheduler-facing
+    # accumulator (GenerativeBenchmarkAccumulator.update_estimate) through a
+    # full synthetic request sequence and reading GenerativeMetrics.compile()'s
+    # final request_totals, not by inspecting compute_transition_time alone.
+    # A bare cooldown.value=5 excludes 6 requests; value=4 is the documented
+    # compensation that makes the *actual* excluded count 5, matching the
+    # declared contract exactly: 5 warmup + 50 measured + 5 cooldown = 60
+    # total, verified end to end. See ChatSmallExtendedBoundaryTests in
+    # cli/tests/test_cli.py and docs/proposals/chat-small-extended-v1.md.
+    "chat-small-extended-v1": {
+        "input_tokens": 1024,
+        "output_tokens": 256,
+        "profile": "kind=synchronous,warmup.value=5,warmup.mode=requests,cooldown.value=4,cooldown.mode=requests",
+        "max_requests": 60,
+        "max_duration_seconds": 5400,
     },
 }
 
@@ -482,12 +507,35 @@ def required_text(value: Any, label: str) -> str:
     return value.strip()
 
 
+def require_https_source_url(value: Any, label: str) -> str:
+    """Validate a generic, operator-supplied weights-source URL.
+
+    Unlike managed_setup's ALLOWED_DOWNLOAD_HOSTS, this applies to any
+    supported model or runtime, not a specific reviewed recipe: it only
+    requires https and a complete, credential-free URL, without a host
+    allowlist.
+    """
+    text = required_text(value, label)
+    parts = urlsplit(text)
+    if parts.scheme != "https":
+        raise ValueError(f"{label} must use https.")
+    if not parts.hostname:
+        raise ValueError(f"{label} must be a complete URL.")
+    if parts.username or parts.password:
+        raise ValueError(f"{label} must not carry credentials.")
+    return text
+
+
 def validate_execution_device(execution_device: str) -> None:
-    if execution_device != "gpu":
-        raise ValueError(
-            "OmoBench v1 packages GPU-backed runs only. "
-            "CPU-only runs can be useful for local testing, but they cannot be published yet."
-        )
+    """Confirm an explicit, recognized execution device was declared.
+
+    execution_device records what performed inference for this run, not
+    merely what hardware the machine happens to have. CPU and GPU runs are
+    both first-class, publishable OmoBench results; this only rejects a
+    missing or unrecognized declaration.
+    """
+    if execution_device not in {"cpu", "gpu"}:
+        raise ValueError("--execution-device must be 'cpu' or 'gpu'.")
 
 
 def report_value(report: dict[str, Any], *path: str) -> Any:
@@ -538,10 +586,15 @@ def normalize_guidellm_report(raw_report: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(benchmark, dict):
         raise ValueError("GuideLLM benchmark entry must be an object.")
 
-    successful = report_count(benchmark, "scheduler_metrics", "requests_made", "successful")
-    incomplete = report_count(benchmark, "scheduler_metrics", "requests_made", "incomplete")
-    errored = report_count(benchmark, "scheduler_metrics", "requests_made", "errored")
-    attempted = report_count(benchmark, "scheduler_metrics", "requests_made", "total")
+    # scheduler_metrics.requests_made spans the entire scheduler lifecycle, including
+    # warmup and cooldown; the profile's report.exclude_warmup_and_cooldown requires
+    # excluding both. metrics.request_totals is GuideLLM's own measured-window-only
+    # count (filtered by measure_start_time/measure_end_time via get_within_range),
+    # the same window the percentile/throughput metrics below already come from.
+    successful = report_count(benchmark, "metrics", "request_totals", "successful")
+    incomplete = report_count(benchmark, "metrics", "request_totals", "incomplete")
+    errored = report_count(benchmark, "metrics", "request_totals", "errored")
+    attempted = report_count(benchmark, "metrics", "request_totals", "total")
     failed = incomplete + errored
     if attempted != successful + failed:
         raise ValueError("GuideLLM request counts are inconsistent.")
@@ -656,7 +709,18 @@ def hardware_from_environment(
     cpu_override: str | None,
     ram_gb_override: float | None,
     gpu_memory_gb_override: float | None = None,
+    *,
+    execution_device: str,
 ) -> dict[str, Any]:
+    """Build the normalized `hardware` object for what actually performed inference.
+
+    execution_device decides how GPUs are handled, independent of what the
+    machine happens to have: a "cpu" run always records an empty gpus list
+    and a null driver_version, even when the saved environment snapshot
+    shows an installed GPU, because that GPU did not perform inference. The
+    full detected hardware (including any idle GPU) still lives in the
+    environment.json artifact; it is just not promoted into this object.
+    """
     cpu = required_text(cpu_override or environment.get("cpu"), "CPU")
     ram_gb_value = ram_gb_override if ram_gb_override is not None else environment.get("ram_gb")
     if isinstance(ram_gb_value, bool) or not isinstance(ram_gb_value, int | float):
@@ -664,6 +728,23 @@ def hardware_from_environment(
     ram_gb = float(ram_gb_value)
     if not math.isfinite(ram_gb) or ram_gb <= 0:
         raise ValueError("RAM must be a finite positive number.")
+    os_name = required_text(environment.get("operating_system"), "Operating system")
+
+    if execution_device == "cpu":
+        if gpu_memory_gb_override is not None:
+            raise ValueError("--gpu-memory-gb cannot be used when --execution-device is cpu.")
+        return {
+            "os": os_name,
+            "cpu": cpu,
+            "ram_gb": ram_gb,
+            "gpus": [],
+            "driver_version": None,
+            "detection": {
+                "hardware": "user-confirmed" if (cpu_override or ram_gb_override is not None) else "auto",
+                "model": "manual",
+                "runtime": "manual",
+            },
+        }
 
     if gpu_memory_gb_override is not None and (
         isinstance(gpu_memory_gb_override, bool)
@@ -750,7 +831,7 @@ def hardware_from_environment(
         for (vendor, model, memory_gb), count in sorted(grouped_gpus.items())
     ]
     return {
-        "os": required_text(environment.get("operating_system"), "Operating system"),
+        "os": os_name,
         "cpu": cpu,
         "ram_gb": ram_gb,
         "gpus": gpus,
@@ -917,7 +998,11 @@ def package_local_run(args: argparse.Namespace) -> int:
         if not isinstance(environment, dict):
             raise ValueError("environment.json must contain an object at its root.")
         hardware = hardware_from_environment(
-            environment, args.cpu, args.ram_gb, getattr(args, "gpu_memory_gb", None)
+            environment,
+            args.cpu,
+            args.ram_gb,
+            getattr(args, "gpu_memory_gb", None),
+            execution_device=args.execution_device,
         )
         profile_path = root / "benchmarks" / "profiles" / f"{args.profile}.yaml"
         if not profile_path.is_file():
@@ -932,6 +1017,11 @@ def package_local_run(args: argparse.Namespace) -> int:
                 else None
             ),
         }
+        model_source = getattr(args, "model_source", None)
+        if model_source:
+            # When supplied, model.revision refers to this source's own repository,
+            # not necessarily model.id's canonical catalog/upstream repository.
+            model["source"] = require_https_source_url(model_source, "--model-source")
         runtime = {
             "framework": required_text(args.framework, "Framework"),
             "version": required_text(args.framework_version, "Framework version"),
@@ -949,6 +1039,14 @@ def package_local_run(args: argparse.Namespace) -> int:
             "runner": "guidellm",
             "runner_version": normalized["runner_version"],
         }
+        # execution_device is deliberately excluded from this payload: a gpu run's
+        # fingerprint must stay identical to what pre-execution_device code
+        # computed for the same configuration, so an old GPU bundle and a newly
+        # repackaged equivalent GPU run still collide under the validator's
+        # (configuration_fingerprint, raw_output_sha256) duplicate check. CPU vs
+        # GPU and CPU vs CPU identity are still distinguished below: a cpu run
+        # always has an empty hardware.gpus (schema-enforced), and a cpu run's
+        # own hardware.cpu/ram_gb/os still vary per machine.
         fingerprint_payload = {
             "model": model,
             "runtime": runtime,
@@ -969,6 +1067,7 @@ def package_local_run(args: argparse.Namespace) -> int:
             "run_id": run_id,
             "started_at": normalized["started_at"],
             "configuration_fingerprint": sha256_json(fingerprint_payload),
+            "execution_device": args.execution_device,
             "model": model,
             "runtime": runtime,
             "hardware": hardware,
@@ -1029,6 +1128,99 @@ def write_run_intent(args: argparse.Namespace) -> int:
     return 0
 
 
+def print_managed_review(report: dict[str, Any]) -> None:
+    recipe = report["recipe"]
+    print(f"Recipe: {recipe['id']} — {recipe['title']}")
+    print(
+        f"Model: {recipe['model_id']} ({recipe['quantization']}) · profile {recipe['benchmark_profile']} "
+        f"· execution device {recipe['execution_device']}"
+    )
+    print(f"Supported environment: {recipe['supported_environment']}")
+    platform_status = report["platform"]
+    print(f"Platform check: {'OK' if platform_status['ok'] else 'BLOCKED'} — {platform_status['message']}")
+    print(f"Storage folder: {report['storage_dir']} (exists: {report['storage_dir_exists']})")
+    if report["free_space_bytes"] is not None:
+        print(
+            f"Free space: {report['free_space_bytes']:,} bytes; required: {report['required_bytes']:,} bytes; "
+            f"enough: {report['has_enough_space']}"
+        )
+    else:
+        print(f"Free space: unknown; required: {report['required_bytes']:,} bytes")
+    for file_entry in report["files"]:
+        print(
+            f"- {file_entry['kind']}: {file_entry['filename']} ({file_entry['size_bytes']:,} bytes, "
+            f"sha256:{file_entry['sha256']}, licence {file_entry['licence']})"
+        )
+        print(f"    {file_entry['url']}")
+    installed = report["already_installed"]
+    if installed["installed"]:
+        state = f"valid={installed['valid']}"
+        if installed["error"]:
+            state += f" ({installed['error']})"
+        print(f"Already installed: {state}")
+    else:
+        print("Not yet installed.")
+    print("\nThis is a review only. Nothing has been downloaded. Add --download to install after reviewing.")
+
+
+def run_prepare_command(args: argparse.Namespace) -> int:
+    from . import managed_setup
+
+    root = find_repository_root()
+    if root is None:
+        print("Could not find an OmoBench checkout.", file=sys.stderr)
+        return 2
+
+    if args.list:
+        try:
+            recipes = managed_setup.load_recipes(root)
+        except managed_setup.ManagedSetupError as error:
+            print(f"Could not load the managed download catalog: {error}", file=sys.stderr)
+            return 2
+        for recipe in recipes:
+            print(
+                f"{recipe['id']}: {recipe['title']} · model {recipe['model_id']} · "
+                f"profile {recipe['benchmark_profile']} · execution device {recipe['execution_device']}"
+            )
+        return 0
+
+    if not args.recipe:
+        print("Choose --recipe, or use --list to see reviewed recipes.", file=sys.stderr)
+        return 2
+    if not args.storage_dir:
+        print("Choose --storage-dir, for example /mnt/d/OmoBench in WSL/Linux.", file=sys.stderr)
+        return 2
+
+    try:
+        storage_dir = managed_setup.normalize_storage_dir(args.storage_dir)
+    except managed_setup.ManagedSetupError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+
+    try:
+        if not args.download:
+            report = managed_setup.review(root, args.recipe, storage_dir)
+            if args.json:
+                print(json.dumps(report, indent=2))
+            else:
+                print_managed_review(report)
+            return 0
+
+        def progress(label: str, done: int, total: int) -> None:
+            print(f"\r{label}: {done:,}/{total:,} bytes", end="", file=sys.stderr, flush=True)
+
+        manifest = managed_setup.download_and_install(root, args.recipe, storage_dir, progress=progress)
+        print(file=sys.stderr)
+        print(f"Installed {args.recipe} under {managed_setup.managed_root(storage_dir)}")
+        print(f"Model: {manifest['model']['path']}")
+        print(f"Runtime executable: {manifest['runtime']['executable_path']}")
+        print("This is local, reviewed, verified evidence for setup only; it is not a benchmark result.")
+        return 0
+    except managed_setup.ManagedSetupError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+
+
 def print_doctor(report: dict[str, Any]) -> None:
     print(f"OmoBench CLI: {report['omobench_cli_version']}")
     print(f"Python: {report['python']}")
@@ -1083,6 +1275,15 @@ def build_parser() -> argparse.ArgumentParser:
     package.add_argument("--run-dir", required=True, help="local staging directory created by omobench run --execute")
     package.add_argument("--model", required=True, help="canonical model ID")
     package.add_argument("--model-revision", required=True, help="immutable model revision or commit SHA")
+    package.add_argument(
+        "--model-source",
+        help=(
+            "optional https URL identifying the actual weights source, ideally the exact "
+            "download URL pinned to an immutable revision and filename; when supplied, "
+            "--model-revision refers to this source's own repository, not necessarily "
+            "the canonical --model repository"
+        ),
+    )
     package.add_argument("--quantization", help="quantization label, such as BF16 or Q4_K_M")
     package.add_argument("--framework", required=True, choices=RUNTIME_FRAMEWORKS, help="inference framework")
     package.add_argument("--framework-version", required=True, help="exact framework version")
@@ -1097,7 +1298,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--execution-device",
         required=True,
         choices=["cpu", "gpu"],
-        help="where inference ran; OmoBench v1 packages GPU-backed runs only",
+        help=(
+            "what performed inference for this run; both cpu and gpu are publishable "
+            "OmoBench results, and this is a contributor declaration, not independent proof"
+        ),
     )
     package.add_argument("--runtime-arg", action="append", default=[], help="one normalized framework startup argument; repeat as needed")
     package.add_argument("--profile", required=True, choices=sorted(PROFILE_SPECS), help="versioned OmoBench profile")
@@ -1118,6 +1322,40 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     package.add_argument("--force", action="store_true", help="allow replacement of an existing local result.json")
+
+    prepare = subcommands.add_parser(
+        "prepare", help="review or install a reviewed managed CPU download recipe (does not benchmark)"
+    )
+    prepare.add_argument("--list", action="store_true", help="list reviewed managed recipes and exit")
+    prepare.add_argument("--recipe", help="managed recipe id, for example qwen3-4b-cpu-v1")
+    prepare.add_argument(
+        "--storage-dir",
+        help="absolute storage folder for managed downloads, for example /mnt/d/OmoBench in WSL/Linux",
+    )
+    prepare.add_argument(
+        "--download",
+        action="store_true",
+        help="perform the verified download and installation; omit to only review",
+    )
+    prepare.add_argument("--json", action="store_true", help="print machine-readable review output")
+
+    launch = subcommands.add_parser(
+        "launch", help="start the verified managed CPU server, then smoke-test or run the existing benchmark"
+    )
+    launch.add_argument("--recipe", required=True, help="managed recipe id, for example qwen3-4b-cpu-v1")
+    launch.add_argument(
+        "--storage-dir",
+        required=True,
+        help="absolute storage folder used by 'omobench prepare --download', for example /mnt/d/OmoBench",
+    )
+    launch_mode = launch.add_mutually_exclusive_group(required=True)
+    launch_mode.add_argument(
+        "--smoke", action="store_true", help="only check server readiness and the model alias; no inference"
+    )
+    launch_mode.add_argument(
+        "--execute", action="store_true", help="run the existing, unchanged benchmark profile against the server"
+    )
+    launch.add_argument("--output-dir", default=".omobench-runs", help="local staging directory, relative to repository root")
 
     return parser
 
@@ -1144,6 +1382,12 @@ def main() -> int:
         return write_local_run(args)
     if args.command == "package":
         return package_local_run(args)
+    if args.command == "prepare":
+        return run_prepare_command(args)
+    if args.command == "launch":
+        from .launcher import run_launch_command
+
+        return run_launch_command(args)
     parser.error(f"Unsupported command: {args.command}")
     return 2
 

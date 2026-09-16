@@ -6,9 +6,12 @@ export type RegistryArtifact = {
   sha256: string;
 };
 
+export type ExecutionDevice = "cpu" | "gpu";
+
 export type RegistryResult = {
   artifacts: RegistryArtifact[];
   configurationFingerprint: string;
+  executionDevice: ExecutionDevice;
   framework: string;
   frameworkVersion: string;
   hardware: {
@@ -22,6 +25,7 @@ export type RegistryResult = {
   id: string;
   model: string;
   modelRevision: string;
+  modelSource: string | null;
   outputTokensPerSecond: number;
   profile: string;
   quantization: string | null;
@@ -85,6 +89,19 @@ function stringArrayField(value: JsonObject, key: string, sourcePath: string): s
   return field;
 }
 
+// Absent on a result.json published before execution-device tracking; those
+// predate this field and were, by definition, GPU runs (v1 packaged nothing else).
+function executionDeviceField(value: JsonObject, sourcePath: string): ExecutionDevice {
+  const field = value.execution_device;
+  if (field === undefined) {
+    return "gpu";
+  }
+  if (field !== "cpu" && field !== "gpu") {
+    throw new Error(`Local result ${sourcePath} has an invalid execution_device value.`);
+  }
+  return field;
+}
+
 function readArtifact(
   artifacts: JsonObject,
   key: string,
@@ -117,10 +134,14 @@ function readRegistryResult(sourcePath: string, value: unknown): RegistryResult 
   const ttft = objectField(latency, "ttft", sourcePath);
   const submission = objectField(value, "submission", sourcePath);
   const artifacts = objectField(value, "artifacts", sourcePath);
+  const executionDevice = executionDeviceField(value, sourcePath);
   const gpuValues = hardware.gpus;
 
-  if (!Array.isArray(gpuValues) || gpuValues.length === 0) {
-    throw new Error(`Local result ${sourcePath} must contain at least one GPU.`);
+  if (!Array.isArray(gpuValues)) {
+    throw new Error(`Local result ${sourcePath} has an invalid gpus list.`);
+  }
+  if (executionDevice === "gpu" && gpuValues.length === 0) {
+    throw new Error(`Local result ${sourcePath} declares gpu execution but contains no GPU.`);
   }
 
   const gpus = gpuValues.map((gpu, index) => {
@@ -134,9 +155,13 @@ function readRegistryResult(sourcePath: string, value: unknown): RegistryResult 
     };
   });
 
-  const gpuDisplay = gpus
-    .map((gpu) => `${gpu.count}× ${gpu.model} · ${gpu.memoryGb} GB each`)
-    .join(" + ");
+  const cpu = textField(hardware, "cpu", sourcePath);
+  // A cpu run's gpus list is empty even on a GPU-equipped machine: no GPU
+  // performed inference, so none is shown as if it had.
+  const hardwareDisplay =
+    executionDevice === "cpu"
+      ? `CPU · ${cpu}`
+      : gpus.map((gpu) => `${gpu.count}× ${gpu.model} · ${gpu.memoryGb} GB each`).join(" + ");
 
   return {
     artifacts: [
@@ -146,12 +171,13 @@ function readRegistryResult(sourcePath: string, value: unknown): RegistryResult 
       readArtifact(artifacts, "reproduce_markdown", "Reproduction notes", sourcePath),
     ],
     configurationFingerprint: textField(value, "configuration_fingerprint", sourcePath),
+    executionDevice,
     framework: textField(runtime, "framework", sourcePath),
     frameworkVersion: textField(runtime, "version", sourcePath),
     hardware: {
-      cpu: textField(hardware, "cpu", sourcePath),
+      cpu,
       driverVersion: optionalTextField(hardware, "driver_version", sourcePath),
-      display: gpuDisplay,
+      display: hardwareDisplay,
       gpus,
       os: textField(hardware, "os", sourcePath),
       ramGb: numberField(hardware, "ram_gb", sourcePath),
@@ -159,6 +185,7 @@ function readRegistryResult(sourcePath: string, value: unknown): RegistryResult 
     id: textField(value, "run_id", sourcePath),
     model: textField(model, "id", sourcePath),
     modelRevision: textField(model, "revision", sourcePath),
+    modelSource: optionalTextField(model, "source", sourcePath),
     outputTokensPerSecond: numberField(results, "output_tokens_per_second", sourcePath),
     profile: textField(benchmark, "profile_id", sourcePath),
     quantization: optionalTextField(model, "quantization", sourcePath),

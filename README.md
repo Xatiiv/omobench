@@ -9,13 +9,14 @@ can submit complete evidence bundles through pull requests for comparison on
 the website.
 
 You can now control a benchmark through a **local browser panel**. Its buttons
-run the existing CLI and pinned GuideLLM runner. CPU measurements are available
-locally; public v1 submissions require confirmed GPU execution and a model in
-the [eligible-model catalog](catalog/models/seed-v1.yaml).
+run the existing CLI and pinned GuideLLM runner. CPU and GPU executions are both
+first-class, publishable OmoBench results, provided the model is in the
+[eligible-model catalog](catalog/models/seed-v1.yaml).
 
 ## Start here
 
 - **Install or update OmoBench:** [Setup guide](docs/quickstart.md).
+- **Don't have a model server yet? Try a reviewed, verified CPU setup:** [Guided CPU setup](docs/guided-launcher.md).
 - **Run a real CPU benchmark, including starting the model:** [CPU demo walkthrough](docs/local-demo.md).
 - **Use the panel or submit a GPU run:** [Browser control guide](docs/browser-control.md).
 - **Use terminal commands directly:** [CLI workflow](docs/quickstart.md#run-directly-from-the-cli).
@@ -96,17 +97,19 @@ On WSL, use your normal Windows browser.
 1. Enter the **Server address** and **Server model identifier** from your running
    server. Its address is different from the panel's port `8765`.
 2. Click **Test connection** and wait for the streaming connection confirmation.
-3. Choose `chat-small-v1` for a first run. Select **CPU · local measurements**
-   only after configuring CPU execution in the server, or select GPU after
-   confirming GPU inference in its logs or telemetry. Tick the confirmation.
+3. Choose `chat-small-v1` for a first run. Select **CPU** only after configuring
+   CPU execution in the server, or select **GPU** after confirming GPU inference
+   in its logs or telemetry. Tick the confirmation.
 4. Click **Run benchmark**, watch the logs, and inspect the final measurements.
    The fixed workload can take several minutes, particularly on CPU.
-5. Use **Download local summary** to save measurements. A completed GPU run also
-   offers **Review & submit**: packaging, validation, ZIP download, and PR creation.
+5. Use **Download local summary** to save measurements. A completed run also
+   offers **Review & submit**: packaging, validation, ZIP download, and PR
+   creation, for CPU and GPU alike.
 
 Selecting CPU or GPU in OmoBench records your declaration; it does not change
-the model server. CPU runs measure language-model inference on your CPU, not a
-general-purpose CPU score. They cannot currently become public v1 results.
+the model server. A CPU run measures language-model inference on your CPU, not
+a general-purpose CPU score. CPU and GPU results are both first-class,
+publishable OmoBench results.
 
 See [troubleshooting](docs/troubleshooting.md) for missing commands, WSL paths,
 incorrect identifiers, streaming errors, and interrupted runs.
@@ -125,6 +128,10 @@ incorrect identifiers, streaming errors, and interrupted runs.
   without a GitHub account. Authentication is needed for direct PR upload.
 - Quality/accuracy evaluation, model installation, cloud hardware provisioning,
   and native Windows benchmark execution are outside the current workflow.
+- A guided, reviewed CPU setup path (`omobench prepare`/`launch`, and the panel's
+  `/guided` page) can download, verify, and run one pinned model + runtime
+  recipe for you. It is a development milestone, not a general installer; see
+  [Guided CPU setup](docs/guided-launcher.md).
 
 ## Fixed workloads and measurements
 
@@ -224,6 +231,7 @@ than substituting `next build`.
 | [docs/model-server.md](docs/model-server.md) | Starting a server, model identifiers, CPU/GPU settings |
 | [docs/browser-control.md](docs/browser-control.md) | Panel controls, recovery, packaging, and submission |
 | [docs/local-demo.md](docs/local-demo.md) | CPU demonstration and website-only demo |
+| [docs/guided-launcher.md](docs/guided-launcher.md) | Reviewed, managed CPU setup: review/download/smoke/execute |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Common setup and runtime failures |
 | [docs/submission-bundle.md](docs/submission-bundle.md) | Evidence requirements and manual PR workflow |
 | [docs/local-results.md](docs/local-results.md) | Preview a packaged GPU result on the website |

@@ -1,0 +1,78 @@
+{
+  "catalog_version": 1,
+  "inclusion_policy": "Reviewed, managed CPU download recipes. Each recipe pins exact HTTPS URLs, immutable revisions, file sizes, SHA-256 hashes, and licences for a model and a runtime that omobench prepare/launch can verify and install. This does not change benchmark profiles, GuideLLM command construction, normalization, packaging, or schema; CPU and GPU are both eligible for publication (see AGENTS.md).",
+  "recipes": [
+    {
+      "id": "qwen3-4b-cpu-v1",
+      "title": "Qwen3 4B · CPU",
+      "model_id": "Qwen/Qwen3-4B",
+      "quantization": "Q4_K_M",
+      "platform": "linux-x86_64",
+      "supported_environment": "Linux x64 or WSL2, glibc 2.34 or newer",
+      "min_glibc_version": "2.34",
+      "benchmark_profile": "chat-small-v1",
+      "execution_device": "cpu",
+      "model": {
+        "kind": "file",
+        "repository": "ggml-org/Qwen3-4B-GGUF",
+        "revision": "2f3b082b1356a6123f7ed71e65aea340da25d53c",
+        "filename": "Qwen3-4B-Q4_K_M.gguf",
+        "url": "https://huggingface.co/ggml-org/Qwen3-4B-GGUF/resolve/2f3b082b1356a6123f7ed71e65aea340da25d53c/Qwen3-4B-Q4_K_M.gguf",
+        "sha256": "ab27b9bfa375a178d6cba48f3ad892b94b7739659dcc7aae8058ce0ffed6b328",
+        "size_bytes": 2497280640,
+        "licence": "Apache-2.0"
+      },
+      "runtime": {
+        "kind": "archive",
+        "repository": "ggml-org/llama.cpp",
+        "revision": "c1d0e7a004015f23bc0233470b747b596f29b264",
+        "version": "b10621",
+        "filename": "llama-b10621-bin-ubuntu-x64.tar.gz",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b10621/llama-b10621-bin-ubuntu-x64.tar.gz",
+        "sha256": "91d7b03ddae498a39f28fdb85d84d2b4a0fd3838d10b4f897e0ef8975bb9b583",
+        "size_bytes": 16291771,
+        "licence": "MIT",
+        "archive_format": "tar.gz",
+        "executable_path": "llama-b10621/llama-server",
+        "max_extracted_bytes": 209715200,
+        "max_entries": 500
+      }
+    },
+    {
+      "id": "qwen3-4b-cpu-extended-v1",
+      "title": "Qwen3 4B · CPU (extended duration)",
+      "model_id": "Qwen/Qwen3-4B",
+      "quantization": "Q4_K_M",
+      "platform": "linux-x86_64",
+      "supported_environment": "Linux x64 or WSL2, glibc 2.34 or newer",
+      "min_glibc_version": "2.34",
+      "benchmark_profile": "chat-small-extended-v1",
+      "execution_device": "cpu",
+      "model": {
+        "kind": "file",
+        "repository": "ggml-org/Qwen3-4B-GGUF",
+        "revision": "2f3b082b1356a6123f7ed71e65aea340da25d53c",
+        "filename": "Qwen3-4B-Q4_K_M.gguf",
+        "url": "https://huggingface.co/ggml-org/Qwen3-4B-GGUF/resolve/2f3b082b1356a6123f7ed71e65aea340da25d53c/Qwen3-4B-Q4_K_M.gguf",
+        "sha256": "ab27b9bfa375a178d6cba48f3ad892b94b7739659dcc7aae8058ce0ffed6b328",
+        "size_bytes": 2497280640,
+        "licence": "Apache-2.0"
+      },
+      "runtime": {
+        "kind": "archive",
+        "repository": "ggml-org/llama.cpp",
+        "revision": "c1d0e7a004015f23bc0233470b747b596f29b264",
+        "version": "b10621",
+        "filename": "llama-b10621-bin-ubuntu-x64.tar.gz",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b10621/llama-b10621-bin-ubuntu-x64.tar.gz",
+        "sha256": "91d7b03ddae498a39f28fdb85d84d2b4a0fd3838d10b4f897e0ef8975bb9b583",
+        "size_bytes": 16291771,
+        "licence": "MIT",
+        "archive_format": "tar.gz",
+        "executable_path": "llama-b10621/llama-server",
+        "max_extracted_bytes": 209715200,
+        "max_entries": 500
+      }
+    }
+  ]
+}

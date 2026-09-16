@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
@@ -339,6 +340,16 @@ class Controller:
             raise UIError("This operation has no single completed evidence directory.")
         return self._inside(runs[0])
 
+    def set_prefill(self, job_id: str, **fields: Any) -> None:
+        """Attach optional, editable prefill metadata to a job (for example a managed
+        recipe's own pinned download URL as model_source), so the package form can
+        display it without requiring the operator to type it. Never affects packaging
+        by itself: the operator still submits (and may change) the package form."""
+        with self.lock:
+            job = self._get(job_id)
+            job.update(fields)
+            self._save(job)
+
     def detail(self, job_id: str) -> dict:
         with self.lock:
             job = dict(self._get(job_id))
@@ -367,8 +378,6 @@ class Controller:
             job = self._get(job_id)
             if self.busy or job["status"] != "completed":
                 raise UIError("Wait for a successful run before preparing a submission.", 409)
-            if job["execution_device"] != "gpu":
-                raise UIError("CPU measurements are available locally. Public v1 packaging and submission require GPU execution.")
             submission = job.get("submission") or {}
             if submission.get("commit_sha") and status == "packaging":
                 raise UIError("Submission has started for this bundle. Retry submission or start a new run to change its evidence.")
@@ -384,7 +393,10 @@ class Controller:
         values = {name: text_field(data, name) for name in names}
         if values["framework"] not in cli.RUNTIME_FRAMEWORKS:
             raise UIError("Choose a supported framework.")
-        optional = {name: text_field(data, name, optional=True) for name in ["quantization", "server_description", "cpu"]}
+        optional = {
+            name: text_field(data, name, optional=True)
+            for name in ["quantization", "server_description", "cpu", "model_source"]
+        }
         runtime_args = data.get("runtime_args", [])
         if not isinstance(runtime_args, list) or len(runtime_args) > 100:
             raise UIError("Enter one runtime argument per line.")
@@ -396,10 +408,17 @@ class Controller:
                 raise UIError("GPU memory must be a positive number.")
         job = self._begin_action(job_id, "packaging")
         try:
+            if memory is not None and job["execution_device"] == "cpu":
+                raise UIError("GPU memory does not apply to a CPU run; no GPU performed inference.")
             job["validation"] = None
             self._save(job)
             run = self.run_directory(job_id)
-            arguments = ["package", f"--run-dir={run}", f"--profile={job['profile']}", "--execution-device=gpu"]
+            arguments = [
+                "package",
+                f"--run-dir={run}",
+                f"--profile={job['profile']}",
+                f"--execution-device={job['execution_device']}",
+            ]
             arguments.extend(f"--{key.replace('_', '-')}={value}" for key, value in {**values, **optional}.items() if value)
             arguments.extend(f"--runtime-arg={value}" for value in runtime_args)
             if memory is not None:
@@ -473,6 +492,9 @@ class UIServer(ThreadingHTTPServer):
         self.origin = f"http://127.0.0.1:{self.server_port}"
         self.token = secrets.token_urlsafe(32)
         self.controller = Controller(root)
+        from .ui_managed import ManagedController
+
+        self.managed = ManagedController(root, self.controller)
 
 
 class UIHandler(BaseHTTPRequestHandler):
@@ -514,7 +536,10 @@ class UIHandler(BaseHTTPRequestHandler):
             self._authorize()
             static = {"/": ("index.html", "text/html; charset=utf-8"),
                       "/app.js": ("app.js", "text/javascript; charset=utf-8"),
-                      "/style.css": ("style.css", "text/css; charset=utf-8")}
+                      "/style.css": ("style.css", "text/css; charset=utf-8"),
+                      "/guided": ("guided.html", "text/html; charset=utf-8"),
+                      "/guided.js": ("guided.js", "text/javascript; charset=utf-8"),
+                      "/guided.css": ("guided.css", "text/css; charset=utf-8")}
             if self.path in static:
                 name, mime = static[self.path]
                 return self._send(200, files("omobench").joinpath("web", name).read_bytes(), mime)
@@ -528,6 +553,19 @@ class UIHandler(BaseHTTPRequestHandler):
                 if match[2]:
                     return self._send(200, controller.bundle(match[1]), "application/zip")
                 return self._json(controller.detail(match[1]))
+            managed = self.server.managed
+            if self.path == "/api/managed/recipes":
+                return self._json({"recipes": managed.recipes(), "default_storage_dir": managed.default_storage_dir()})
+            if self.path == "/api/managed/setup-jobs":
+                return self._json(managed.setup_job_list())
+            match = re.fullmatch(r"/api/managed/setup-jobs/(mjob-[a-f0-9]{16})", self.path)
+            if match:
+                return self._json(managed.setup_job_detail(match[1]))
+            if self.path == "/api/managed/runs":
+                return self._json(managed.run_job_list())
+            match = re.fullmatch(r"/api/managed/runs/(mrun-[a-f0-9]{16})", self.path)
+            if match:
+                return self._json(managed.run_job_detail(match[1]))
             raise UIError("Not found.", 404)
         except UIError as error:
             self._json({"error": str(error)}, error.status)
@@ -556,6 +594,22 @@ class UIHandler(BaseHTTPRequestHandler):
                 if action in {"cancel", "prepare"}:
                     return self._json(getattr(controller, action)(job_id))
                 return self._json(getattr(controller, action)(job_id, data))
+            managed = self.server.managed
+            if self.path == "/api/managed/review":
+                return self._json(managed.review(data))
+            if self.path == "/api/managed/setup-jobs":
+                return self._json(managed.prepare(data), 202)
+            match = re.fullmatch(r"/api/managed/setup-jobs/(mjob-[a-f0-9]{16})/cancel", self.path)
+            if match:
+                return self._json(managed.cancel_setup(match[1]))
+            if self.path == "/api/managed/runs":
+                mode = data.get("mode")
+                if mode not in {"smoke", "execute"}:
+                    raise UIError("Choose managed run mode 'smoke' or 'execute'.")
+                return self._json(managed.start_run(data, mode=mode), 202)
+            match = re.fullmatch(r"/api/managed/runs/(mrun-[a-f0-9]{16})/cancel", self.path)
+            if match:
+                return self._json(managed.cancel_run(match[1]))
             raise UIError("Not found.", 404)
         except UIError as error:
             self._json({"error": str(error)}, error.status)
@@ -602,6 +656,7 @@ def _serve_ui(root: Path, port: int, open_browser: bool) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        server.managed.close()
         server.controller.close()
         server.server_close()
         signal.signal(signal.SIGTERM, previous)

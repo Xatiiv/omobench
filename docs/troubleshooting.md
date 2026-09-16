@@ -112,18 +112,19 @@ Authentication headers and redirects are also unsupported.
   [WSL troubleshooting guide](https://learn.microsoft.com/en-us/windows/wsl/troubleshooting).
   Restarting WSL stops its running processes, including unrelated work.
 
-## CPU measurements have no public submission button
+## Packaging or submission fails
 
-That is the current v1 policy. Use **Download local summary** for a CPU run.
-The summary is not the public `result.json` format; do not copy it into
-`results/` or mark it GPU-backed to bypass the restriction.
+A CPU or GPU selection is only a declaration. A GPU package also needs
+detected GPU metadata (a memory override can only fill unknown VRAM for
+already-detected hardware); a CPU package needs none of that — no GPU
+detection, VRAM, or driver is required, and any `--gpu-memory-gb` value is
+rejected since no GPU performed inference. Either way, validation requires a
+catalogued model, immutable revision, valid runtime details, and an intact
+evidence bundle.
 
-## GPU packaging or submission fails
-
-A GPU selection is only a declaration. Packaging also needs detected GPU
-metadata; validation requires a catalogued model, immutable revision, valid
-runtime details, and an intact evidence bundle. A memory override can only fill
-unknown VRAM for already detected hardware.
+**Download local summary** remains available on any run for a quick JSON
+export; it is not the public `result.json` format, so do not copy it into
+`results/` by hand — package the run instead.
 
 For direct PR creation, `gh` must be installed and authenticated in the panel's
 environment, with write access to the displayed `origin` repository. Windows

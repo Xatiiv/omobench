@@ -1,0 +1,54 @@
+id: chat-small-extended-v1
+profile_format_version: 1
+status: active
+title: Interactive chat latency (extended duration)
+description: >-
+  The same chat-small-v1 workload — synthetic assistant-sized prompt, single
+  streaming completion — run against a longer duration ceiling so hardware
+  too slow to finish chat-small-v1's 50 measured requests within 15 minutes,
+  chiefly CPU-only execution, still collects a full sample. Eligible for both
+  CPU and GPU execution. On hardware fast enough to finish chat-small-v1
+  today, this profile takes no longer: the run still stops as soon as its
+  request budget completes, well before the duration ceiling.
+transport:
+  protocol: openai-chat-completions
+  streaming: true
+workload:
+  prompt_source: synthetic-deterministic
+  prompt_seed: 20260828
+  prompt_uniqueness: per-request
+  target_input_tokens: 1024
+  input_token_tolerance_percent: 2
+  requested_output_tokens: 256
+execution:
+  concurrency: 1
+  measured_requests: 50
+  warmup_requests: 5
+  # GuideLLM 0.7.3's request-count cooldown boundary excludes one more
+  # trailing request than requested of it (verified end to end by driving
+  # its real scheduler-facing accumulator, not by inspecting the boundary
+  # function in isolation): asking for cooldown.value=5 actually excludes
+  # 6. cli.py's PROFILE_SPECS runner mapping compensates by requesting
+  # cooldown.value=4, so the *actual* excluded count matches this
+  # declared 5 exactly -- the contract here (5 warmup, 50 measured,
+  # 5 cooldown, 60 total) is what the runner actually executes, not
+  # merely what it was asked for. See
+  # docs/proposals/chat-small-extended-v1.md and
+  # ChatSmallExtendedBoundaryTests in cli/tests/test_cli.py.
+  cooldown_requests: 5
+  request_timeout_seconds: 300
+  maximum_duration_seconds: 5400
+acceptance:
+  minimum_successful_requests: 40
+  maximum_error_rate_percent: 1
+report:
+  exclude_warmup_and_cooldown: true
+  required_metrics:
+    - ttft_p50_ms
+    - ttft_p95_ms
+    - inter_token_latency_p50_ms
+    - inter_token_latency_p95_ms
+    - output_tokens_per_second
+    - total_tokens_per_second
+    - requests_per_second
+    - error_rate_percent

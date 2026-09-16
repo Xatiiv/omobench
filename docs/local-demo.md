@@ -7,6 +7,13 @@ the presentation and filters.
 
 ## Real CPU demo
 
+Prefer not to hand-install a model server for this? [Guided CPU setup](guided-launcher.md)
+downloads, verifies, and starts one reviewed small CPU model (`qwen3-4b-cpu-v1`)
+through `omobench prepare`/`omobench launch` or the panel's `/guided` page,
+then runs this same unchanged benchmark. It is a development milestone, not a
+general installer. The rest of this walkthrough uses a model you install and
+start yourself, which stays available either way.
+
 ### 1. Prepare once, before the demo
 
 Complete [installation](quickstart.md) and confirm `omobench --help` lists
@@ -100,10 +107,9 @@ TTFT p50/p95, output throughput, and errors. Use **Download local summary** to
 save the actual measured values. The complete local runner evidence stays in
 the path shown below the log.
 
-This is a real CPU language-model inference benchmark. CPU results remain local
-under the current public v1 rules; the GPU packaging/submission controls are
-unavailable. It is not a general CPU score, model-quality test, or fabricated
-comparison-table row.
+This is a real CPU language-model inference benchmark. Like a GPU run, it can be
+packaged, reviewed, and submitted through **Review & submit**. It is not a
+general CPU score, model-quality test, or fabricated comparison-table row.
 
 For a short presentation, run it beforehand and select the genuine completed
 entry under **Recent runs**. Say it was measured earlier. You can show the

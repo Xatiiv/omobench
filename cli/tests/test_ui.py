@@ -112,6 +112,25 @@ class ServiceTests(unittest.TestCase):
             self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
         self.assertEqual(self.request("/../../README.md")[0], 404)
 
+    def test_setup_lists_the_extended_profile_with_its_ceiling(self):
+        """The panel's profile picker (profileDetail() in app.js) renders
+        `up to ${max_duration_seconds / 60} min` directly from this data -- no
+        separate UI code is needed for chat-small-extended-v1 to show "up to 90 min".
+        Calls Controller.setup() directly (not over HTTP): it's the same data
+        /api/setup returns, without depending on this environment's GPU-detection
+        subprocess timing, which other tests in this class stub out and this one
+        does not need at all."""
+        setup = self.server.controller.setup()
+        profiles = setup["profiles"]
+        self.assertIn("chat-small-extended-v1", profiles)
+        spec = profiles["chat-small-extended-v1"]
+        self.assertEqual(spec["max_duration_seconds"], 5400)
+        self.assertEqual(spec["max_duration_seconds"] / 60, 90)
+        self.assertEqual(spec["input_tokens"], 1024)
+        self.assertEqual(spec["output_tokens"], 256)
+        # Unchanged existing profile, still present with its own ceiling.
+        self.assertEqual(profiles["chat-small-v1"]["max_duration_seconds"], 900)
+
     def test_token_host_origin_and_json_enforcement(self):
         auth = {"X-OmoBench-Token": self.server.token}
         self.assertEqual(self.request("/api/runs")[0], 401)
@@ -241,24 +260,63 @@ class ExecutionTests(unittest.TestCase):
         wait_for(lambda: not self.controller.busy)
         return self.controller.detail(job["id"])
 
-    def test_cpu_uses_real_cli_evidence_and_local_summary_only(self):
+    def test_cpu_uses_real_cli_evidence_and_can_be_packaged_and_reviewed(self):
+        """CPU benchmarks are first-class: real evidence, then real packaging and review,
+        through the same panel workflow GPU runs already use."""
         self.runner()
         job = self.finished(self.controller.start(RUN_CONFIG))
         self.assertEqual(job["status"], "completed", job)
-        self.assertEqual(job["summary"]["results"]["requests"]["succeeded"], 49)
+        self.assertEqual(job["summary"]["results"]["requests"]["succeeded"], 50)
         self.assertNotIn("http://127.0.0.1", job["log"])
         run = self.controller.run_directory(job["id"])
         self.assertTrue((run / "guidellm-benchmarks.json.gz").is_file())
         self.assertFalse((run / "result.json").exists())
         for action in ["prepare", "bundle"]:
-            with self.subTest(action=action), self.assertRaisesRegex(UIError, "CPU measurements"):
+            with self.subTest(action=action), self.assertRaisesRegex(UIError, "result.json"):
                 getattr(self.controller, action)(job["id"])
+
+        packaged = self.controller.package(job["id"], {
+            "model": "Qwen/Qwen3-4B", "model_revision": "abc123", "framework": "llama.cpp",
+            "framework_version": "test-build", "submitter": "tester",
+        })
+        self.assertTrue(packaged["validation"]["valid"], packaged)
+        result = json.loads((run / "result.json").read_text())
+        self.assertEqual(result["execution_device"], "cpu")
+        self.assertEqual(result["hardware"]["gpus"], [])
+
+        preview = self.controller.prepare(job["id"])
+        self.assertEqual(len(preview["files"]), 5)
+        self.assertIn("CPU", preview["body"])
+        self.assertTrue(self.controller.bundle(job["id"]).startswith(b"PK"))
+
+        recovered = Controller(self.root)
+        self.assertEqual(recovered.detail(job["id"])["summary"], job["summary"])
+
+    def test_set_prefill_surfaces_a_model_source_the_package_form_can_use(self):
+        """A managed run's recipe can attach a suggested model_source to the
+        underlying job; the package form can read it back and still submit it like
+        any other operator-supplied field."""
+        self.runner()
+        job = self.finished(self.controller.start(RUN_CONFIG))
+        source_url = "https://huggingface.co/ggml-org/Qwen3-4B-GGUF/resolve/abc123/Qwen3-4B-Q4_K_M.gguf"
+        self.controller.set_prefill(job["id"], model_source=source_url)
+        self.assertEqual(self.controller.detail(job["id"])["model_source"], source_url)
+
+        packaged = self.controller.package(job["id"], {
+            "model": "Qwen/Qwen3-4B", "model_revision": "abc123", "framework": "llama.cpp",
+            "framework_version": "test-build", "submitter": "tester", "model_source": source_url,
+        })
+        self.assertTrue(packaged["validation"]["valid"], packaged)
+        run = self.controller.run_directory(job["id"])
+        result = json.loads((run / "result.json").read_text())
+        self.assertEqual(result["model"]["source"], source_url)
+
         recovered = Controller(self.root)
         self.assertEqual(recovered.detail(job["id"])["summary"], job["summary"])
 
     def test_nonzero_missing_and_zero_success_reports_are_failed(self):
         bad = copy.deepcopy(GUIDELLM_REPORT_V2)
-        bad["benchmarks"][0]["scheduler_metrics"]["requests_made"] = {"successful": 0, "incomplete": 0, "errored": 50, "total": 50}
+        bad["benchmarks"][0]["metrics"]["request_totals"] = {"successful": 0, "incomplete": 0, "errored": 50, "total": 50}
         for mode, report in [("fail", None), ("missing", None), ("success", bad)]:
             with self.subTest(mode=mode):
                 self.runner(mode, report)
