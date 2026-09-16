@@ -14,11 +14,13 @@ The comparison website and its `/run` launch guide are separate from this panel.
 
 It is **not** a model host, model downloader, cloud GPU provider, or automatic proof that a model server used the declared execution device.
 
-`omobench prepare`/`omobench launch` and the panel's `/guided` page add a reviewed,
-managed CPU setup path (a development milestone, not an installer): they download
-and verify one pinned model + runtime recipe from `catalog/downloads/`, then run
-the same unchanged benchmark engine described below. See
-[guided-launcher.md](docs/guided-launcher.md).
+`omobench prepare`/`omobench launch` and the panel's default page (also
+reachable at `/guided`; the "connect a server you already run" panel moved to
+`/advanced`) add a reviewed, managed CPU setup path (a development milestone,
+not an installer): they download and verify one pinned model + runtime recipe
+from `catalog/downloads/`, then run the same unchanged benchmark engine
+described below, and can package/prepare its submission from the same page.
+See [guided-launcher.md](docs/guided-launcher.md).
 
 ## V1 scope and invariants
 

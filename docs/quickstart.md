@@ -157,23 +157,25 @@ command. See [troubleshooting](troubleshooting.md).
 
 ## Start the browser workflow
 
-Start and load your model separately using the [model-server guide](model-server.md).
-Alternatively, `omobench ui`'s `/guided` page (and `omobench prepare`/`omobench launch`
-on the command line) can download, verify, and start one reviewed small CPU
-model for you; see [Guided CPU setup](guided-launcher.md). It adds one extra
-requirement of its own — Linux x86_64 with glibc 2.34 or newer — because its
-pinned runtime build depends on it.
-
-Then, in the activated OmoBench terminal:
+In the activated OmoBench terminal:
 
 ```bash
 omobench ui
 ```
 
 Open the full URL it prints, including `#token=...`. Keep the terminal running.
-Your Windows browser can access the WSL-hosted panel. The
-[browser guide](browser-control.md) explains the controls and submission flow.
-No website development server or npm installation is required.
+Your Windows browser can access the WSL-hosted panel. The page that opens is a
+**guided benchmark by default**: it downloads, verifies, and runs one reviewed
+small CPU model for you, then helps prepare a submission — see
+[Guided CPU setup](guided-launcher.md). It adds one extra requirement of its
+own — Linux x86_64 with glibc 2.34 or newer — because its pinned runtime build
+depends on it.
+
+Already loaded a model yourself using the [model-server guide](model-server.md)?
+Open **`/advanced`** in the same panel instead to connect to it directly. The
+[browser guide](browser-control.md) explains that panel's controls and
+submission flow. No website development server or npm installation is
+required for either page.
 
 ## Run directly from the CLI
 

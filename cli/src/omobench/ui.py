@@ -534,12 +534,18 @@ class UIHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             self._authorize()
-            static = {"/": ("index.html", "text/html; charset=utf-8"),
-                      "/app.js": ("app.js", "text/javascript; charset=utf-8"),
-                      "/style.css": ("style.css", "text/css; charset=utf-8"),
+            # The guided experience is the default entry point; the original
+            # "connect to a server you already run yourself" panel stays fully
+            # available at /advanced (and every existing CLI command keeps working
+            # unchanged). /guided is kept as an alias to the same page so existing
+            # bookmarks/docs links and the previous default keep working.
+            static = {"/": ("guided.html", "text/html; charset=utf-8"),
                       "/guided": ("guided.html", "text/html; charset=utf-8"),
                       "/guided.js": ("guided.js", "text/javascript; charset=utf-8"),
-                      "/guided.css": ("guided.css", "text/css; charset=utf-8")}
+                      "/guided.css": ("guided.css", "text/css; charset=utf-8"),
+                      "/advanced": ("index.html", "text/html; charset=utf-8"),
+                      "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+                      "/style.css": ("style.css", "text/css; charset=utf-8")}
             if self.path in static:
                 name, mime = static[self.path]
                 return self._send(200, files("omobench").joinpath("web", name).read_bytes(), mime)

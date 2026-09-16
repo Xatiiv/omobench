@@ -1,17 +1,18 @@
 # Guided CPU setup (development milestone)
 
-The guided path (`omobench prepare`, `omobench launch`, and the panel's
-`/guided` page) is a **development milestone**, not an installer. It adds a
-reviewed, verified way to get one small CPU model running so you can try the
-benchmark without hand-installing a model server first. It does not change
-the benchmark engine: profiles, GuideLLM command construction, normalization,
-packaging, and the result schema are exactly the same ones the
-[advanced panel](browser-control.md) and
+The guided path (`omobench prepare`, `omobench launch`, and `omobench ui`'s
+**default page**) is a **development milestone**, not an installer. It adds a
+reviewed, verified way to get one small CPU model running, benchmarked, and
+ready to submit — without hand-installing a model server, and without typing
+a server address, model revision, runtime argument, or shell command anywhere
+in the guided page. It does not change the benchmark engine: profiles,
+GuideLLM command construction, normalization, packaging, and the result
+schema are exactly the same ones the [advanced panel](browser-control.md) and
 [CLI workflow](quickstart.md#run-directly-from-the-cli) already use. Use this
 page alongside [setup](quickstart.md), [the CPU demo](local-demo.md), and
 [browser control](browser-control.md); it does not replace them, and the
 existing "connect to a model server you already run yourself" workflow stays
-available in the advanced panel and from the CLI.
+fully available at `/advanced` in the same panel, and from the CLI.
 
 ## What it adds, and what it does not
 
@@ -31,12 +32,17 @@ available in the advanced panel and from the CLI.
   verified files and extracts one archive under a storage folder you choose,
   below `omobench-managed-v1/`.
 - It never starts a model server for you outside of `omobench launch`/the
-  guided page's own smoke test and benchmark run, and it never packages or
-  submits a result itself; see
+  guided page's own benchmark run, and it never uploads anything to GitHub
+  without an explicit, reviewed **Create pull request** action; see
   [packaging a managed CPU run](#packaging-a-managed-cpu-run) below.
 - More models arrive later as additional reviewed entries in that same JSON
   catalog, not as hard-coded logic per model; see
   [adding models later](#adding-models-later).
+- It reuses your previous storage-folder choice for this checkout, and skips
+  re-downloading files it has already verified. It never assumes a `D:` drive
+  or either developer's own path exists; if nothing has been chosen yet and
+  no established WSL convention folder is found, it suggests a per-user
+  folder under your home directory, editable before you confirm.
 
 ## Why WSL/Linux, not native Windows
 
@@ -50,30 +56,35 @@ telling you to start WSL2 (`wsl.exe -d Ubuntu`) instead of silently failing or
 guessing your intent. See [Windows: enter WSL first](quickstart.md#windows-enter-wsl-first)
 if you have not done this before.
 
-## Why /mnt/d/OmoBench
+## Storage folder: no assumed drive or path
 
-The model file alone is about 2.3 GiB. Point `--storage-dir` at a drive with
-room to spare — for example a Windows `D:\OmoBench` folder, which WSL2 sees as
-`/mnt/d/OmoBench`. OmoBench does **not** convert one path style into the
-other for you: pass `/mnt/d/OmoBench` when running under WSL2/Linux, and
-`D:\OmoBench` only for the native-Windows review/setup checks described
-above (which cannot download or launch anything anyway). Passing the wrong
-style for your current environment is rejected with a specific error rather
-than silently writing to the wrong filesystem. The storage folder must be an
-absolute path.
+The model file alone is about 2.3 GiB. `--storage-dir`/the guided page's
+storage field needs a folder with room to spare. Nothing here assumes a `D:`
+drive exists, or either developer's own path: the guided page suggests, in
+order, (1) whatever folder this checkout's panel last used, if it still
+exists, (2) `/mnt/d/OmoBench` — a common WSL2 convention — but only when that
+exact path already exists, and otherwise (3) a per-user folder under your own
+home directory, offered only when it is actually writable. Every suggestion
+stays editable before you confirm, and manual entry always works. OmoBench
+does **not** convert one path style into the other for you: pass
+`/mnt/d/OmoBench` when running under WSL2/Linux, and `D:\OmoBench` only for
+the native-Windows review/setup checks described above (which cannot
+download or launch anything anyway). Passing the wrong style for your current
+environment is rejected with a specific error rather than silently writing to
+the wrong filesystem. The storage folder must be an absolute path.
 
-## Review, download, smoke test, execute, and package
+## What each step does
 
-These are five different steps; the guided page and `omobench prepare`/`omobench launch`
-keep them explicit rather than collapsing them into one "just run it" button:
+The CLI keeps these as explicit, separately runnable commands — useful for
+scripting, CI, or inspecting one step in isolation:
 
 | Step | Command | What happens |
 | --- | --- | --- |
 | Review | `omobench prepare --recipe qwen3-4b-cpu-v1 --storage-dir /mnt/d/OmoBench` | Read-only. Reports the exact files, sizes, licences, hashes, platform check, and free space. Makes no network requests and writes nothing. |
 | Download | `omobench prepare --recipe qwen3-4b-cpu-v1 --storage-dir /mnt/d/OmoBench --download` | Downloads (resumably) and verifies both files by size and SHA-256, then atomically installs them under the storage folder. Corrupted downloads are quarantined, not used. |
 | Smoke test | `omobench launch --recipe qwen3-4b-cpu-v1 --storage-dir /mnt/d/OmoBench --smoke` | Re-verifies the installed files, starts the verified server with fixed CPU-only settings, confirms it reports the expected model alias, then stops it. **No inference. No performance result.** |
-| Execute | `omobench launch --recipe qwen3-4b-cpu-v1 --storage-dir /mnt/d/OmoBench --execute` | Re-verifies the installed files, starts the same server, then runs the existing, unchanged `chat-small-v1` benchmark against it with the existing CLI/GuideLLM runner and normalizer, and stops the server afterward. |
-| Package | `omobench package --execution-device cpu ...` (see [submission-bundle.md](submission-bundle.md)) | Not offered as a guided-page step, but the run it produces is a normal `.omobench-runs/` directory: package it from the CLI or the [advanced panel](browser-control.md), the same as any CPU or GPU run. |
+| Execute | `omobench launch --recipe qwen3-4b-cpu-v1 --storage-dir /mnt/d/OmoBench --execute` | Re-verifies the installed files, starts the same server, then runs the existing, unchanged benchmark profile against it with the existing CLI/GuideLLM runner and normalizer, and stops the server afterward. |
+| Package | `omobench package --execution-device cpu ...` (see [submission-bundle.md](submission-bundle.md)) | The run directory `omobench launch --execute` produces is a normal `.omobench-runs/` directory: package it from the CLI, the advanced panel, or the guided page's own "Share results" screen, the same as any CPU or GPU run. |
 
 `omobench launch` binds the managed server to `127.0.0.1` only, uses the
 canonical model ID as its API alias, and applies fixed CPU-only settings
@@ -83,22 +94,65 @@ model server you started separately — on success, on failure, on Ctrl+C, and
 on `SIGTERM`, and it keeps a local diagnostic log of that server's output next
 to the run directory.
 
-The guided page (`/guided` in the local panel) walks through the same five
-steps as stages: select the test, select the reviewed model, choose a storage
-folder, review the downloads, confirm preparation, watch download progress
-(with cancellation), verify readiness, run the benchmark, and see the results
-and logs. It requires the same panel token as the advanced page, stays
-loopback-only, and makes no external browser requests of its own.
+The **guided page** (`omobench ui`'s default page; still reachable at
+`/guided`) automates the first four of those steps behind one action instead
+of five separate ones:
+
+1. **Choose your test.** Recipe cards, populated from the reviewed download
+   catalog and the profile each one runs, including a
+   "Recommended for slower hardware" recipe with a longer duration ceiling —
+   explained honestly as a maximum that a run may finish well before, never a
+   shorter or altered workload.
+2. **Prepare and run.** Shows the selected model, execution device, download
+   size, storage destination, licences, and duration ceiling up front, with
+   exact hashes and revisions available under "Technical details". One
+   **Start** (or **Download and start**) action authorizes preparation and
+   execution together: review, platform/storage/space checks, download (only
+   when needed — already-verified files are reused, never re-downloaded),
+   re-verification, server startup, and the readiness check GuideLLM needs
+   all happen automatically, with no separate smoke-test button. Progress is
+   shown as real stages (checking system, downloading, verifying, loading the
+   model, benchmarking, saving results) with genuine download byte counts,
+   elapsed time, and the live runner log under "Technical details" — never a
+   manufactured request-count or completion estimate GuideLLM itself does not
+   report. Refreshing the page, or reopening the panel while a run is still
+   active, reconnects to it instead of starting a duplicate; if the panel
+   itself restarted mid-run, that is reported honestly as an interruption,
+   never as a resumed benchmark.
+3. **Your results.** Real throughput, time-to-first-token, latency,
+   successful/attempted requests, and error rate, each with a short
+   plain-language explanation — the same measurements described in the
+   [metrics table](../README.md#fixed-workloads-and-measurements).
+4. **Share results.** Packaging and submission review live in the guided page
+   itself now — see [packaging a managed CPU run](#packaging-a-managed-cpu-run)
+   below.
+
+It requires the same panel token as the advanced page, stays loopback-only,
+and makes no external browser requests of its own.
 
 ## Packaging a managed CPU run
 
 This recipe's `execution_device` is `cpu`. Exactly like a CPU run through the
 advanced panel or `omobench run --execute`, its results are real evidence: a
 normal `.omobench-runs/` staging directory that can be packaged, reviewed, and
-submitted, the same way a GPU run can. The guided page itself never shows a
-"package" or "submit" step for a managed CPU run — use the
-[advanced panel](browser-control.md) or `omobench package --execution-device cpu`
-against the run directory the guided page reports.
+submitted, the same way a GPU run can. The guided page's **Share results**
+screen fills in the model identity, weight source, revision, quantization,
+runtime version, startup arguments, profile, and execution device from the
+verified recipe automatically — the same package/validate/prepare/submit
+Controller endpoints the [advanced panel](browser-control.md) uses, not a
+second implementation — so the only thing it still asks for is your
+submitter identity. It distinguishes **execution completed**, **profile
+acceptance passed/failed**, **bundle validation passed/failed**, and
+**submission created** as separate outcomes: a finished run is not
+automatically a publishable one, and an unsuccessful or below-threshold run
+stays viewable and downloadable locally with its actual rejection reason
+shown, never silently discarded. Direct pull-request creation still needs
+GitHub CLI authentication and origin write access (see
+[Packaging and pull requests](browser-control.md#packaging-and-pull-requests));
+without it, downloading the validated bundle for a manual PR still works.
+Publication always requires an explicit **Create pull request** click after
+reviewing the destination repository and evidence — nothing is uploaded
+automatically.
 
 ## Adding models later
 
