@@ -112,6 +112,25 @@ class ServiceTests(unittest.TestCase):
             self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
         self.assertEqual(self.request("/../../README.md")[0], 404)
 
+    def test_setup_lists_the_extended_profile_with_its_ceiling(self):
+        """The panel's profile picker (profileDetail() in app.js) renders
+        `up to ${max_duration_seconds / 60} min` directly from this data -- no
+        separate UI code is needed for chat-small-extended-v1 to show "up to 90 min".
+        Calls Controller.setup() directly (not over HTTP): it's the same data
+        /api/setup returns, without depending on this environment's GPU-detection
+        subprocess timing, which other tests in this class stub out and this one
+        does not need at all."""
+        setup = self.server.controller.setup()
+        profiles = setup["profiles"]
+        self.assertIn("chat-small-extended-v1", profiles)
+        spec = profiles["chat-small-extended-v1"]
+        self.assertEqual(spec["max_duration_seconds"], 5400)
+        self.assertEqual(spec["max_duration_seconds"] / 60, 90)
+        self.assertEqual(spec["input_tokens"], 1024)
+        self.assertEqual(spec["output_tokens"], 256)
+        # Unchanged existing profile, still present with its own ceiling.
+        self.assertEqual(profiles["chat-small-v1"]["max_duration_seconds"], 900)
+
     def test_token_host_origin_and_json_enforcement(self):
         auth = {"X-OmoBench-Token": self.server.token}
         self.assertEqual(self.request("/api/runs")[0], 401)

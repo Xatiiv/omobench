@@ -96,6 +96,25 @@ PROFILE_SPECS: dict[str, dict[str, Any]] = {
         "max_requests": 160,
         "max_duration_seconds": 900,
     },
+    # Same chat-small workload; a longer duration ceiling so slower hardware
+    # (chiefly CPU) can collect enough measured samples. Uses explicit
+    # request-count warmup/cooldown (mode=requests), not chat-small-v1's
+    # percentage/prefer_duration scheme, so the sample size holds regardless
+    # of how long each request takes. GuideLLM 0.7.3's own request-count
+    # cooldown boundary excludes phase_requests + 1 trailing requests, not
+    # phase_requests (verified by direct simulation against the pinned
+    # package, not assumed) — cooldown=5 here actually excludes 6, so
+    # max_requests is 61 (5 warmup + 50 measured + 6 actual cooldown), not
+    # the naively-expected 60, to land on exactly 50 measured when the
+    # request budget is reached before the duration ceiling.
+    # See docs/proposals/chat-small-extended-v1.md.
+    "chat-small-extended-v1": {
+        "input_tokens": 1024,
+        "output_tokens": 256,
+        "profile": "kind=synchronous,warmup.value=5,warmup.mode=requests,cooldown.value=5,cooldown.mode=requests",
+        "max_requests": 61,
+        "max_duration_seconds": 5400,
+    },
 }
 
 

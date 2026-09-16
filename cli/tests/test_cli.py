@@ -5,6 +5,7 @@ import gzip
 import io
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -33,6 +34,19 @@ from omobench.cli import (
     validate_execution_device,
     write_run_intent,
 )
+
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def copy_repo_tree_for_registry_validation(root: Path) -> None:
+    """Give a temporary root the real benchmarks/catalog/schema/tools directories,
+    so ui_submission.validate_bundle()'s dynamic import of tools/validate_results.py
+    finds a real module to load. Call before build_staged_run_directory(), whose own
+    profile-stub writes intentionally take precedence over the copied real profiles."""
+    for relative in ("benchmarks", "catalog", "schema", "tools"):
+        shutil.copytree(ROOT / relative, root / relative, ignore=shutil.ignore_patterns("__pycache__"))
+    (root / "results").mkdir()
 
 
 GUIDELLM_REPORT_V2 = {
@@ -105,12 +119,160 @@ class GuideLLMCommandTests(unittest.TestCase):
         )
         self.assertIn("kind=max_requests,count=160", command)
 
+    def test_chat_small_extended_uses_explicit_request_count_phases_and_both_stopping_constraints(self) -> None:
+        """Same workload as chat-small-v1 (tokens, single stream), but warmup/cooldown
+        are explicit request counts, not the percent/prefer_duration scheme, and the
+        request budget accounts for GuideLLM's own cooldown-boundary off-by-one
+        (verified separately in ChatSmallExtendedBoundaryTests) so that reaching the
+        budget yields exactly 50 measured requests."""
+        command = build_guidellm_command(
+            endpoint="http://localhost:8000/v1",
+            model="Qwen/Qwen3-4B",
+            profile_id="chat-small-extended-v1",
+            raw_output_path=Path("/tmp/benchmarks.json"),
+        )
+        self.assertIn(
+            "kind=synchronous,warmup.value=5,warmup.mode=requests,cooldown.value=5,cooldown.mode=requests",
+            command,
+        )
+        # Same workload as chat-small-v1: unchanged tokens and request format.
+        self.assertIn("kind=synthetic_text,prompt_tokens=1024,output_tokens=256", command)
+        # Both stopping constraints are present; whichever fires first ends the run,
+        # so 90 minutes is a ceiling, not a mandatory runtime.
+        self.assertIn("kind=max_requests,count=61", command)
+        self.assertIn("kind=max_duration,seconds=5400", command)
+
     def test_local_endpoint_is_redacted_before_evidence_is_written(self) -> None:
         value = "server=http://localhost:8000/v1 and again http://localhost:8000/v1"
         self.assertEqual(
             redact_endpoint(value, "http://localhost:8000/v1"),
             "server=<LOCAL_ENDPOINT> and again <LOCAL_ENDPOINT>",
         )
+
+
+def _guidellm_transient_phase_config():
+    """Import the pinned GuideLLM 0.7.3 class this profile's warmup/cooldown
+    accounting depends on. Skips the whole test class when GuideLLM is not
+    installed in the environment running this suite, matching this repo's
+    existing convention of stubbing GuideLLM out entirely rather than requiring
+    it (see ExecutionTests.runner() in test_ui.py)."""
+    try:
+        from guidellm.benchmark.schemas.base import TransientPhaseConfig
+    except ImportError as error:
+        raise unittest.SkipTest(f"GuideLLM is not installed in this environment: {error}") from None
+    return TransientPhaseConfig
+
+
+class ChatSmallExtendedBoundaryTests(unittest.TestCase):
+    """Exercises the pinned GuideLLM 0.7.3 package's own warmup/cooldown boundary
+    code directly, with a simulated clock (synthetic per-request timestamps), rather
+    than assuming the profile's declared request counts translate literally. Skipped
+    automatically wherever GuideLLM is not installed."""
+
+    def setUp(self) -> None:
+        self.TransientPhaseConfig = _guidellm_transient_phase_config()
+
+    def _simulate(self, configured_total: int, completed_count: int, warmup_value: int = 5, cooldown_value: int = 5):
+        """Replay `completed_count` sequential requests (concurrency=1) against
+        GuideLLM's real TransientPhaseConfig.compute_transition_time, with
+        `configured_total` fixed throughout as the --constraint max_requests value
+        (unaffected by how many requests actually complete before a cutoff, exactly
+        as the real scheduler's constraint config behaves). Returns
+        (first_measured_request, last_measured_request_or_None).
+        """
+        warmup = self.TransientPhaseConfig(value=warmup_value, mode="requests")
+        cooldown = self.TransientPhaseConfig(value=cooldown_value, mode="requests")
+
+        class FakeProgress:
+            def __init__(self, total_requests):
+                self.total_requests = total_requests
+                self.total_duration = None
+                self.remaining_requests = None
+
+        class FakeState:
+            def __init__(self, processed_requests, remaining_requests, total_requests):
+                self.start_time = 0.0
+                self.processed_requests = processed_requests
+                self.progress = FakeProgress(total_requests)
+                self.progress.remaining_requests = remaining_requests
+
+        class FakeInfo:
+            def __init__(self, started_at, completed_at):
+                self.started_at = started_at
+                self.completed_at = completed_at
+
+        first_measured = None
+        last_measured = None
+        for i in range(1, completed_count + 1):
+            info = FakeInfo(float(i), float(i) + 0.5)
+            state = FakeState(processed_requests=i, remaining_requests=configured_total - i, total_requests=configured_total)
+            _, warm_time = warmup.compute_transition_time(info, state, "start")
+            _, cool_time = cooldown.compute_transition_time(info, state, "end")
+            if warm_time is not None and first_measured is None:
+                first_measured = i
+            if cool_time is not None:
+                last_measured = i
+        return first_measured, last_measured
+
+    def test_warmup_of_five_excludes_exactly_five_requests(self) -> None:
+        first_measured, _ = self._simulate(configured_total=61, completed_count=61)
+        self.assertEqual(first_measured, 6)  # requests 1-5 are warmup; 6 is the first measured one
+
+    def test_cooldown_of_five_actually_excludes_six_not_five(self) -> None:
+        """The documented, verified GuideLLM 0.7.3 quirk this profile's accounting
+        corrects for: a cooldown.value=N excludes N+1 trailing requests, not N."""
+        _, last_measured = self._simulate(configured_total=61, completed_count=61)
+        self.assertEqual(last_measured, 55)  # requests 56-61 (six of them) are cooldown, not five
+        excluded_by_cooldown = 61 - last_measured
+        self.assertEqual(excluded_by_cooldown, 6)
+
+    def test_request_budget_of_61_yields_exactly_50_measured(self) -> None:
+        """The number chat-small-extended-v1 is built around: not the naive 60."""
+        first_measured, last_measured = self._simulate(configured_total=61, completed_count=61)
+        measured_count = last_measured - first_measured + 1
+        self.assertEqual(measured_count, 50)
+
+    def test_a_naive_budget_of_60_would_fall_one_short(self) -> None:
+        """Documents exactly why 60 is wrong, rather than only asserting 61 is right."""
+        first_measured, last_measured = self._simulate(configured_total=60, completed_count=60)
+        measured_count = last_measured - first_measured + 1
+        self.assertEqual(measured_count, 49)
+
+    def test_fast_run_stops_at_the_request_budget_without_a_nine_minute_warmup_wait(self) -> None:
+        """Explicit request-count warmup ends as soon as 5 requests complete, however
+        little wall-clock time that takes — unlike chat-small-v1's percent-of-duration
+        scheme, which would always reserve a fixed 10% of the ceiling for warmup
+        regardless of how fast the requests actually complete."""
+        first_measured, last_measured = self._simulate(configured_total=61, completed_count=61)
+        # All 61 configured requests complete; the run stops there (the request-count
+        # constraint), never touching the 5400s ceiling. Warmup boundary in wall-clock
+        # terms is tied to the 5th request's completion, not to 10% of the ceiling.
+        self.assertEqual(first_measured, 6)
+        self.assertEqual(last_measured - first_measured + 1, 50)
+
+    def test_duration_limited_run_retains_partial_measured_requests_with_no_phantom_cooldown(self) -> None:
+        """If the run is cut off by the duration ceiling before completing the full
+        61-request budget, cooldown's trailing-request trigger never fires (it needs
+        the configured total to actually be reached), so every completed request
+        after warmup counts as measured -- partial evidence is retained, not discarded
+        to an assumed cooldown window."""
+        # 100 s/request against the 5400 s ceiling completes floor(5400/100) = 54 requests.
+        first_measured, last_measured = self._simulate(configured_total=61, completed_count=54)
+        self.assertIsNone(last_measured)  # cooldown boundary never triggered
+        self.assertEqual(first_measured, 6)
+        measured_count = 54 - (first_measured - 1)
+        self.assertEqual(measured_count, 49)  # below the acceptance minimum of 40? No -- but see next test.
+
+    def test_a_much_slower_duration_limited_run_falls_below_the_acceptance_minimum(self) -> None:
+        """A host slow enough to only complete 27 of the 61 requests in 5400s (200 s/req)
+        still gets correctly-scoped partial evidence, but that evidence legitimately
+        falls short of minimum_successful_requests: 40 -- the correct, honest outcome
+        for hardware this slow, not a bug."""
+        first_measured, last_measured = self._simulate(configured_total=61, completed_count=27)
+        self.assertIsNone(last_measured)
+        measured_count = 27 - (first_measured - 1)
+        self.assertEqual(measured_count, 22)
+        self.assertLess(measured_count, 40)
 
 
 class RunIntentTests(unittest.TestCase):
@@ -403,6 +565,13 @@ def build_staged_run_directory(root: Path, environment: dict | None = None, repo
     # exercising the acceptance check rather than bypassing it.
     profile_path.write_text(
         "id: chat-small-v1\nacceptance:\n  minimum_successful_requests: 40\n  maximum_error_rate_percent: 5\n",
+        encoding="utf-8",
+    )
+    # Real acceptance thresholds (matching the actual chat-small-extended-v1.yaml),
+    # for tests packaging against that profile id.
+    extended_profile_path = root / "benchmarks" / "profiles" / "chat-small-extended-v1.yaml"
+    extended_profile_path.write_text(
+        "id: chat-small-extended-v1\nacceptance:\n  minimum_successful_requests: 40\n  maximum_error_rate_percent: 1\n",
         encoding="utf-8",
     )
     run_directory = root / ".omobench-runs" / "run-fixture-1234"
@@ -1109,6 +1278,151 @@ class ResultPackagingTests(unittest.TestCase):
             self.assertNotEqual(
                 first_result["configuration_fingerprint"], second_result["configuration_fingerprint"]
             )
+
+
+def _extended_report(successful: int, incomplete: int, errored: int, scheduler_total_multiplier_extra: int = 11) -> dict:
+    """Build a raw GuideLLM report shaped like a real chat-small-extended-v1 run:
+    scheduler_metrics spans the full warmup+measured+cooldown lifecycle (61 total
+    when the request budget is fully reached: 5 warmup + 50 measured + 6 actual
+    cooldown -- see ChatSmallExtendedBoundaryTests), while metrics.request_totals is
+    the measured-window-only figure the normalizer must report. Numbers here come
+    from the verified boundary simulation, not invented."""
+    report = json.loads(json.dumps(GUIDELLM_REPORT_V2))
+    measured_total = successful + incomplete + errored
+    report["benchmarks"][0]["scheduler_metrics"]["requests_made"] = {
+        "successful": successful + scheduler_total_multiplier_extra,
+        "incomplete": incomplete,
+        "errored": errored,
+        "total": measured_total + scheduler_total_multiplier_extra,
+    }
+    report["benchmarks"][0]["metrics"]["request_totals"] = {
+        "successful": successful,
+        "incomplete": incomplete,
+        "errored": errored,
+        "total": measured_total,
+    }
+    return report
+
+
+class ChatSmallExtendedPackagingTests(unittest.TestCase):
+    """OmoBench's own code (normalizer, PROFILE_SPECS, packaging, acceptance) handling
+    of chat-small-extended-v1 report shapes derived from the verified boundary
+    behavior above -- these are test fixtures with numbers computed from real GuideLLM
+    semantics, not fabricated benchmark evidence."""
+
+    def _package(self, root: Path, report: dict, **overrides) -> dict:
+        run_directory = build_staged_run_directory(root, report=report)
+        args = base_package_args(
+            run_directory, profile="chat-small-extended-v1", execution_device="cpu", **overrides
+        )
+        original_directory = Path.cwd()
+        os.chdir(root)
+        try:
+            with patch("omobench.cli.current_git_commit", return_value="a" * 40):
+                self.assertEqual(package_local_run(args), 0)
+        finally:
+            os.chdir(original_directory)
+        return json.loads((run_directory / "result.json").read_text(encoding="utf-8"))
+
+    def test_profile_is_selectable_and_produces_its_own_profile_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            result = self._package(root, _extended_report(successful=50, incomplete=0, errored=0))
+            self.assertEqual(result["benchmark"]["profile_id"], "chat-small-extended-v1")
+            self.assertTrue(result["benchmark"]["profile_sha256"].startswith("sha256:"))
+
+    def test_fast_run_reaching_the_request_budget_reports_fifty_measured_and_meets_acceptance(self) -> None:
+        """Scenario (a): a fast/GPU-class run reaches the 61-request budget long before
+        the 5400 s ceiling; the reported figures are the measured-window-only 50, not
+        the full 61-request scheduler lifecycle total."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            result = self._package(root, _extended_report(successful=50, incomplete=0, errored=0))
+            self.assertEqual(result["results"]["requests"], {"attempted": 50, "succeeded": 50, "failed": 0})
+            self.assertEqual(result["results"]["error_rate_percent"], 0.0)
+
+    def test_slower_run_that_fits_the_ceiling_reports_the_full_intended_sample(self) -> None:
+        """Scenario (b): hardware slow enough that the run takes most of the 90-minute
+        ceiling, but still completes the full request budget before hitting it -- same
+        reported figures as the fast case; duration was a ceiling, not a shortener."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            result = self._package(root, _extended_report(successful=49, incomplete=1, errored=0))
+            self.assertEqual(result["results"]["requests"], {"attempted": 50, "succeeded": 49, "failed": 1})
+            self.assertEqual(result["results"]["error_rate_percent"], 2.0)
+
+    def test_duration_limited_run_retains_partial_evidence_and_still_meets_acceptance(self) -> None:
+        """Scenario (c), positive case: cut off by the 5400 s ceiling before completing
+        the full 61-request budget (only 54 of 61 complete, per the verified
+        simulation), cooldown's trigger never fires, and the 49 measured requests that
+        did complete are retained and correctly judged as meeting acceptance
+        (49 >= 40, 0% <= 1%) -- a finished-but-partial run can still be submission-ready."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            report = _extended_report(successful=49, incomplete=0, errored=0, scheduler_total_multiplier_extra=6)
+            result = self._package(root, report)
+            self.assertEqual(result["results"]["requests"]["succeeded"], 49)
+            self.assertGreaterEqual(result["results"]["requests"]["succeeded"], 40)
+            self.assertLessEqual(result["results"]["error_rate_percent"], 1.0)
+
+    def test_duration_limited_run_that_falls_short_is_correctly_rejected_by_acceptance(self) -> None:
+        """Scenario (c), negative case: a host too slow to reach even 40 measured
+        requests within the 5400 s ceiling (22 measured, per the verified simulation
+        of a 200 s/request host) is retained as evidence but correctly fails
+        acceptance -- the ceiling being generous does not guarantee every host clears it."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            copy_repo_tree_for_registry_validation(root)
+            report = _extended_report(successful=22, incomplete=0, errored=0, scheduler_total_multiplier_extra=6)
+            result = self._package(root, report)
+            self.assertEqual(result["results"]["requests"]["succeeded"], 22)
+
+            from omobench.ui_submission import validate_bundle
+
+            errors = validate_bundle(root, root / ".omobench-runs" / "run-fixture-1234")
+            self.assertTrue(any("22 successful requests is below" in e for e in errors), errors)
+            self.assertTrue(any("minimum_successful_requests (40)" in e for e in errors), errors)
+
+    def test_warmup_and_cooldown_are_excluded_from_the_reported_figures(self) -> None:
+        """Direct proof the normalizer reports metrics.request_totals (measured-window
+        only), not scheduler_metrics.requests_made (full warmup+measured+cooldown
+        lifecycle) -- the two are deliberately different in this fixture."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            report = _extended_report(successful=50, incomplete=0, errored=0)
+            scheduler_total = report["benchmarks"][0]["scheduler_metrics"]["requests_made"]["total"]
+            self.assertEqual(scheduler_total, 61)  # the full 5 + 50 + 6 lifecycle
+            result = self._package(root, report)
+            self.assertEqual(result["results"]["requests"]["attempted"], 50)  # not 61
+
+    def test_packaging_and_registry_validation_use_the_new_profiles_own_id_and_hash(self) -> None:
+        """Never conflated with chat-small-v1: distinct profile_id, distinct
+        profile_sha256, distinct configuration_fingerprint for an otherwise identical
+        run packaged against each."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            copy_repo_tree_for_registry_validation(root)
+            extended_run = build_staged_run_directory(root, report=_extended_report(50, 0, 0))
+            original_directory = Path.cwd()
+            os.chdir(root)
+            try:
+                with patch("omobench.cli.current_git_commit", return_value="a" * 40):
+                    self.assertEqual(
+                        package_local_run(
+                            base_package_args(
+                                extended_run, profile="chat-small-extended-v1", execution_device="cpu"
+                            )
+                        ),
+                        0,
+                    )
+            finally:
+                os.chdir(original_directory)
+            extended_result = json.loads((extended_run / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(extended_result["benchmark"]["profile_id"], "chat-small-extended-v1")
+
+            from omobench.ui_submission import validate_bundle
+
+            self.assertEqual(validate_bundle(root, extended_run), [])
 
 
 if __name__ == "__main__":

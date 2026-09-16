@@ -858,5 +858,53 @@ class AcceptanceValidationTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertIn("missing an 'acceptance' section", stderr)
 
+
+class RealChatSmallExtendedProfileTests(unittest.TestCase):
+    """Exercises the actual shipped benchmarks/profiles/chat-small-extended-v1.yaml
+    (unpatched PROFILES_PATH, the real repo), not an isolated fixture."""
+
+    def test_real_profile_file_has_the_required_acceptance_thresholds(self) -> None:
+        digest = validate_results.sha256(validate_results.PROFILES_PATH / "chat-small-extended-v1.yaml")
+        acceptance, error = validate_results.load_profile_acceptance(
+            validate_results.PROFILES_PATH, "chat-small-extended-v1", digest
+        )
+        self.assertIsNone(error)
+        self.assertEqual(acceptance["minimum_successful_requests"], 40)
+        self.assertEqual(acceptance["maximum_error_rate_percent"], 1)
+
+    def test_real_profile_matches_chat_small_v1s_acceptance_bar_exactly(self) -> None:
+        """Same acceptance requirements as chat-small-v1 -- preserved, not loosened."""
+        classic_digest = validate_results.sha256(validate_results.PROFILES_PATH / "chat-small-v1.yaml")
+        classic, _ = validate_results.load_profile_acceptance(
+            validate_results.PROFILES_PATH, "chat-small-v1", classic_digest
+        )
+        extended_digest = validate_results.sha256(validate_results.PROFILES_PATH / "chat-small-extended-v1.yaml")
+        extended, _ = validate_results.load_profile_acceptance(
+            validate_results.PROFILES_PATH, "chat-small-extended-v1", extended_digest
+        )
+        self.assertEqual(classic, extended)
+
+    def test_real_profile_only_changes_the_duration_ceiling(self) -> None:
+        """workload/execution/acceptance/report stay the same shape as chat-small-v1
+        except maximum_duration_seconds and the request-count warmup/cooldown note."""
+        classic = yaml.safe_load(
+            (validate_results.PROFILES_PATH / "chat-small-v1.yaml").read_text(encoding="utf-8")
+        )
+        extended = yaml.safe_load(
+            (validate_results.PROFILES_PATH / "chat-small-extended-v1.yaml").read_text(encoding="utf-8")
+        )
+        self.assertEqual(classic["workload"], extended["workload"])
+        self.assertEqual(classic["execution"]["concurrency"], extended["execution"]["concurrency"])
+        self.assertEqual(classic["execution"]["measured_requests"], extended["execution"]["measured_requests"])
+        self.assertEqual(classic["execution"]["warmup_requests"], extended["execution"]["warmup_requests"])
+        self.assertEqual(classic["execution"]["cooldown_requests"], extended["execution"]["cooldown_requests"])
+        self.assertEqual(classic["acceptance"], extended["acceptance"])
+        self.assertEqual(classic["report"], extended["report"])
+        self.assertNotEqual(
+            classic["execution"]["maximum_duration_seconds"], extended["execution"]["maximum_duration_seconds"]
+        )
+        self.assertEqual(extended["execution"]["maximum_duration_seconds"], 5400)
+
+
 if __name__ == "__main__":
     unittest.main()

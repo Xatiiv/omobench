@@ -90,7 +90,21 @@ class GuidedServiceTests(unittest.TestCase):
         status, _, body = self.request("/api/managed/recipes", self.auth())
         self.assertEqual(status, 200)
         payload = json.loads(body)
-        self.assertEqual([r["id"] for r in payload["recipes"]], ["qwen3-4b-cpu-v1"])
+        self.assertEqual(
+            [r["id"] for r in payload["recipes"]], ["qwen3-4b-cpu-v1", "qwen3-4b-cpu-extended-v1"]
+        )
+
+    def test_extended_recipe_is_selectable_alongside_the_classic_one(self):
+        """The guided page's recipe picker (guided.js only auto-selects when exactly
+        one recipe exists) now has a genuine choice: the classic chat-small-v1 recipe
+        and the extended-duration one, both CPU, both reusing the same artifacts."""
+        _, _, body = self.request("/api/managed/recipes", self.auth())
+        recipes = {r["id"]: r for r in json.loads(body)["recipes"]}
+        self.assertEqual(recipes["qwen3-4b-cpu-v1"]["benchmark_profile"], "chat-small-v1")
+        self.assertEqual(recipes["qwen3-4b-cpu-extended-v1"]["benchmark_profile"], "chat-small-extended-v1")
+        for recipe in recipes.values():
+            self.assertEqual(recipe["model_id"], "Qwen/Qwen3-4B")
+            self.assertEqual(recipe["execution_device"], "cpu")
 
     def test_managed_run_requires_token_too(self):
         headers = {"Content-Type": "application/json"}

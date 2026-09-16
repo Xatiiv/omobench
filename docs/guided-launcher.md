@@ -18,9 +18,15 @@ available in the advanced panel and from the CLI.
 - **Reviewed recipes**, not a general downloader. A recipe in
   [`catalog/downloads/cpu-v1.json`](../catalog/downloads/cpu-v1.json) pins an
   exact HTTPS URL, an immutable revision, a file size, a SHA-256 hash, and a
-  licence for one model file and one runtime archive. This milestone ships a
-  single recipe, `qwen3-4b-cpu-v1`: Qwen3 4B (Q4_K_M GGUF) with a matching
-  llama.cpp CPU build, using the existing `chat-small-v1` profile.
+  licence for one model file and one runtime archive. This milestone ships
+  two recipes, both Qwen3 4B (Q4_K_M GGUF) with the same matching llama.cpp
+  CPU build and the same pinned artifacts: `qwen3-4b-cpu-v1` (the existing
+  `chat-small-v1` profile) and `qwen3-4b-cpu-extended-v1` (the same workload
+  on the longer-duration `chat-small-extended-v1` profile — see
+  [the proposal](proposals/chat-small-extended-v1.md) — for hardware that
+  needs more than 15 minutes to collect enough measured samples). Selecting
+  the extended recipe never re-downloads anything already installed for the
+  classic one: both recipes pin identical model/runtime artifacts.
 - It never runs an installer or touches system packages. It downloads two
   verified files and extracts one archive under a storage folder you choose,
   below `omobench-managed-v1/`.

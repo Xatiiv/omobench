@@ -79,8 +79,22 @@ def base_recipe(**overrides) -> dict:
 class RecipeValidationTests(unittest.TestCase):
     def test_real_catalog_validates_and_references_a_cataloged_model(self):
         recipes = ms.load_recipes(ROOT)
-        self.assertEqual([r["id"] for r in recipes], ["qwen3-4b-cpu-v1"])
+        self.assertEqual(
+            [r["id"] for r in recipes], ["qwen3-4b-cpu-v1", "qwen3-4b-cpu-extended-v1"]
+        )
         self.assertEqual(ms.get_recipe(ROOT, "qwen3-4b-cpu-v1")["model_id"], "Qwen/Qwen3-4B")
+        self.assertEqual(ms.get_recipe(ROOT, "qwen3-4b-cpu-extended-v1")["model_id"], "Qwen/Qwen3-4B")
+
+    def test_extended_recipe_reuses_the_exact_same_pinned_artifacts(self):
+        """The extended-duration recipe must never trigger a second download: it
+        references the identical, already-reviewed model and runtime artifacts."""
+        recipes = {r["id"]: r for r in ms.load_recipes(ROOT)}
+        classic = recipes["qwen3-4b-cpu-v1"]
+        extended = recipes["qwen3-4b-cpu-extended-v1"]
+        self.assertEqual(classic["model"], extended["model"])
+        self.assertEqual(classic["runtime"], extended["runtime"])
+        self.assertEqual(extended["benchmark_profile"], "chat-small-extended-v1")
+        self.assertNotEqual(classic["benchmark_profile"], extended["benchmark_profile"])
 
     def test_recipe_rejects_model_absent_from_catalog(self):
         with tempfile.TemporaryDirectory() as temporary:
