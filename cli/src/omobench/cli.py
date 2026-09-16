@@ -100,19 +100,24 @@ PROFILE_SPECS: dict[str, dict[str, Any]] = {
     # (chiefly CPU) can collect enough measured samples. Uses explicit
     # request-count warmup/cooldown (mode=requests), not chat-small-v1's
     # percentage/prefer_duration scheme, so the sample size holds regardless
-    # of how long each request takes. GuideLLM 0.7.3's own request-count
-    # cooldown boundary excludes phase_requests + 1 trailing requests, not
-    # phase_requests (verified by direct simulation against the pinned
-    # package, not assumed) — cooldown=5 here actually excludes 6, so
-    # max_requests is 61 (5 warmup + 50 measured + 6 actual cooldown), not
-    # the naively-expected 60, to land on exactly 50 measured when the
-    # request budget is reached before the duration ceiling.
-    # See docs/proposals/chat-small-extended-v1.md.
+    # of how long each request takes.
+    #
+    # cooldown.value=4, not 5: GuideLLM 0.7.3's own request-count cooldown
+    # boundary excludes phase_requests + 1 trailing requests, not
+    # phase_requests -- confirmed by driving the real scheduler-facing
+    # accumulator (GenerativeBenchmarkAccumulator.update_estimate) through a
+    # full synthetic request sequence and reading GenerativeMetrics.compile()'s
+    # final request_totals, not by inspecting compute_transition_time alone.
+    # A bare cooldown.value=5 excludes 6 requests; value=4 is the documented
+    # compensation that makes the *actual* excluded count 5, matching the
+    # declared contract exactly: 5 warmup + 50 measured + 5 cooldown = 60
+    # total, verified end to end. See ChatSmallExtendedBoundaryTests in
+    # cli/tests/test_cli.py and docs/proposals/chat-small-extended-v1.md.
     "chat-small-extended-v1": {
         "input_tokens": 1024,
         "output_tokens": 256,
-        "profile": "kind=synchronous,warmup.value=5,warmup.mode=requests,cooldown.value=5,cooldown.mode=requests",
-        "max_requests": 61,
+        "profile": "kind=synchronous,warmup.value=5,warmup.mode=requests,cooldown.value=4,cooldown.mode=requests",
+        "max_requests": 60,
         "max_duration_seconds": 5400,
     },
 }

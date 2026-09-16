@@ -3,9 +3,9 @@
 Status: **implemented**. `benchmarks/profiles/chat-small-extended-v1.yaml` and its
 `cli.py` `PROFILE_SPECS` runner mapping exist; it is selectable via the CLI and
 both UIs. `chat-small-v1`, `chat-long-v1`, and `throughput-v1` are unchanged.
-This revision corrects request-accounting issues found after the first draft —
-see the changelog at the bottom — before implementation; the corrected design
-is what shipped.
+This revision corrects request-accounting issues found after the first draft,
+and again after a second review — see the changelog at the bottom — before
+implementation; the corrected design is what shipped.
 
 ## 1. Purpose
 
@@ -54,12 +54,6 @@ execution:
   concurrency: 1
   measured_requests: 50
   warmup_requests: 5
-  # GuideLLM 0.7.3's request-count cooldown boundary excludes one more
-  # trailing request than declared here (verified by direct simulation
-  # against the pinned package: cooldown_requests: 5 actually excludes the
-  # last 6 requests, not 5). The runner's request budget (61, in
-  # cli.py's PROFILE_SPECS) already accounts for this so the measured
-  # sample still lands on exactly 50. See §3.
   cooldown_requests: 5
   request_timeout_seconds: 300
   maximum_duration_seconds: 5400
@@ -83,7 +77,9 @@ Every field is identical to `chat-small-v1.yaml` **except** `title`,
 `description`, and `execution.maximum_duration_seconds` (900 → 5,400).
 `workload.*`, `execution.concurrency`/`measured_requests`/`warmup_requests`/
 `cooldown_requests`, `acceptance.*`, and `report.*` are unchanged — this is
-deliberately the same benchmark, not a new one.
+deliberately the same benchmark, not a new one, and the runner mapping below
+is built to make the runner's *actual* behavior match `cooldown_requests: 5`
+exactly, not to redefine it.
 
 ### Implemented runner configuration
 
@@ -95,13 +91,13 @@ in §3). The shipped entry:
 "chat-small-extended-v1": {
     "input_tokens": 1024,
     "output_tokens": 256,
-    "profile": "kind=synchronous,warmup.value=5,warmup.mode=requests,cooldown.value=5,cooldown.mode=requests",
-    "max_requests": 61,
+    "profile": "kind=synchronous,warmup.value=5,warmup.mode=requests,cooldown.value=4,cooldown.mode=requests",
+    "max_requests": 60,
     "max_duration_seconds": 5400,
 },
 ```
 
-Two changes from the first draft, both corrections described in §3:
+Two changes from `chat-small-v1`, both explained and verified in §3:
 
 1. **Explicit request-count phases**, not `warmup=0.1,cooldown=0.1` (percent,
    `prefer_duration` mode). `chat-small-v1`'s percent scheme ties warmup and
@@ -110,14 +106,19 @@ Two changes from the first draft, both corrections described in §3:
    15-minute profile, but wrong for a profile whose whole point is a large,
    flexible ceiling: at 5,400 s it would reserve a fixed 540 s (9 min) for
    warmup and 540 s for cooldown regardless of how many requests that
-   actually is, which is not "5 warmup requests, 50 measured, 5 cooldown" on
-   any but one specific hardware speed. `mode=requests` ties each phase to an
-   explicit request count instead, independent of how long each request
-   takes.
-2. **`max_requests: 61`, not 60.** Verified by direct simulation against the
-   pinned package (§3): with `cooldown.value=5`, GuideLLM's own boundary
-   check excludes the *last 6* requests, not 5. A naive 5 + 50 + 5 = 60 total
-   yields only 49 measured. 5 + 50 + 6 = 61 yields exactly 50.
+   actually is. `mode=requests` ties each phase to an explicit request count
+   instead, independent of how long each request takes.
+2. **`cooldown.value: 4`, not 5 — a documented compensation, not the declared
+   count.** GuideLLM 0.7.3's own request-count cooldown boundary excludes one
+   *more* trailing request than the value it is given (verified end to end
+   in §3: asking for `cooldown.value=5` actually excludes 6). Asking for
+   `cooldown.value=4` is the smallest correction that makes the runner's
+   *actual* excluded count equal to the declared 5 — not a change to what
+   "cooldown" means, and not a change to `cooldown_requests: 5` in the YAML,
+   which stays the accurate description of what actually happens.
+   `max_requests: 60` (5 + 50 + 5, the declared sum) follows directly once
+   the *actual* cooldown is corrected to 5 — no inflation of the request
+   budget is needed.
 
 `managed_setup.validate_recipe` and the `--profile` argparse `choices` on
 `run`/`package` both derive from `PROFILE_SPECS`, so adding this entry alone
@@ -126,15 +127,38 @@ code paths needed updating.
 
 ## 3. Duration and request accounting
 
-### How GuideLLM 0.7.3 actually behaves (source-verified, not assumed)
+### Verified through the complete pinned GuideLLM 0.7.3 path, not one function in isolation
 
-Read directly from the pinned GuideLLM 0.7.3 package
-(`guidellm/benchmark/schemas/base.py`, `profiles.py`, `accumulator.py`,
-`metrics.py`), and confirmed by **directly simulating** its own
-`TransientPhaseConfig.compute_transition_time` against a synthetic,
-sequential 61-request timeline (a simulated clock, not a real 90-minute
-run) — this is what caught the issues below, rather than assuming the
-declared counts translate literally:
+An earlier revision of this profile verified warmup/cooldown boundaries by
+calling `TransientPhaseConfig.compute_transition_time()` directly with
+hand-built stand-in objects. That is not sufficient on its own: the real
+counting path also depends on `GenerativeBenchmarkAccumulator.update_estimate()`
+(which drives `compute_transition_time()` from real scheduler-yielded events
+and decides which sub-accumulator — completed/incomplete/errored — a request
+lands in) and `GenerativeMetrics.compile()`'s own `get_within_range()` overlap
+filter (which independently decides, from the timestamps
+`compute_transition_time()` produced, which specific requests are "measured").
+A narrower test could not have caught a mismatch between those two layers.
+
+This revision instead drives the **real, complete path** with a fast,
+deterministic, in-process test (`ChatSmallExtendedBoundaryTests` in
+`cli/tests/test_cli.py`, run — not skipped — against the pinned GuideLLM 0.7.3
+package in this environment): real `guidellm.schemas.info.RequestInfo` and
+`guidellm.scheduler.schemas.SchedulerState`/`SchedulerProgress` objects,
+matching the real field semantics confirmed by reading
+`guidellm/scheduler/constraints/request.py` (`remaining_requests = min(max(0,
+max_num - state.processed_requests), max_num)` — `processed_requests` only
+increments on *terminal* completion, and `remaining_requests` is recomputed
+from it on every event, so both quantities mean exactly what a real run's
+constraint bookkeeping means, not an approximation of it), for a synthetic,
+sequential (concurrency = 1) request timeline where request *i* occupies the
+inclusive-start/exclusive-end window `[i − 1, i)`. Each event is fed through
+the real `GenerativeBenchmarkAccumulator.update_estimate()`, and the final
+answer is read from the real `GenerativeMetrics.compile(accumulator)` —
+i.e., scheduler events, accumulator updates, and final compiled metrics, the
+complete path, not one link in it.
+
+Findings, all from that test, verified rather than assumed:
 
 - **The CLI string syntax for explicit request-count phases exists and is
   supported.** `guidellm.utils.arg_string.loads()` (the parser behind every
@@ -142,40 +166,35 @@ declared counts translate literally:
   `warmup.value=5,warmup.mode=requests` parses to
   `{"warmup": {"value": 5, "mode": "requests"}}`, which
   `SynchronousProfileArgs.model_validate()` accepts directly as
-  `TransientPhaseConfig(value=5, mode="requests")`. Verified by constructing
-  both directly against the installed package, not assumed from the
-  docstring.
+  `TransientPhaseConfig(value=5, mode="requests")`.
 - With `mode="requests"`, `compute_limits()` skips the duration branch
-  entirely (`if self.mode != "requests" and max_seconds is not None`) — no
-  `prefer_duration` fallback can override it, unlike a bare percent or
-  absolute value (which defaults to `mode="prefer_duration"` and would
-  silently reinterpret a bare `warmup=5` as "5 **seconds**", not 5
+  entirely — no `prefer_duration` fallback can override it, unlike a bare
+  percent or absolute value (which defaults to `mode="prefer_duration"` and
+  would silently reinterpret a bare `warmup=5` as "5 **seconds**", not 5
   requests, then discard even that if a duration constraint is present).
   This is the trap explicit `mode=requests` avoids.
-- **Boundary behavior, verified by simulation, not assumed:**
-  `compute_transition_time()`'s warmup check fires when
-  `state.processed_requests == phase_requests + 1` — for `value=5` this
-  correctly excludes exactly requests 1–5. Its cooldown check fires when
-  `state.progress.remaining_requests == phase_requests + 1` — for `value=5`
-  this fires when 6 (not 5) requests remain, so it excludes the *last six*
-  requests, not five. Simulating a full 61-request run confirms: warmup = 5
-  (correct), cooldown = 6 (one more than declared), measured = 61 − 5 − 6 =
-  **50**. Simulating a naive 60-request budget instead gives measured = 60 −
-  5 − 6 = **49** — one short. This asymmetry (warmup exact, cooldown off by
-  one) is a property of GuideLLM 0.7.3 itself, not a simulation artifact;
-  `chat-small-extended-v1`'s `max_requests: 61` is chosen specifically to
-  compensate for it.
+- **Warmup is exact.** A `warmup.value=5` run, driven through the complete
+  path, excludes precisely requests 1–5 regardless of the configured total
+  (confirmed at totals of 59, 60, and 61 in earlier exploratory runs, and at
+  60 in the committed test).
+- **Cooldown is not exact — verified, not assumed, through the complete
+  path.** A `cooldown.value=5` run at a configured total of 60 yields
+  `request_totals.total = 49`, not 50: the boundary excludes the *last six*
+  requests, one more than asked. A `cooldown.value=4` run at the same total
+  of 60 yields exactly `request_totals = {successful: 50, incomplete: 0,
+  errored: 0, total: 50}` — the compensation exactly cancels the off-by-one,
+  and 60 (5 declared warmup + 50 declared measured + 5 *actual* cooldown) is
+  reached with no inflation of the request budget.
 - `build_guidellm_command()` passes **two independent stop constraints**:
-  `kind=max_requests,count=61` and `kind=max_duration,seconds=5400`.
+  `kind=max_requests,count=60` and `kind=max_duration,seconds=5400`.
   GuideLLM stops on whichever fires first — this is what makes 5,400 s a
-  ceiling rather than a mandatory runtime (§1, §5). On hardware fast enough
-  to complete 61 requests well inside 5,400 s, the request-count constraint
-  fires first and the run ends there. **A total limit of 61 does not by
-  itself guarantee 50 measured requests occur** — it guarantees that *if*
-  all 61 complete, exactly 50 are measured; if the duration ceiling cuts the
-  run off first, fewer complete and the actual measured count is whatever
-  fell between warmup's end and the cutoff (§4 covers this case with
-  verified partial-completion numbers).
+  ceiling rather than a mandatory runtime (§1, §5). **Reaching the request
+  budget does not by itself guarantee 50 measured requests occur** — it
+  guarantees that *if* all 60 complete, exactly 50 are measured; if the
+  duration ceiling cuts the run off first, the actual measured count is
+  whatever fell between warmup's end and the cutoff — §4 covers this case
+  with verified partial-completion numbers, also produced by the complete
+  path, not a shortcut.
 - "Measured" request counts and metrics are computed by
   `GenerativeMetrics.compile()` via
   `accumulator.completed/incomplete/errored.get_within_range(measure_start_time,
@@ -204,38 +223,34 @@ Core(TM) Ultra 7 155H`, single-stream CPU llama.cpp, unchanged):
 `benchmark.metrics.request_latency.successful.mean` = **58.46 s/request**.
 Real, current-format evidence — not re-run for this proposal.
 
-Because the request budget is now fixed (61 total, capped by
-`max_requests` regardless of ceiling), a longer ceiling does **not** change
-how many requests get measured when the ceiling isn't hit — it changes only
-*how much of that fixed 61-request run a given ceiling can actually fit*.
-The right comparison is the fraction of the ceiling the measured host's full
-run would consume — its safety margin — not a hypothetical "how many
-requests fit in this much wall-clock time" (that number describes
-theoretical time-budget capacity only, useful for nothing here, since the
-request-count constraint stops the run at 61 regardless of remaining
-budget — this is the correction to the first draft's "73 requests in 90
-minutes" claim, which conflated the two).
+Because the request budget is fixed (60 total, capped by `max_requests`
+regardless of ceiling), a longer ceiling does **not** change how many
+requests get measured when the ceiling isn't hit — it changes only *how much
+of that fixed 60-request run a given ceiling can actually fit*. The right
+comparison is the fraction of the ceiling the measured host's full run would
+consume — its safety margin — not a hypothetical "how many requests fit in
+this much wall-clock time" (that number describes theoretical time-budget
+capacity only, useful for nothing here, since the request-count constraint
+stops the run at 60 regardless of remaining budget).
 
-| D (ceiling) | time for the full 61-request budget @ 58.46 s/req | margin before the ceiling binds | breakeven rate (ceiling ÷ 61) |
+| D (ceiling) | time for the full 60-request budget @ 58.46 s/req | margin before the ceiling binds | breakeven rate (ceiling ÷ 60) |
 |---|---|---|---|
-| 3,600 s (60 min) | 3,566 s (59.4 min) | **34 s — 0.9%** | 59.0 s/req |
-| 5,400 s (90 min) | 3,566 s (59.4 min) | 1,834 s — **34.0%** | 88.5 s/req |
+| 3,600 s (60 min) | 3,508 s (58.5 min) | **92 s — 2.6%** | 60.0 s/req |
+| 5,400 s (90 min) | 3,508 s (58.5 min) | 1,892 s — **35.0%** | 90.0 s/req |
 
 **60 minutes is not a safe choice.** The *already-measured* reference host
-sits at essentially zero margin (0.9%) before the 60-minute ceiling would
-start truncating its run — any ordinary run-to-run variance (a slower
-request, thermal throttling, OS scheduling) could push it over and cut the
-run short before all 50 measured requests land. A host even slightly slower
-than 59.0 s/request (this host is 58.46 s/request — a 1% difference) would
-be truncated outright. Since the purpose is headroom for hardware slower
-than what has already been measured, a ceiling the reference host itself
-barely clears defeats the purpose.
+sits at only 2.6% margin before the 60-minute ceiling would start truncating
+its run — any ordinary run-to-run variance (a slower request, thermal
+throttling, OS scheduling) could push it over and cut the run short before
+all 50 measured requests land. Since the purpose is headroom for hardware
+slower than what has already been measured, a ceiling the reference host
+itself barely clears defeats the purpose.
 
-**Recommendation: 90 minutes (5,400 s).** It gives the reference host 34%
-margin before the ceiling would bind at all, and raises the breakeven rate
-to 88.5 s/request — any host up to ~51% slower than the one already measured
-still completes the full 61-request budget without being cut off. It is
-also a small, easily-communicated number for contributors, unlike an
+**Recommendation: 90 minutes (5,400 s).** It gives the reference host 35%
+margin before the ceiling would bind at all, and raises the breakeven rate to
+exactly 90.0 s/request — any host up to ~54% slower than the one already
+measured still completes the full 60-request budget without being cut off.
+It is also a small, easily-communicated number for contributors, unlike an
 open-ended alternative.
 
 ### Expected runtime vs. maximum permitted runtime
@@ -245,11 +260,11 @@ Different things, reported as such (§5):
 - **Maximum permitted runtime** is the ceiling: 90 minutes, never exceeded,
   for any hardware.
 - **Expected runtime on fast/GPU hardware**: the `max_requests` constraint
-  (61) fires first, exactly as `chat-small-v1`'s does today; typical GPU
-  decode throughput completes 61 requests in well under a minute per
+  (60) fires first, exactly as `chat-small-v1`'s does today; typical GPU
+  decode throughput completes 60 requests in well under a minute per
   request, so the run ends in a couple of minutes, nowhere near 90.
 - **Expected runtime on the measured CPU host**: completing the full
-  61-request budget takes ≈59.4 minutes (58.46 s × 61) — under the 90-minute
+  60-request budget takes ≈58.5 minutes (58.46 s × 60) — under the 90-minute
   ceiling, so this host is expected to finish on its own, at its own pace,
   landing on the full 50-request measured sample instead of the 13 it
   reached under the 900 s cap. It does **not** run for the full 90 minutes;
@@ -258,13 +273,15 @@ Different things, reported as such (§5):
 
 ## 4. Error-rate findings
 
-Summary of the completed investigation (prior session): the 4 "incomplete"
-requests recorded by GuideLLM's scheduler-level `requests_made` were **not**
-service or inference errors — `errored` was 0 throughout. They were requests
-still queued or in flight when the `max_duration` constraint fired
-(`duration_exceeded: true` in `scheduler_state`) and got cancelled; the one
-such request with retained per-request detail shows `status: "cancelled"`,
-occurring after the cooldown boundary, not during measurement.
+### The four unsuccessful requests: what they were, and whether extending duration addresses them
+
+Summary of the completed investigation: the 4 "incomplete" requests recorded
+by GuideLLM's scheduler-level `requests_made` for the real 900 s CPU run
+were **not** service or inference errors — `errored` was 0 throughout. They
+were requests still queued or in flight when the `max_duration` constraint
+fired (`duration_exceeded: true` in `scheduler_state`) and got cancelled; the
+one such request with retained per-request detail shows `status:
+"cancelled"`, occurring after the cooldown boundary, not during measurement.
 `metrics.request_totals` (the correctly measured-window-scoped field) shows
 **0 incomplete and 0 errored** among the 13 requests that actually overlapped
 the measured window.
@@ -272,18 +289,19 @@ the measured window.
 **Does extending the duration address the cause? Only partly — stated
 explicitly rather than implied as fully resolved.**
 
-- What it *does* fix: with explicit request-count phases (§3), a
-  duration-limited run no longer applies a fixed 10%-of-ceiling cooldown
-  window regardless of progress — cooldown's request-count trigger only
-  activates once the configured total (61) is actually reached. Verified by
-  simulation: a run cut off after only 54 of 61 requests (a duration cutoff
-  at ~100 s/request) never fires the cooldown boundary at all, so every
-  completed request past warmup — 49 of them — is retained as measured, not
-  discarded to a phantom cooldown carve-out the old percent-based scheme
-  would have applied unconditionally. A much slower cutoff (27 of 61
-  requests complete, ~200 s/request) still correctly retains 22 measured
-  requests — legitimately below the 40-minimum, and correctly reported as
-  such, not silently inflated or truncated further.
+- What it *does* fix: with explicit request-count phases and the verified
+  cooldown compensation (§3), a duration-limited run no longer applies a
+  fixed 10%-of-ceiling cooldown window regardless of progress — cooldown's
+  request-count trigger only activates once the configured total (60) is
+  actually reached. Verified through the complete path: a run cut off after
+  only 54 of 60 requests (a duration cutoff at ~100 s/request) never fires
+  the cooldown boundary at all, so every completed request past warmup — 49
+  of them — is retained as measured, not discarded to a phantom cooldown
+  carve-out the old percent-based scheme would have applied unconditionally.
+  A much slower cutoff (27 of 60 requests complete, ~200 s/request) still
+  correctly retains 22 measured requests — legitimately below the
+  40-minimum, and correctly reported as such, not silently inflated or
+  truncated further.
 - What it does **not** fix, and remains true regardless of the chosen
   ceiling: **any fixed-duration run can still cut off whatever request is
   in flight or queued when the wall-clock budget expires.** This is
@@ -293,6 +311,32 @@ explicitly rather than implied as fully resolved.**
   evidence is retained cleanly instead of contaminating a fixed cooldown
   window), but neither prevents it from happening. Documented as expected
   behavior, not chased further as an unresolved defect.
+
+### The "49/50 passes" acceptance check, verified
+
+Two cases, both against `acceptance.minimum_successful_requests: 40` and
+`acceptance.maximum_error_rate_percent: 1` (unchanged from `chat-small-v1`,
+not loosened):
+
+| Case | attempted | successful | incomplete | errored | error rate | Outcome |
+|---|---|---|---|---|---|---|
+| Duration-limited, still passes | 49 | 49 | 0 | 0 | 0.0% | **Meets acceptance** (49 ≥ 40, 0% ≤ 1%) |
+| One failure among a full sample | 50 | 49 | — | 1 | 2.0% | **Fails acceptance** (2% > 1%), *even though* successful count (49) alone would pass |
+
+The second case is deliberately not "discarded because the duration limit
+was reached" and not conflated with the first: `attempted` includes the one
+failed request (`50 = 49 successful + 1 failed`); OmoBench's normalizer
+computes `failed = incomplete + errored` and
+`error_rate_percent = 100 * failed / attempted` uniformly — an attempted
+request that failed is counted in the denominator whether it failed by
+timing out, being cancelled, or erroring, and is never dropped merely
+because a duration constraint was involved. `test_slower_run_that_fits_the_
+ceiling_reports_the_full_intended_sample` in `cli/tests/test_cli.py` asserts
+this exact 50/49/1/2.0% shape; `test_duration_limited_run_retains_partial_
+evidence_and_still_meets_acceptance` asserts the 49/49/0/0.0%-passes shape
+separately, so the two are not confused with each other. Both were already
+correct; this section documents and names them rather than changing
+behavior that was already right.
 
 ## 5. User experience
 
@@ -328,7 +372,7 @@ only at the later `validate_bundle` step.
 **Local panel** (`index.html`/`app.js`): `profileDetail()` already renders
 `... up to ${spec.max_requests} measured requests / ${spec.max_duration_seconds
 / 60} min` directly from `PROFILE_SPECS` — with the entry in §2 present, it
-shows "up to 61 measured requests / 90 min" with no further UI code change
+shows "up to 60 measured requests / 90 min" with no further UI code change
 (a future refinement could special-case the label to read "up to 90 min,
 stops at 50 measured" for clarity, but is not required for correctness).
 Proposed addition: a short progress line under the run panel while an active
@@ -373,15 +417,24 @@ adding a second recipe surfaces a genuine picker with no JS changes.
 
 ## Changelog
 
-- **Corrected after the first draft, before implementation**: warmup/cooldown
-  changed from `warmup=0.1,cooldown=0.1` (percent, `prefer_duration`) to
-  explicit `mode=requests` phases; the request-count budget changed from a
-  naive 60 to the verified 61 (GuideLLM 0.7.3's cooldown boundary excludes
-  one more trailing request than declared); the duration-comparison analysis
-  in §3 was rebuilt around margin-before-the-ceiling-binds rather than a
-  hypothetical request count a fixed duration budget could theoretically
-  hold (the retracted "73 requests in 90 minutes" claim, which did not
-  account for the request-count constraint stopping the run at its budget
-  regardless of remaining time). All figures in this revision come from
-  direct simulation against the pinned GuideLLM 0.7.3 package or from the
-  existing measured CPU run; none are re-derived assumptions.
+- **First correction, before implementation**: warmup/cooldown changed from
+  `warmup=0.1,cooldown=0.1` (percent, `prefer_duration`) to explicit
+  `mode=requests` phases; the duration-comparison analysis in §3 was rebuilt
+  around margin-before-the-ceiling-binds rather than a hypothetical request
+  count a fixed duration budget could theoretically hold (the retracted "73
+  requests in 90 minutes" claim, which did not account for the request-count
+  constraint stopping the run at its budget regardless of remaining time).
+- **Second correction, after review**: the first correction compensated for
+  GuideLLM's cooldown off-by-one by inflating `max_requests` to 61 (5 warmup
+  + 50 measured + 6 *actual* cooldown), leaving `cooldown_requests: 5` in the
+  YAML contradicted by an actual cooldown of 6 — a contract mismatch. Also,
+  the verification behind that number checked
+  `TransientPhaseConfig.compute_transition_time()` directly, not the
+  complete accumulator-and-compile path. Both are corrected here: the runner
+  mapping now sets `cooldown.value=4` (not 5) so the *actual* cooldown is 5,
+  matching the declared contract exactly at `max_requests: 60` (not 61); and
+  every number in §3–§4 is now verified through
+  `GenerativeBenchmarkAccumulator.update_estimate()` and
+  `GenerativeMetrics.compile()` end to end (`ChatSmallExtendedBoundaryTests`
+  in `cli/tests/test_cli.py`, run — not skipped — against the pinned
+  GuideLLM 0.7.3 package), not through the boundary function alone.

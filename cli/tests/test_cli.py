@@ -121,10 +121,12 @@ class GuideLLMCommandTests(unittest.TestCase):
 
     def test_chat_small_extended_uses_explicit_request_count_phases_and_both_stopping_constraints(self) -> None:
         """Same workload as chat-small-v1 (tokens, single stream), but warmup/cooldown
-        are explicit request counts, not the percent/prefer_duration scheme, and the
-        request budget accounts for GuideLLM's own cooldown-boundary off-by-one
-        (verified separately in ChatSmallExtendedBoundaryTests) so that reaching the
-        budget yields exactly 50 measured requests."""
+        are explicit request counts, not the percent/prefer_duration scheme.
+        cooldown.value=4 (not the naively-expected 5) is the documented compensation
+        for GuideLLM's own cooldown-boundary off-by-one (a cooldown.value=N excludes
+        N+1 trailing requests, verified end to end in ChatSmallExtendedBoundaryTests),
+        so the *actual* excluded cooldown is 5, matching the declared contract exactly:
+        5 warmup + 50 measured + 5 cooldown = 60, not 61."""
         command = build_guidellm_command(
             endpoint="http://localhost:8000/v1",
             model="Qwen/Qwen3-4B",
@@ -132,14 +134,14 @@ class GuideLLMCommandTests(unittest.TestCase):
             raw_output_path=Path("/tmp/benchmarks.json"),
         )
         self.assertIn(
-            "kind=synchronous,warmup.value=5,warmup.mode=requests,cooldown.value=5,cooldown.mode=requests",
+            "kind=synchronous,warmup.value=5,warmup.mode=requests,cooldown.value=4,cooldown.mode=requests",
             command,
         )
         # Same workload as chat-small-v1: unchanged tokens and request format.
         self.assertIn("kind=synthetic_text,prompt_tokens=1024,output_tokens=256", command)
         # Both stopping constraints are present; whichever fires first ends the run,
         # so 90 minutes is a ceiling, not a mandatory runtime.
-        self.assertIn("kind=max_requests,count=61", command)
+        self.assertIn("kind=max_requests,count=60", command)
         self.assertIn("kind=max_duration,seconds=5400", command)
 
     def test_local_endpoint_is_redacted_before_evidence_is_written(self) -> None:
@@ -150,129 +152,161 @@ class GuideLLMCommandTests(unittest.TestCase):
         )
 
 
-def _guidellm_transient_phase_config():
-    """Import the pinned GuideLLM 0.7.3 class this profile's warmup/cooldown
-    accounting depends on. Skips the whole test class when GuideLLM is not
-    installed in the environment running this suite, matching this repo's
-    existing convention of stubbing GuideLLM out entirely rather than requiring
-    it (see ExecutionTests.runner() in test_ui.py)."""
+def _guidellm_full_pipeline_classes():
+    """Import the complete set of pinned GuideLLM 0.7.3 classes this profile's
+    accounting depends on: real scheduler-facing objects (RequestInfo,
+    SchedulerState/SchedulerProgress, GenerationRequest), the real accumulator
+    that processes scheduler events (GenerativeBenchmarkAccumulator), and the
+    real final-metrics compiler (GenerativeMetrics). Skips the whole test class
+    when GuideLLM is not installed, matching this repo's existing convention of
+    stubbing GuideLLM out entirely rather than requiring it (see
+    ExecutionTests.runner() in test_ui.py)."""
     try:
-        from guidellm.benchmark.schemas.base import TransientPhaseConfig
+        from guidellm.benchmark.schemas.accumulator import GenerativeBenchmarkAccumulator
+        from guidellm.benchmark.schemas.base import BenchmarkConfig, TransientPhaseConfig
+        from guidellm.benchmark.schemas.metrics import GenerativeMetrics
+        from guidellm.schemas.info import RequestInfo, RequestTimings
+        from guidellm.schemas.request import GenerationRequest
+        from guidellm.scheduler.schemas import SchedulerProgress, SchedulerState
+        from guidellm.scheduler.strategies import SynchronousStrategy
     except ImportError as error:
         raise unittest.SkipTest(f"GuideLLM is not installed in this environment: {error}") from None
-    return TransientPhaseConfig
+    return {
+        "GenerativeBenchmarkAccumulator": GenerativeBenchmarkAccumulator,
+        "BenchmarkConfig": BenchmarkConfig,
+        "TransientPhaseConfig": TransientPhaseConfig,
+        "GenerativeMetrics": GenerativeMetrics,
+        "RequestInfo": RequestInfo,
+        "RequestTimings": RequestTimings,
+        "GenerationRequest": GenerationRequest,
+        "SchedulerProgress": SchedulerProgress,
+        "SchedulerState": SchedulerState,
+        "SynchronousStrategy": SynchronousStrategy,
+    }
 
 
 class ChatSmallExtendedBoundaryTests(unittest.TestCase):
-    """Exercises the pinned GuideLLM 0.7.3 package's own warmup/cooldown boundary
-    code directly, with a simulated clock (synthetic per-request timestamps), rather
-    than assuming the profile's declared request counts translate literally. Skipped
+    """Drives the pinned GuideLLM 0.7.3 package's real scheduler-facing accumulator
+    (GenerativeBenchmarkAccumulator.update_estimate, fed with real RequestInfo/
+    SchedulerState/GenerationRequest objects for a synthetic, deterministic
+    sequential -- concurrency=1 -- request timeline) through to the real final
+    compiled metrics (GenerativeMetrics.compile()'s request_totals, itself backed
+    by the real get_within_range() overlap filter). This is the complete counting
+    path chat-small-extended-v1 depends on: checking compute_transition_time in
+    isolation is not enough, since the accumulator and the final compile step have
+    their own logic (event ordering, inclusive/exclusive timestamp boundaries,
+    the overlap filter) that a narrower test would not exercise. Skipped
     automatically wherever GuideLLM is not installed."""
 
     def setUp(self) -> None:
-        self.TransientPhaseConfig = _guidellm_transient_phase_config()
+        self.g = _guidellm_full_pipeline_classes()
 
-    def _simulate(self, configured_total: int, completed_count: int, warmup_value: int = 5, cooldown_value: int = 5):
-        """Replay `completed_count` sequential requests (concurrency=1) against
-        GuideLLM's real TransientPhaseConfig.compute_transition_time, with
-        `configured_total` fixed throughout as the --constraint max_requests value
-        (unaffected by how many requests actually complete before a cutoff, exactly
-        as the real scheduler's constraint config behaves). Returns
-        (first_measured_request, last_measured_request_or_None).
+    def _run_full_pipeline(self, configured_total: int, completed_count: int, warmup_value: int = 5, cooldown_value: int = 4):
+        """Replay `completed_count` sequential (concurrency=1), successful requests
+        through the real accumulator, with `configured_total` fixed throughout as
+        the --constraint max_requests value -- unaffected by how many requests
+        actually complete before a cutoff, exactly as the real scheduler's
+        constraint (`remaining_requests = max_num - state.processed_requests`,
+        confirmed in guidellm/scheduler/constraints/request.py) behaves. Returns
+        the real GenerativeMetrics.compile() result's request_totals.
         """
-        warmup = self.TransientPhaseConfig(value=warmup_value, mode="requests")
-        cooldown = self.TransientPhaseConfig(value=cooldown_value, mode="requests")
-
-        class FakeProgress:
-            def __init__(self, total_requests):
-                self.total_requests = total_requests
-                self.total_duration = None
-                self.remaining_requests = None
-
-        class FakeState:
-            def __init__(self, processed_requests, remaining_requests, total_requests):
-                self.start_time = 0.0
-                self.processed_requests = processed_requests
-                self.progress = FakeProgress(total_requests)
-                self.progress.remaining_requests = remaining_requests
-
-        class FakeInfo:
-            def __init__(self, started_at, completed_at):
-                self.started_at = started_at
-                self.completed_at = completed_at
-
-        first_measured = None
-        last_measured = None
+        warmup = self.g["TransientPhaseConfig"](value=warmup_value, mode="requests")
+        cooldown = self.g["TransientPhaseConfig"](value=cooldown_value, mode="requests")
+        config = self.g["BenchmarkConfig"](
+            run_id="test-run", run_index=0, strategy=self.g["SynchronousStrategy"](),
+            constraints={}, warmup=warmup, cooldown=cooldown,
+            profile={}, requests={}, backend={}, environment={},
+        )
+        accumulator = self.g["GenerativeBenchmarkAccumulator"](config=config)
         for i in range(1, completed_count + 1):
-            info = FakeInfo(float(i), float(i) + 0.5)
-            state = FakeState(processed_requests=i, remaining_requests=configured_total - i, total_requests=configured_total)
-            _, warm_time = warmup.compute_transition_time(info, state, "start")
-            _, cool_time = cooldown.compute_transition_time(info, state, "end")
-            if warm_time is not None and first_measured is None:
-                first_measured = i
-            if cool_time is not None:
-                last_measured = i
-        return first_measured, last_measured
+            # Sequential, non-overlapping, inclusive-at-both-ends per-request window:
+            # request i occupies [i - 1, i), matching concurrency=1 (one in flight
+            # at a time, back to back).
+            start, end = float(i - 1), float(i) - 0.01
+            request_id = f"req-{i}"
+            info = self.g["RequestInfo"](
+                request_id=request_id,
+                status="completed",
+                timings=self.g["RequestTimings"](
+                    targeted_start=start, queued=start, dequeued=start, scheduled_at=start,
+                    resolve_start=start, request_start=start,
+                    first_request_iteration=start + 0.001, first_token_iteration=start + 0.001,
+                    first_output_token_iteration=start + 0.001, last_token_iteration=end,
+                    last_request_iteration=end, request_iterations=1, token_iterations=1,
+                    request_end=end, resolve_end=end, finalized=end,
+                ),
+            )
+            # processed_requests/remaining_requests mirror the real constraint's
+            # own bookkeeping exactly (see docstring above): both are driven by
+            # how many requests have TERMINALLY completed so far, not by how many
+            # were merely dispatched.
+            state = self.g["SchedulerState"](
+                processed_requests=i, successful_requests=i, created_requests=i, queued_requests=i,
+                progress=self.g["SchedulerProgress"](remaining_requests=configured_total - i, total_requests=configured_total),
+            )
+            request = self.g["GenerationRequest"](request_id=request_id)
+            accumulator.update_estimate(None, request, info, state)
+        return self.g["GenerativeMetrics"].compile(accumulator).request_totals
 
     def test_warmup_of_five_excludes_exactly_five_requests(self) -> None:
-        first_measured, _ = self._simulate(configured_total=61, completed_count=61)
-        self.assertEqual(first_measured, 6)  # requests 1-5 are warmup; 6 is the first measured one
+        totals = self._run_full_pipeline(configured_total=60, completed_count=60)
+        self.assertEqual(totals.total, 50)  # 60 - 5 warmup - 5 cooldown
 
-    def test_cooldown_of_five_actually_excludes_six_not_five(self) -> None:
-        """The documented, verified GuideLLM 0.7.3 quirk this profile's accounting
-        corrects for: a cooldown.value=N excludes N+1 trailing requests, not N."""
-        _, last_measured = self._simulate(configured_total=61, completed_count=61)
-        self.assertEqual(last_measured, 55)  # requests 56-61 (six of them) are cooldown, not five
-        excluded_by_cooldown = 61 - last_measured
-        self.assertEqual(excluded_by_cooldown, 6)
+    def test_uncompensated_cooldown_of_five_actually_excludes_six_not_five(self) -> None:
+        """The documented, verified GuideLLM 0.7.3 quirk this profile's runner
+        mapping compensates for: asking for cooldown.value=N excludes N+1 trailing
+        requests, not N. Left uncompensated (cooldown.value=5, the naive
+        declared-value-as-input choice) at a total of 60, this falls one short."""
+        totals = self._run_full_pipeline(configured_total=60, completed_count=60, cooldown_value=5)
+        self.assertEqual(totals.total, 49)
 
-    def test_request_budget_of_61_yields_exactly_50_measured(self) -> None:
-        """The number chat-small-extended-v1 is built around: not the naive 60."""
-        first_measured, last_measured = self._simulate(configured_total=61, completed_count=61)
-        measured_count = last_measured - first_measured + 1
-        self.assertEqual(measured_count, 50)
-
-    def test_a_naive_budget_of_60_would_fall_one_short(self) -> None:
-        """Documents exactly why 60 is wrong, rather than only asserting 61 is right."""
-        first_measured, last_measured = self._simulate(configured_total=60, completed_count=60)
-        measured_count = last_measured - first_measured + 1
-        self.assertEqual(measured_count, 49)
+    def test_compensated_mapping_achieves_exactly_the_declared_five_warmup_fifty_measured_five_cooldown(self) -> None:
+        """The shipped runner mapping: cooldown.value=4 (not 5) at a total of 60
+        (not 61) -- the smallest correction that makes the runner's *actual*
+        behavior match the declared contract exactly, rather than inflating the
+        request budget to compensate. Verified end to end: real accumulator,
+        real final compiled metrics."""
+        totals = self._run_full_pipeline(configured_total=60, completed_count=60)
+        self.assertEqual(totals.successful, 50)
+        self.assertEqual(totals.incomplete, 0)
+        self.assertEqual(totals.errored, 0)
+        self.assertEqual(totals.total, 50)
+        # 60 total = 5 warmup + 50 measured + 5 (actual, compensated) cooldown.
+        excluded = 60 - totals.total
+        self.assertEqual(excluded, 10)
 
     def test_fast_run_stops_at_the_request_budget_without_a_nine_minute_warmup_wait(self) -> None:
         """Explicit request-count warmup ends as soon as 5 requests complete, however
         little wall-clock time that takes — unlike chat-small-v1's percent-of-duration
         scheme, which would always reserve a fixed 10% of the ceiling for warmup
-        regardless of how fast the requests actually complete."""
-        first_measured, last_measured = self._simulate(configured_total=61, completed_count=61)
-        # All 61 configured requests complete; the run stops there (the request-count
-        # constraint), never touching the 5400s ceiling. Warmup boundary in wall-clock
-        # terms is tied to the 5th request's completion, not to 10% of the ceiling.
-        self.assertEqual(first_measured, 6)
-        self.assertEqual(last_measured - first_measured + 1, 50)
+        regardless of how fast the requests actually complete. This simulation uses
+        request index as a stand-in clock (each request occupies one unit of time);
+        the boundary logic under test only cares about request counts, not the
+        absolute unit, so a fast real run (all 60 requests in well under a second)
+        hits this same request-count boundary, not a wall-clock one."""
+        totals = self._run_full_pipeline(configured_total=60, completed_count=60)
+        self.assertEqual(totals.total, 50)  # request-count constraint binds, not the 5400s ceiling
 
     def test_duration_limited_run_retains_partial_measured_requests_with_no_phantom_cooldown(self) -> None:
         """If the run is cut off by the duration ceiling before completing the full
-        61-request budget, cooldown's trailing-request trigger never fires (it needs
+        60-request budget, cooldown's trailing-request trigger never fires (it needs
         the configured total to actually be reached), so every completed request
         after warmup counts as measured -- partial evidence is retained, not discarded
         to an assumed cooldown window."""
         # 100 s/request against the 5400 s ceiling completes floor(5400/100) = 54 requests.
-        first_measured, last_measured = self._simulate(configured_total=61, completed_count=54)
-        self.assertIsNone(last_measured)  # cooldown boundary never triggered
-        self.assertEqual(first_measured, 6)
-        measured_count = 54 - (first_measured - 1)
-        self.assertEqual(measured_count, 49)  # below the acceptance minimum of 40? No -- but see next test.
+        totals = self._run_full_pipeline(configured_total=60, completed_count=54)
+        self.assertEqual(totals.incomplete, 0)
+        self.assertEqual(totals.successful, 49)  # 54 completed - 5 warmup, no cooldown ever triggered
+        self.assertGreaterEqual(totals.successful, 40)  # still meets acceptance
 
     def test_a_much_slower_duration_limited_run_falls_below_the_acceptance_minimum(self) -> None:
-        """A host slow enough to only complete 27 of the 61 requests in 5400s (200 s/req)
+        """A host slow enough to only complete 27 of the 60 requests in 5400s (200 s/req)
         still gets correctly-scoped partial evidence, but that evidence legitimately
         falls short of minimum_successful_requests: 40 -- the correct, honest outcome
         for hardware this slow, not a bug."""
-        first_measured, last_measured = self._simulate(configured_total=61, completed_count=27)
-        self.assertIsNone(last_measured)
-        measured_count = 27 - (first_measured - 1)
-        self.assertEqual(measured_count, 22)
-        self.assertLess(measured_count, 40)
+        totals = self._run_full_pipeline(configured_total=60, completed_count=27)
+        self.assertEqual(totals.successful, 22)
+        self.assertLess(totals.successful, 40)
 
 
 class RunIntentTests(unittest.TestCase):
@@ -1280,13 +1314,14 @@ class ResultPackagingTests(unittest.TestCase):
             )
 
 
-def _extended_report(successful: int, incomplete: int, errored: int, scheduler_total_multiplier_extra: int = 11) -> dict:
+def _extended_report(successful: int, incomplete: int, errored: int, scheduler_total_multiplier_extra: int = 10) -> dict:
     """Build a raw GuideLLM report shaped like a real chat-small-extended-v1 run:
-    scheduler_metrics spans the full warmup+measured+cooldown lifecycle (61 total
-    when the request budget is fully reached: 5 warmup + 50 measured + 6 actual
-    cooldown -- see ChatSmallExtendedBoundaryTests), while metrics.request_totals is
-    the measured-window-only figure the normalizer must report. Numbers here come
-    from the verified boundary simulation, not invented."""
+    scheduler_metrics spans the full warmup+measured+cooldown lifecycle (60 total
+    when the request budget is fully reached: 5 warmup + 50 measured + 5 actual
+    cooldown, thanks to the cooldown.value=4 compensation -- see
+    ChatSmallExtendedBoundaryTests), while metrics.request_totals is the
+    measured-window-only figure the normalizer must report. Numbers here come
+    from the verified full-pipeline simulation, not invented."""
     report = json.loads(json.dumps(GUIDELLM_REPORT_V2))
     measured_total = successful + incomplete + errored
     report["benchmarks"][0]["scheduler_metrics"]["requests_made"] = {
@@ -1332,38 +1367,78 @@ class ChatSmallExtendedPackagingTests(unittest.TestCase):
             self.assertTrue(result["benchmark"]["profile_sha256"].startswith("sha256:"))
 
     def test_fast_run_reaching_the_request_budget_reports_fifty_measured_and_meets_acceptance(self) -> None:
-        """Scenario (a): a fast/GPU-class run reaches the 61-request budget long before
+        """Scenario (a): a fast/GPU-class run reaches the 60-request budget long before
         the 5400 s ceiling; the reported figures are the measured-window-only 50, not
-        the full 61-request scheduler lifecycle total."""
+        the full 60-request scheduler lifecycle total."""
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             result = self._package(root, _extended_report(successful=50, incomplete=0, errored=0))
             self.assertEqual(result["results"]["requests"], {"attempted": 50, "succeeded": 50, "failed": 0})
             self.assertEqual(result["results"]["error_rate_percent"], 0.0)
 
-    def test_slower_run_that_fits_the_ceiling_reports_the_full_intended_sample(self) -> None:
-        """Scenario (b): hardware slow enough that the run takes most of the 90-minute
-        ceiling, but still completes the full request budget before hitting it -- same
-        reported figures as the fast case; duration was a ceiling, not a shortener."""
+    def test_one_attempted_request_failing_within_the_measured_window_yields_two_percent_error_rate_and_fails_acceptance(
+        self,
+    ) -> None:
+        """The "49/50" case, named for what it actually checks rather than for the
+        successful count alone: 50 requests were attempted inside the measured
+        window (49 successful + 1 incomplete -- request_totals.total, GuideLLM's own
+        overlap-filtered measured-window count, per the verified full-pipeline
+        simulation), so the one failure is NOT discarded just because it may have
+        been the request cut off by the 5400 s duration ceiling -- it is counted as
+        an attempt like any other, giving error_rate_percent = 100 * 1 / 50 = 2.0.
+        That 2% exceeds this profile's maximum_error_rate_percent (1, unchanged from
+        chat-small-v1 -- see the YAML), so acceptance MUST fail here even though
+        succeeded (49) alone clears minimum_successful_requests (40): the two
+        acceptance criteria are independent, and a passing successful-count does not
+        excuse a failing error rate. Compare
+        test_forty_nine_attempted_all_successful_passes_acceptance below, which has
+        the same successful count (49) but zero failures and passes."""
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
+            copy_repo_tree_for_registry_validation(root)
             result = self._package(root, _extended_report(successful=49, incomplete=1, errored=0))
             self.assertEqual(result["results"]["requests"], {"attempted": 50, "succeeded": 49, "failed": 1})
             self.assertEqual(result["results"]["error_rate_percent"], 2.0)
 
-    def test_duration_limited_run_retains_partial_evidence_and_still_meets_acceptance(self) -> None:
+            from omobench.ui_submission import validate_bundle
+
+            errors = validate_bundle(root, root / ".omobench-runs" / "run-fixture-1234")
+            self.assertTrue(
+                any("maximum_error_rate_percent (1" in e for e in errors), errors
+            )
+            self.assertFalse(
+                any("successful requests is below" in e for e in errors),
+                "the successful count (49) alone clears the minimum; only the error rate should fail",
+            )
+
+    def test_forty_nine_attempted_all_successful_passes_acceptance(self) -> None:
         """Scenario (c), positive case: cut off by the 5400 s ceiling before completing
-        the full 61-request budget (only 54 of 61 complete, per the verified
-        simulation), cooldown's trigger never fires, and the 49 measured requests that
-        did complete are retained and correctly judged as meeting acceptance
-        (49 >= 40, 0% <= 1%) -- a finished-but-partial run can still be submission-ready."""
+        the full 60-request budget (only 54 of 60 complete, per the verified
+        simulation), cooldown's trigger never fires, and the 49 requests that
+        attempted and completed within the measured window -- all 49 of them
+        successful, zero incomplete, zero errored -- are retained as evidence.
+        Exact measured counts: attempted 49, successful 49, incomplete 0, errored 0
+        (failed = incomplete + errored = 0), error_rate_percent = 0.0. Both
+        acceptance criteria pass independently: 49 >= minimum_successful_requests
+        (40), and 0.0% <= maximum_error_rate_percent (1%) -- a finished-but-partial
+        run can still be submission-ready. Compare
+        test_one_attempted_request_failing_within_the_measured_window_... above,
+        which has the same successful count (49) but one additional attempted-and-
+        failed request and correctly fails."""
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            report = _extended_report(successful=49, incomplete=0, errored=0, scheduler_total_multiplier_extra=6)
+            copy_repo_tree_for_registry_validation(root)
+            # scheduler_metrics total in a partial run = completed(54) = warmup(5) + this
+            # 49; no cooldown "extra" applies since cooldown never triggered.
+            report = _extended_report(successful=49, incomplete=0, errored=0, scheduler_total_multiplier_extra=5)
             result = self._package(root, report)
-            self.assertEqual(result["results"]["requests"]["succeeded"], 49)
-            self.assertGreaterEqual(result["results"]["requests"]["succeeded"], 40)
-            self.assertLessEqual(result["results"]["error_rate_percent"], 1.0)
+            self.assertEqual(result["results"]["requests"], {"attempted": 49, "succeeded": 49, "failed": 0})
+            self.assertEqual(result["results"]["error_rate_percent"], 0.0)
+
+            from omobench.ui_submission import validate_bundle
+
+            errors = validate_bundle(root, root / ".omobench-runs" / "run-fixture-1234")
+            self.assertEqual(errors, [], errors)
 
     def test_duration_limited_run_that_falls_short_is_correctly_rejected_by_acceptance(self) -> None:
         """Scenario (c), negative case: a host too slow to reach even 40 measured
@@ -1373,7 +1448,7 @@ class ChatSmallExtendedPackagingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             copy_repo_tree_for_registry_validation(root)
-            report = _extended_report(successful=22, incomplete=0, errored=0, scheduler_total_multiplier_extra=6)
+            report = _extended_report(successful=22, incomplete=0, errored=0, scheduler_total_multiplier_extra=5)
             result = self._package(root, report)
             self.assertEqual(result["results"]["requests"]["succeeded"], 22)
 
@@ -1391,9 +1466,9 @@ class ChatSmallExtendedPackagingTests(unittest.TestCase):
             root = Path(temporary_directory)
             report = _extended_report(successful=50, incomplete=0, errored=0)
             scheduler_total = report["benchmarks"][0]["scheduler_metrics"]["requests_made"]["total"]
-            self.assertEqual(scheduler_total, 61)  # the full 5 + 50 + 6 lifecycle
+            self.assertEqual(scheduler_total, 60)  # the full 5 + 50 + 5 lifecycle
             result = self._package(root, report)
-            self.assertEqual(result["results"]["requests"]["attempted"], 50)  # not 61
+            self.assertEqual(result["results"]["requests"]["attempted"], 50)  # not 60
 
     def test_packaging_and_registry_validation_use_the_new_profiles_own_id_and_hash(self) -> None:
         """Never conflated with chat-small-v1: distinct profile_id, distinct
