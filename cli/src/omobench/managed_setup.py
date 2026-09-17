@@ -400,13 +400,119 @@ def _disk_usage(path: Path) -> tuple[Path, int] | None:
         current = current.parent
 
 
+# --------------------------------------------------------------------------
+# Storage-space verification: WSL2's own virtual disk vs. a real backing drive
+# --------------------------------------------------------------------------
+
+# WSL2 exposes real Windows drives -- whichever letters happen to be mounted,
+# never assumed to be C: -- under /mnt/<letter>, using one of these
+# filesystem types. shutil.disk_usage() there passes through to the real
+# Windows volume's own free space, exactly like a native Linux mount.
+WINDOWS_DRIVE_FSTYPES = {"9p", "drvfs"}
+
+UNVERIFIED_WSL_SPACE_NOTE = (
+    "This folder is on WSL2's own internal virtual disk, not a mounted Windows drive. The free space "
+    "shown is that virtual filesystem's own reported capacity, which can be larger than what the Windows "
+    "drive actually backing it can provide -- whether there is truly enough room is unverified from here. "
+    "A folder under a mounted Windows drive (for example /mnt/c/... or /mnt/d/...) can be checked reliably."
+)
+
+
+def _running_under_wsl() -> bool:
+    """Best-effort, read-only WSL2 detection: environment variables WSL2 sets,
+    then the kernel's own release string. Never mounts or changes anything."""
+    if os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"):
+        return True
+    try:
+        return "microsoft" in Path("/proc/version").read_text(encoding="utf-8", errors="replace").lower()
+    except OSError:
+        return False
+
+
+def _read_proc_mounts() -> list[tuple[str, str]]:
+    """(mount_point, fstype) pairs from /proc/mounts. Read-only; [] where
+    unavailable, for example on a non-Linux platform."""
+    try:
+        lines = Path("/proc/mounts").read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    pairs = []
+    for line in lines:
+        fields = line.split()
+        if len(fields) >= 3:
+            pairs.append((fields[1], fields[2]))
+    return pairs
+
+
+def _on_a_mounted_windows_drive(path: Path, mounts: list[tuple[str, str]]) -> bool:
+    """True when `path` resolves under the longest-matching mount whose
+    filesystem type is a real Windows-drive mount (see WINDOWS_DRIVE_FSTYPES).
+    Identifies the actual mounted drive from /proc/mounts; never assumes C:.
+    """
+    resolved = path.resolve().as_posix()
+    best_match: tuple[str, str] | None = None
+    for mount_point, fstype in mounts:
+        if mount_point == "/" or resolved == mount_point or resolved.startswith(mount_point.rstrip("/") + "/"):
+            if best_match is None or len(mount_point) > len(best_match[0]):
+                best_match = (mount_point, fstype)
+    return best_match is not None and best_match[1] in WINDOWS_DRIVE_FSTYPES
+
+
+def storage_space_status(path: Path) -> dict[str, Any]:
+    """Free space for `path`, honest about what can and cannot be verified.
+
+    A path under a real, mounted Windows drive reports disk usage that
+    passes through to that actual volume, exactly like ordinary native Linux:
+    verified. A path on WSL2's own internal virtual filesystem reports that
+    virtual filesystem's own capacity, which is not necessarily how much room
+    the Windows host can actually give it -- reported as unverified rather
+    than a confident "enough space". Never resizes, mounts, or changes
+    anything; read-only throughout.
+    """
+    usage = _disk_usage(path)
+    free_bytes = usage[1] if usage else None
+    if free_bytes is None:
+        return {"free_space_bytes": None, "free_space_verified": True, "space_note": None}
+    if not _running_under_wsl() or _on_a_mounted_windows_drive(path, _read_proc_mounts()):
+        return {"free_space_bytes": free_bytes, "free_space_verified": True, "space_note": None}
+    return {"free_space_bytes": free_bytes, "free_space_verified": False, "space_note": UNVERIFIED_WSL_SPACE_NOTE}
+
+
+def _cached_download_is_verified(storage_dir: Path, filename: str, size_bytes: int, sha256: str) -> bool:
+    """Whether a byte-identical, hash-verified copy of this file already sits
+    in this storage folder's shared downloads/ cache -- independent of which
+    recipe (if any) put it there. Both recipes in this catalog pin identical
+    model and runtime filenames, so installing one already satisfies the
+    other's download step for that file; this is how that reuse is detected,
+    honestly, rather than assumed. Read-only: only hashes a file that already
+    matches the expected size, and never downloads, writes, or deletes."""
+    final_path = managed_root(storage_dir) / "downloads" / filename
+    if not final_path.is_file() or final_path.stat().st_size != size_bytes:
+        return False
+    return sha256_of_file(final_path) == sha256
+
+
 def review(root: Path, recipe_id: str, storage_dir: Path) -> dict[str, Any]:
     """Read-only report of what a download/install would do. Makes no network calls."""
     recipe = get_recipe(root, recipe_id)
     platform_status = check_platform()
-    usage = _disk_usage(storage_dir)
-    free_bytes = usage[1] if usage else None
+    space = storage_space_status(storage_dir)
+    free_bytes = space["free_space_bytes"]
     required_bytes = recipe["model"]["size_bytes"] + recipe["runtime"]["max_extracted_bytes"]
+
+    # Total artifact size (what these two files weigh) vs. bytes this storage
+    # folder still actually needs to download (0 for any file it can already
+    # verify in its shared cache) are two different numbers; conflating them
+    # would describe a cache hit as a fresh multi-gigabyte download.
+    model_cached = _cached_download_is_verified(
+        storage_dir, recipe["model"]["filename"], recipe["model"]["size_bytes"], recipe["model"]["sha256"]
+    )
+    runtime_cached = _cached_download_is_verified(
+        storage_dir, recipe["runtime"]["filename"], recipe["runtime"]["size_bytes"], recipe["runtime"]["sha256"]
+    )
+    bytes_to_download = (0 if model_cached else recipe["model"]["size_bytes"]) + (
+        0 if runtime_cached else recipe["runtime"]["size_bytes"]
+    )
 
     installed_state: dict[str, Any] = {"installed": False, "valid": None, "error": None}
     manifest = read_manifest(storage_dir, recipe_id)
@@ -440,6 +546,7 @@ def review(root: Path, recipe_id: str, storage_dir: Path) -> dict[str, Any]:
                 "sha256": recipe["model"]["sha256"],
                 "size_bytes": recipe["model"]["size_bytes"],
                 "licence": recipe["model"]["licence"],
+                "already_cached": model_cached,
             },
             {
                 "kind": "runtime",
@@ -451,14 +558,18 @@ def review(root: Path, recipe_id: str, storage_dir: Path) -> dict[str, Any]:
                 "sha256": recipe["runtime"]["sha256"],
                 "size_bytes": recipe["runtime"]["size_bytes"],
                 "licence": recipe["runtime"]["licence"],
+                "already_cached": runtime_cached,
             },
         ],
         "platform": {"ok": platform_status.ok, "message": platform_status.message},
         "storage_dir": str(storage_dir),
         "storage_dir_exists": storage_dir.exists(),
+        "bytes_to_download": bytes_to_download,
         "free_space_bytes": free_bytes,
+        "free_space_verified": space["free_space_verified"],
+        "space_note": space["space_note"],
         "required_bytes": required_bytes,
-        "has_enough_space": None if free_bytes is None else free_bytes >= required_bytes,
+        "has_enough_space": None if (free_bytes is None or not space["free_space_verified"]) else free_bytes >= required_bytes,
         "already_installed": installed_state,
     }
 

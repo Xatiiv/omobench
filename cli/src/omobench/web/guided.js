@@ -136,11 +136,11 @@ async function loadRecipes() {
     const minutes = recipe.max_duration_seconds ? Math.round(recipe.max_duration_seconds / 60) : null;
     const badge = recipe.id === recommendedId ? '<span class="badge">Recommended for slower hardware</span>' : "";
     const duration = minutes
-      ? `Maximum ${minutes} minutes — it stops as soon as it collects enough measured requests, which may be well before that.`
-      : "Duration bounded by its profile.";
+      ? `Ends at its configured request or time limit — up to ${minutes} minutes — whichever comes first; it may finish earlier.`
+      : "Ends at its own configured request or time limit; it may finish earlier.";
     card.innerHTML = `${badge}<h3>${recipe.title}</h3>
       <p class="hint">Model ${recipe.model_id} (${recipe.quantization}) · ${recipe.execution_device.toUpperCase()} only</p>
-      <p class="hint">${recipe.max_requests ? `Up to ${recipe.max_requests} measured requests. ` : ""}${duration}</p>`;
+      <p class="hint">${recipe.measured_requests ? `Targets ${recipe.measured_requests} measured requests. ` : ""}${duration}</p>`;
     card.addEventListener("click", () => action(() => chooseRecipe(recipe.id)));
     list.append(card);
   });
@@ -154,6 +154,7 @@ async function chooseRecipe(recipeId) {
   $("summary-checking").hidden = false;
   $("summary-body").hidden = true;
   $("storage-dir").value = storageDir;
+  $("storage-location-editor").hidden = true;
   await doReview();
 }
 
@@ -232,17 +233,37 @@ function renderSummary(report) {
   const facts = $("summary-facts");
   facts.replaceChildren();
   const totalBytes = report.files.reduce((sum, file) => sum + (file.size_bytes || 0), 0);
+  const bytesToDownload = report.bytes_to_download ?? totalBytes;
   const minutes = recipe.max_duration_seconds ? Math.round(recipe.max_duration_seconds / 60) : null;
   const alreadyInstalledValid = report.already_installed.installed && report.already_installed.valid;
+
+  // Total artifact size vs. bytes this folder still actually needs to
+  // download are different numbers: a file already verified in the shared
+  // downloads/ cache (for example because the other recipe installed it
+  // first) is reused, not re-fetched, even when this recipe itself still
+  // needs local preparation (extracting the runtime, writing its manifest).
+  const cachedKinds = report.files.filter((file) => file.already_cached).map((file) => file.kind);
+  let downloadLine;
+  if (cachedKinds.length === report.files.length) {
+    downloadLine = `${formatBytes(totalBytes)} total — every file already verified in this folder's cache; nothing left to download.`
+      + (alreadyInstalledValid ? "" : " This recipe still needs local preparation (extracting the runtime) before it can run.");
+  } else if (cachedKinds.length > 0) {
+    downloadLine = `${formatBytes(totalBytes)} total, ${formatBytes(bytesToDownload)} still to download `
+      + `(${cachedKinds.join(" and ")} already verified in this folder's cache and reused).`;
+  } else {
+    downloadLine = `${formatBytes(totalBytes)} total to download.`;
+  }
+
   const entries = [
     ["Model", `${report.recipe.model_id} (${report.recipe.quantization})`],
     ["Execution device", report.recipe.execution_device.toUpperCase() + " only"],
-    ["Download size", alreadyInstalledValid ? `${formatBytes(totalBytes)} (already installed and verified — nothing to re-download)` : formatBytes(totalBytes)],
+    ["Download size", downloadLine],
     ["Storage destination", report.storage_dir + (report.storage_dir_exists ? "" : " (will be created)")],
     ["Licences", report.files.map((file) => `${file.kind}: ${file.licence}`).join(" · ")],
+    ["Measured requests target", recipe.measured_requests ? String(recipe.measured_requests) : "Set by the profile."],
     ["Maximum duration", minutes
-      ? `${minutes} minutes — the run stops as soon as it collects enough measured requests, which may be well before this ceiling.`
-      : "Bounded by the profile."],
+      ? `${minutes} minutes — the run ends at its configured request or time limit, whichever comes first; it may finish before the time limit.`
+      : "Bounded by the profile's own request or time limit."],
   ];
   entries.forEach(([label, value]) => {
     const dt = document.createElement("dt"), dd = document.createElement("dd");
@@ -255,14 +276,22 @@ function renderSummary(report) {
       : "");
   $("platform-message").classList.toggle("error", !report.platform.ok || (report.already_installed.installed && !report.already_installed.valid));
 
-  $("space-message").textContent = report.has_enough_space === false
-    ? `Not enough free space: ${formatBytes(report.free_space_bytes)} free, ${formatBytes(report.required_bytes)} required.`
-    : report.has_enough_space === null
-      ? "Could not determine free space for this folder."
-      : alreadyInstalledValid
-        ? `Free space: ${formatBytes(report.free_space_bytes)}.`
-        : `Free space: ${formatBytes(report.free_space_bytes)} (${formatBytes(report.required_bytes)} required) — enough space.`;
-  $("space-message").classList.toggle("error", report.has_enough_space === false);
+  // Free space has three distinct states, not two: known-and-trustworthy,
+  // known-but-unverifiable (WSL2's own virtual disk, whose reported capacity
+  // can exceed what the Windows drive backing it can actually provide), and
+  // unknown. Only the first ever claims "enough space".
+  const spaceMessage = $("space-message");
+  spaceMessage.classList.remove("error");
+  if (report.free_space_verified === false) {
+    spaceMessage.textContent = `Virtual filesystem free space: ${formatBytes(report.free_space_bytes)} (${formatBytes(report.required_bytes)} required). ${report.space_note || "This has not been verified against the actual backing drive."}`;
+  } else if (report.free_space_bytes === null || report.free_space_bytes === undefined) {
+    spaceMessage.textContent = "Could not determine free space for this folder.";
+  } else if (report.has_enough_space === false) {
+    spaceMessage.textContent = `Not enough free space: ${formatBytes(report.free_space_bytes)} free, ${formatBytes(report.required_bytes)} required.`;
+    spaceMessage.classList.add("error");
+  } else {
+    spaceMessage.textContent = `Free space: ${formatBytes(report.free_space_bytes)} (${formatBytes(report.required_bytes)} required) — enough space.`;
+  }
 
   $("review-files").replaceChildren();
   report.files.forEach((file) => {
@@ -554,6 +583,11 @@ async function enterShareScreen() {
 
 // -- Wiring ----------------------------------------------------------------
 
+$("change-location-button").addEventListener("click", () => {
+  const editor = $("storage-location-editor");
+  editor.hidden = !editor.hidden;
+  if (!editor.hidden) $("storage-dir").focus();
+});
 $("recheck-button").addEventListener("click", () => action(doReview));
 $("start-button").addEventListener("click", () => action(doStart));
 $("cancel-button").addEventListener("click", () => action(cancelActive));

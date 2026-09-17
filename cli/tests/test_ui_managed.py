@@ -129,6 +129,23 @@ class GuidedServiceTests(unittest.TestCase):
         self.assertEqual(recipes["qwen3-4b-cpu-extended-v1"]["max_duration_seconds"], 5400)
         self.assertEqual(recipes["qwen3-4b-cpu-extended-v1"]["max_requests"], 60)
 
+    def test_recipes_expose_the_declared_measured_request_target_not_the_runner_budget(self):
+        """Regression: max_requests is the runner's total request budget,
+        including warmup/cooldown (60 for the extended profile) -- the guided
+        page must label its "measured requests" from measured_requests, the
+        profile's own declared target (benchmarks/profiles/<id>.yaml), which
+        stays 50 for both recipes even though their runner budgets differ."""
+        _, _, body = self.request("/api/managed/recipes", self.auth())
+        recipes = {r["id"]: r for r in json.loads(body)["recipes"]}
+        self.assertEqual(recipes["qwen3-4b-cpu-v1"]["measured_requests"], 50)
+        self.assertEqual(recipes["qwen3-4b-cpu-extended-v1"]["measured_requests"], 50)
+        # The mismatch this regression guards against: max_requests (the
+        # runner budget) must not be confused with measured_requests here.
+        self.assertNotEqual(
+            recipes["qwen3-4b-cpu-extended-v1"]["max_requests"],
+            recipes["qwen3-4b-cpu-extended-v1"]["measured_requests"],
+        )
+
     def test_managed_run_requires_token_too(self):
         headers = {"Content-Type": "application/json"}
         status, _, _ = self.request(

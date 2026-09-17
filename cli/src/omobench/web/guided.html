@@ -55,12 +55,15 @@
             <dl class="kv" id="summary-facts"></dl>
             <p id="platform-message" class="notice"></p>
             <p id="space-message" class="muted"></p>
-            <label>Storage folder
-              <input id="storage-dir" spellcheck="false" placeholder="/mnt/d/OmoBench">
-              <span class="hint">Large model and runtime files are kept here, under <code>omobench-managed-v1/</code>.
-                Use an absolute path in the form your current environment expects. Changing this re-checks the recipe.</span>
-            </label>
-            <div class="actions"><button id="recheck-button" type="button" class="secondary">Re-check this folder</button></div>
+            <div class="actions"><button id="change-location-button" type="button" class="secondary">Change location</button></div>
+            <div id="storage-location-editor" hidden>
+              <label>Storage folder
+                <input id="storage-dir" spellcheck="false" placeholder="/mnt/d/OmoBench">
+                <span class="hint">Large model and runtime files are kept here, under <code>omobench-managed-v1/</code>.
+                  Use an absolute path in the form your current environment expects.</span>
+              </label>
+              <div class="actions"><button id="recheck-button" type="button" class="secondary">Re-check this folder</button></div>
+            </div>
             <p id="storage-error" class="notice error" role="status" hidden></p>
             <details id="technical-details-review"><summary>Technical details <span class="hint">Exact files, hashes, and revisions</span></summary>
               <div id="review-files"></div>

@@ -43,6 +43,20 @@ class ManagedController:
 
     # -- recipes and defaults -------------------------------------------------
 
+    def _profile_definition(self, profile_id: str) -> dict[str, Any]:
+        """The profile's own declared workload (benchmarks/profiles/<id>.yaml),
+        read for display only -- never fed into command construction or
+        acceptance checks, which continue to come from cli.PROFILE_SPECS (the
+        runner mapping) and the profile's own acceptance section, unchanged."""
+        import yaml
+
+        path = self.root / "benchmarks" / "profiles" / f"{profile_id}.yaml"
+        try:
+            document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, yaml.YAMLError):
+            return {}
+        return document if isinstance(document, dict) else {}
+
     def recipes(self) -> list[dict]:
         from . import cli as omobench_cli
         from . import managed_setup
@@ -54,6 +68,7 @@ class ManagedController:
         results = []
         for recipe in loaded:
             spec = omobench_cli.PROFILE_SPECS.get(recipe["benchmark_profile"], {})
+            execution = self._profile_definition(recipe["benchmark_profile"]).get("execution", {})
             results.append(
                 {
                     "id": recipe["id"],
@@ -69,7 +84,18 @@ class ManagedController:
                     # longest ceiling among same-device recipes) instead of a
                     # hard-coded recipe id.
                     "max_duration_seconds": spec.get("max_duration_seconds"),
+                    # The runner's own request budget (cli.PROFILE_SPECS), which
+                    # includes warmup/cooldown and so can exceed the profile's
+                    # declared measured-request target -- kept for anything that
+                    # needs the literal --constraint value, but the UI must not
+                    # display this as "measured requests"; see measured_requests.
                     "max_requests": spec.get("max_requests"),
+                    # The profile's own declared measured-request target
+                    # (benchmarks/profiles/<id>.yaml execution.measured_requests),
+                    # excluding warmup/cooldown -- what the guided page shows as
+                    # "measured requests". For chat-small-extended-v1 this is 50,
+                    # even though its runner budget (max_requests, above) is 60.
+                    "measured_requests": execution.get("measured_requests"),
                 }
             )
         return results
