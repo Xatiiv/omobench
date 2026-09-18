@@ -535,22 +535,41 @@ def run_generative_benchmark_with_telemetry(
     subprocess path in that case, so a telemetry-adapter problem never
     prevents the benchmark from running.
     """
-    import guidellm.cli  # noqa: F401
-    from guidellm.utils.console import Console
+    # Everything through here -- including opening the log file -- is still
+    # pure setup: no request has been sent and benchmark_generative_text has
+    # not been invoked, so any failure in this block is exactly as safe to
+    # fall back from as a failure inside resolve_benchmark_scenario() itself
+    # (the caller's plain-subprocess fallback will (re)open the same,
+    # still-untouched log path itself). Once this block succeeds, the
+    # boundary is crossed: nothing below here may raise TelemetryUnavailable,
+    # so nothing below here can trigger a second, duplicate attempt.
+    try:
+        import guidellm.cli  # noqa: F401
+        from guidellm.utils.console import Console
 
-    scenario = resolve_benchmark_scenario(argv)
-    real_entrypoint = sys.modules["guidellm.benchmark.entrypoints"].benchmark_generative_text
+        scenario = resolve_benchmark_scenario(argv)
+        real_entrypoint = sys.modules["guidellm.benchmark.entrypoints"].benchmark_generative_text
 
-    writer = TelemetryWriter(
-        snapshot_path=snapshot_path,
-        history_path=history_path,
-        min_interval=min_emit_interval,
-        history_maxlen=history_maxlen,
-    )
-    observer = build_progress_observer(writer, run_label=run_label, total_measured_requests=total_measured_requests)
-
-    with stdout_log_path.open("w", encoding="utf-8") as log_file:
+        writer = TelemetryWriter(
+            snapshot_path=snapshot_path,
+            history_path=history_path,
+            min_interval=min_emit_interval,
+            history_maxlen=history_maxlen,
+        )
+        observer = build_progress_observer(writer, run_label=run_label, total_measured_requests=total_measured_requests)
+        log_file = stdout_log_path.open("w", encoding="utf-8")
         console = Console(file=log_file)
+    except TelemetryUnavailable:
+        raise
+    except Exception as error:  # noqa: BLE001 - still setup-time: nothing sent, nothing written yet
+        raise TelemetryUnavailable(f"Could not set up telemetry: {error}") from error
+
+    # From here on, execution has genuinely started (or is about to): any
+    # failure is a real benchmark failure or cancellation, reported exactly
+    # like the plain subprocess path's own nonzero exit code -- never a
+    # second attempt, and never a silent overwrite of anything this run
+    # itself already wrote.
+    with log_file:
         try:
             outcome = _run_coroutine_cancellable_by_sigterm(
                 real_entrypoint(args=scenario, progress=observer, console=console)

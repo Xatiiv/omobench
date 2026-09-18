@@ -550,7 +550,10 @@ def run_guidellm_command(
             run_label=profile_id,
             total_measured_requests=profile_measured_requests(root, profile_id),
         )
-    except telemetry_module.TelemetryUnavailable as error:
+    except (telemetry_module.TelemetryUnavailable, OSError) as error:
+        # OSError here can only come from telemetry_dir.mkdir() above, which
+        # runs before anything else in this block -- equally pre-execution,
+        # equally safe to fall back from.
         with log_path.open("w", encoding="utf-8") as log_file:
             log_file.write(f"OmoBench: live telemetry unavailable ({error}); running without it.\n")
             log_file.flush()

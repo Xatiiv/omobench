@@ -13,6 +13,7 @@ import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 from omobench import cli, telemetry
 
@@ -217,6 +218,152 @@ class ConfigurationEquivalenceTests(unittest.TestCase):
         first = telemetry.scenario_equivalence_summary(telemetry.resolve_benchmark_scenario(argv))
         second = telemetry.scenario_equivalence_summary(telemetry.resolve_benchmark_scenario(argv))
         self.assertEqual(first, second)
+
+
+class SetupTimeFallbackBoundaryTests(unittest.TestCase):
+    """The fallback-to-plain-subprocess boundary must cover *all* setup --
+    not only a failure inside resolve_benchmark_scenario() -- and must stop
+    being available the instant real_entrypoint (benchmark_generative_text)
+    is actually invoked. Regression for a gap where a failure constructing
+    the observer, or opening the log file, escaped as a raw exception
+    instead of the TelemetryUnavailable the caller (cli.run_guidellm_command)
+    knows how to fall back from."""
+
+    def setUp(self):
+        _skip_unless_guidellm_pinned()
+
+    def test_a_failure_after_scenario_resolution_still_raises_telemetryunavailable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            argv = _fixture_argv(endpoint="http://127.0.0.1:9", output_path=root / "out.json")
+            with patch("omobench.telemetry.build_progress_observer", side_effect=RuntimeError("boom")):
+                with self.assertRaises(telemetry.TelemetryUnavailable):
+                    telemetry.run_generative_benchmark_with_telemetry(
+                        argv,
+                        snapshot_path=root / "telemetry.json",
+                        history_path=root / "telemetry-history.json",
+                        stdout_log_path=root / "guidellm.stdout.log",
+                        run_label="test-run",
+                        total_measured_requests=50,
+                    )
+            # This really was pure setup: nothing was sent and nothing was
+            # written, so it is exactly as safe to fall back from as a
+            # failure inside resolve_benchmark_scenario() itself -- and the
+            # caller's own fallback (re-)creates this same log path itself.
+            self.assertFalse((root / "guidellm.stdout.log").exists())
+            self.assertFalse((root / "telemetry.json").exists())
+
+    def test_a_failure_opening_the_log_file_also_raises_telemetryunavailable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            argv = _fixture_argv(endpoint="http://127.0.0.1:9", output_path=root / "out.json")
+            unwritable_log_path = root / "does" / "not" / "exist" / "guidellm.stdout.log"
+            with self.assertRaises(telemetry.TelemetryUnavailable):
+                telemetry.run_generative_benchmark_with_telemetry(
+                    argv,
+                    snapshot_path=root / "telemetry.json",
+                    history_path=root / "telemetry-history.json",
+                    stdout_log_path=unwritable_log_path,
+                    run_label="test-run",
+                    total_measured_requests=50,
+                )
+
+    def test_a_failure_once_real_execution_has_started_is_not_reported_as_telemetryunavailable(self):
+        """Once the boundary is crossed, a failure is a real benchmark
+        failure (returned as an int), never converted back into
+        TelemetryUnavailable -- confirming the fallback window truly closes
+        once benchmark_generative_text has been invoked."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            argv = _fixture_argv(endpoint="http://127.0.0.1:9", output_path=root / "out.json")
+            with patch(
+                "omobench.telemetry._run_coroutine_cancellable_by_sigterm",
+                side_effect=RuntimeError("a real, mid-execution failure"),
+            ):
+                returncode = telemetry.run_generative_benchmark_with_telemetry(
+                    argv,
+                    snapshot_path=root / "telemetry.json",
+                    history_path=root / "telemetry-history.json",
+                    stdout_log_path=root / "guidellm.stdout.log",
+                    run_label="test-run",
+                    total_measured_requests=50,
+                )
+            self.assertEqual(returncode, 1)
+            self.assertIn("benchmark execution failed", (root / "guidellm.stdout.log").read_text())
+
+
+class RunGuidellmCommandFallbackTests(unittest.TestCase):
+    """cli.run_guidellm_command()'s own consumption of that boundary: a
+    setup-time telemetry problem must fall back to the plain subprocess
+    exactly once -- never crash, never run twice."""
+
+    def test_telemetry_dir_none_never_imports_the_telemetry_module(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "log.txt"
+            returncode = cli.run_guidellm_command(
+                [sys.executable, "-c", "print('plain subprocess ran')"],
+                log_path=log_path, root=Path(tmp), profile_id="chat-small-v1", telemetry_dir=None,
+            )
+            self.assertEqual(returncode, 0)
+            self.assertIn("plain subprocess ran", log_path.read_text())
+
+    def test_guidellm_on_path_from_a_different_environment_skips_telemetry_entirely(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "log.txt"
+            telemetry_dir = Path(tmp) / "telemetry"
+            with patch("omobench.cli.shutil.which", return_value="/some/unrelated/bin/guidellm"):
+                returncode = cli.run_guidellm_command(
+                    [sys.executable, "-c", "print('plain subprocess ran')"],
+                    log_path=log_path, root=Path(tmp), profile_id="chat-small-v1", telemetry_dir=telemetry_dir,
+                )
+            self.assertEqual(returncode, 0)
+            self.assertIn("plain subprocess ran", log_path.read_text())
+            self.assertFalse(telemetry_dir.exists())
+
+    def test_a_setup_time_telemetry_failure_falls_back_exactly_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "log.txt"
+            telemetry_dir = Path(tmp) / "telemetry"
+            # A real "guidellm run ..." command (satisfies argv_for_run_command's
+            # own precondition), but subprocess.run itself is mocked so the
+            # fallback's actual process launch is fully controlled here rather
+            # than really invoking guidellm a second time.
+            command = ["guidellm", "run", "--backend", "irrelevant-to-this-test"]
+
+            def fake_subprocess_run(cmd, *, stdout, **_kwargs):
+                self.assertEqual(cmd, command)  # the exact original command, unmodified
+                stdout.write("plain subprocess ran\n")
+                return type("Result", (), {"returncode": 0})()
+
+            with patch("omobench.cli.shutil.which", return_value=sys.executable), patch(
+                "omobench.telemetry.run_generative_benchmark_with_telemetry",
+                side_effect=telemetry.TelemetryUnavailable("simulated setup-time failure"),
+            ), patch("omobench.cli.subprocess.run", side_effect=fake_subprocess_run) as run_mock:
+                returncode = cli.run_guidellm_command(
+                    command, log_path=log_path, root=Path(tmp), profile_id="chat-small-v1", telemetry_dir=telemetry_dir,
+                )
+            self.assertEqual(returncode, 0)
+            run_mock.assert_called_once()  # exactly one attempt, never a duplicate
+            log_text = log_path.read_text()
+            self.assertIn("live telemetry unavailable", log_text)
+            self.assertIn("plain subprocess ran", log_text)
+
+    def test_a_telemetry_dir_creation_failure_also_falls_back_cleanly(self):
+        """telemetry_dir.mkdir() runs before anything telemetry-specific;
+        an OSError there (for example a permissions problem) must fall back
+        exactly like a TelemetryUnavailable, not crash write_local_run."""
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "log.txt"
+            telemetry_dir = Path(tmp) / "telemetry"
+            with patch("omobench.cli.shutil.which", return_value=sys.executable), patch.object(
+                Path, "mkdir", side_effect=PermissionError("simulated permission error"),
+            ):
+                returncode = cli.run_guidellm_command(
+                    [sys.executable, "-c", "print('plain subprocess ran')"],
+                    log_path=log_path, root=Path(tmp), profile_id="chat-small-v1", telemetry_dir=telemetry_dir,
+                )
+            self.assertEqual(returncode, 0)
+            self.assertIn("plain subprocess ran", log_path.read_text())
 
 
 class EtaEstimationTests(unittest.TestCase):
