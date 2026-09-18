@@ -2,16 +2,23 @@
 
 const $ = (id) => document.getElementById(id);
 
+// "warmup"/"benchmarking"/"cooldown"/"saving" are only ever reached with real
+// support from GuideLLM's own accumulator.timings.status and progress hooks
+// (see telemetry.py); when telemetry is unavailable, execution collapses to
+// the generic "benchmarking" -- never invented.
 const STAGES = [
   { key: "checking", label: "Checking system" },
   { key: "downloading", label: "Downloading verified files" },
   { key: "verifying", label: "Verifying files" },
   { key: "loading_model", label: "Loading the model" },
+  { key: "warmup", label: "Warming up" },
   { key: "benchmarking", label: "Running the benchmark" },
+  { key: "cooldown", label: "Cooling down" },
   { key: "saving", label: "Saving results" },
 ];
 const SETUP_ACTIVE = new Set(["preparing", "cancelling"]);
 const RUN_ACTIVE = new Set(["starting_server", "waiting_ready", "running_benchmark", "cancelling"]);
+const STALE_TELEMETRY_SECONDS = 20;
 
 let setup = null;
 let recipes = [];
@@ -28,6 +35,8 @@ let lastKnownStageIndex = 0;
 let preview = null;
 let pending = false;
 let timers = [];
+let logAutoFollow = true;
+let lastLogText = "";
 
 const incoming = new URLSearchParams(location.hash.slice(1)).get("token");
 if (incoming) {
@@ -176,7 +185,11 @@ async function loadRecentRuns() {
     $("cancel-button").hidden = false;
     $("start-over-button").hidden = true;
     $("run-error").hidden = true;
-    notice("Reconnected to a run already in progress on this panel.");
+    const recipe = recipesById[selectedRecipeId];
+    $("dashboard-subtitle").textContent = recipe
+      ? `${recipe.model_id} (${recipe.quantization}) · ${recipe.benchmark_profile} · ${recipe.execution_device.toUpperCase()}`
+      : "";
+    notice("Reconnected to a run already in progress on this panel. Its graph and progress resume below.");
     pollFlow();
     return;
   }
@@ -336,7 +349,16 @@ async function doStart() {
   $("progress-panel").hidden = false;
   renderStageList(0, false);
   $("server-log-wrap").hidden = true;
+  lastLogText = "";
+  logAutoFollow = true;
+  $("jump-to-latest-button").hidden = true;
   $("benchmark-log").textContent = "Waiting…";
+  renderProgressBar(null);
+  renderChart(null);
+  const recipe = recipesById[selectedRecipeId];
+  $("dashboard-subtitle").textContent = recipe
+    ? `${recipe.model_id} (${recipe.quantization}) · ${recipe.benchmark_profile} · ${recipe.execution_device.toUpperCase()}`
+    : "";
   const alreadyInstalled = $("start-button").dataset.alreadyInstalled === "1";
   if (alreadyInstalled) {
     activeKind = "run";
@@ -357,22 +379,151 @@ async function startExecute() {
   pollFlow();
 }
 
-function renderProgress(setupJob, runJob, benchJob) {
-  let key;
-  if (setupJob && SETUP_ACTIVE.has(setupJob.status)) key = "downloading";
-  else if (runJob) {
-    if (runJob.status === "starting_server") key = "verifying";
-    else if (runJob.status === "waiting_ready") key = "loading_model";
-    else if (runJob.status === "running_benchmark") key = benchJob && benchJob.status === "completed" ? "saving" : "benchmarking";
-    else key = null;
-  } else key = "checking";
+function formatDuration(seconds) {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) return null;
+  const total = Math.max(0, Math.round(seconds));
+  return `${Math.floor(total / 60)}m ${total % 60}s`;
+}
 
+function currentStageKey(setupJob, runJob, telemetry) {
+  if (setupJob && SETUP_ACTIVE.has(setupJob.status)) return "downloading";
+  if (!runJob) return "checking";
+  if (runJob.status === "starting_server") return "verifying";
+  if (runJob.status === "waiting_ready") return "loading_model";
+  if (runJob.status === "running_benchmark") {
+    if (telemetry && telemetry.available && telemetry.stage) {
+      // GuideLLM's own accumulator.timings.status ("pending"/"warmup"/
+      // "active"/"cooldown"), mapped to this page's vocabulary in
+      // telemetry.py -- "starting" there still means "loading_model" here,
+      // since no request has been sent yet.
+      return telemetry.stage === "starting" ? "loading_model" : telemetry.stage;
+    }
+    return "benchmarking"; // telemetry unavailable: a real stage, just not sub-divided
+  }
+  return null; // terminal
+}
+
+function renderProgressBar(percent) {
+  const fill = $("progress-bar-fill"), label = $("progress-bar-label"), wrap = $("progress-bar-wrap");
+  if (percent === null || percent === undefined || !Number.isFinite(percent)) {
+    fill.classList.add("indeterminate");
+    fill.style.width = "";
+    label.textContent = "Progress unavailable for this stage";
+    wrap.setAttribute("aria-valuenow", "0");
+  } else {
+    const clamped = Math.max(0, Math.min(100, Math.round(percent)));
+    fill.classList.remove("indeterminate");
+    fill.style.width = `${clamped}%`;
+    label.textContent = `${clamped}%`;
+    wrap.setAttribute("aria-valuenow", String(clamped));
+  }
+}
+
+function renderChart(telemetry) {
+  const history = (telemetry && telemetry.available && telemetry.chart_history) || [];
+  $("chart-empty").hidden = history.length > 0;
+  $("chart-svg").hidden = history.length === 0;
+  if (history.length === 0) {
+    $("chart-line").setAttribute("points", "");
+    return;
+  }
+  const maxX = Math.max(1, history[history.length - 1].elapsed_seconds);
+  const maxY = Math.max(1, ...history.map((sample) => sample.output_tokens_per_second));
+  const points = history
+    .map((sample) => {
+      const x = (sample.elapsed_seconds / maxX) * 600;
+      const y = 155 - (sample.output_tokens_per_second / maxY) * 145;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+  $("chart-line").setAttribute("points", points);
+}
+
+function renderConnectionStatus(runJob, telemetry) {
+  const el = $("log-connection-status");
+  if (runJob && !RUN_ACTIVE.has(runJob.status)) {
+    el.textContent = "Runner process exited.";
+    return;
+  }
+  if (telemetry && telemetry.available && typeof telemetry.updated_at === "number") {
+    const age = Date.now() / 1000 - telemetry.updated_at;
+    if (age > STALE_TELEMETRY_SECONDS) {
+      el.textContent = `Panel connected; no runner update in ${Math.round(age)}s (normal during a slow request).`;
+      return;
+    }
+  }
+  el.textContent = "Panel connected · refreshes automatically";
+}
+
+function renderTechnicalTelemetry(telemetry) {
+  const facts = $("telemetry-technical-facts");
+  facts.replaceChildren();
+  if (!telemetry || !telemetry.available) {
+    const dt = document.createElement("dt"), dd = document.createElement("dd");
+    dt.textContent = "Live telemetry";
+    dd.textContent = "Not available for this run.";
+    facts.append(dt, dd);
+    return;
+  }
+  const entries = [
+    ["Reported stage", telemetry.stage || "unknown"],
+    ["Remaining fraction", telemetry.remaining_fraction != null ? telemetry.remaining_fraction.toFixed(3) : "unknown"],
+    ["Remaining seconds (time limit)", telemetry.remaining_seconds_duration_limit != null ? Math.round(telemetry.remaining_seconds_duration_limit) : "unknown"],
+    ["Last update", new Date(telemetry.updated_at * 1000).toLocaleTimeString()],
+  ];
+  if (telemetry.observer_error) {
+    entries.push(["Live monitoring", `Stopped: ${telemetry.observer_error} (the benchmark itself is unaffected)`]);
+  }
+  entries.forEach(([label, value]) => {
+    const dt = document.createElement("dt"), dd = document.createElement("dd");
+    dt.textContent = label; dd.textContent = String(value); facts.append(dt, dd);
+  });
+}
+
+function renderProgress(setupJob, runJob, benchJob, telemetry) {
+  const key = currentStageKey(setupJob, runJob, telemetry);
   const cancelling = (setupJob && setupJob.status === "cancelling") || (runJob && runJob.status === "cancelling");
   if (key) lastKnownStageIndex = stageIndex(key);
   renderStageList(lastKnownStageIndex, cancelling);
-  $("elapsed").textContent = formatElapsed(flowStartedAt);
   $("cancel-button").disabled = cancelling;
   $("cancel-button").textContent = cancelling ? "Cancelling…" : "Cancel";
+
+  const recipe = recipesById[selectedRecipeId];
+  const telemetryOk = telemetry && telemetry.available;
+  const elapsedSeconds = telemetryOk && typeof telemetry.elapsed_seconds === "number"
+    ? telemetry.elapsed_seconds
+    : (flowStartedAt ? (Date.now() - flowStartedAt) / 1000 : null);
+  $("elapsed").textContent = formatElapsed(flowStartedAt);
+  $("fact-elapsed").textContent = elapsedSeconds != null ? formatDuration(elapsedSeconds) : "—";
+
+  if (key === "saving") {
+    $("fact-eta").textContent = "Saving results…";
+  } else if (!telemetryOk) {
+    $("fact-eta").textContent = "—";
+  } else if (telemetry.eta_seconds === null || telemetry.eta_seconds === undefined) {
+    $("fact-eta").textContent = "Estimating…";
+  } else {
+    $("fact-eta").textContent = formatDuration(telemetry.eta_seconds) + " remaining";
+  }
+
+  if (telemetryOk && telemetry.requests) {
+    const r = telemetry.requests;
+    const total = r.total_budget != null ? r.total_budget : "?";
+    const target = telemetry.measured_requests_target;
+    $("fact-requests").textContent = `${r.processed ?? 0} / ${total} total requests`
+      + (target ? ` (target: ${target} measured)` : "");
+  } else {
+    $("fact-requests").textContent = "—";
+  }
+  $("fact-max-duration").textContent = recipe && recipe.max_duration_seconds
+    ? `${Math.round(recipe.max_duration_seconds / 60)} min ceiling`
+    : "—";
+
+  const percent = telemetryOk && telemetry.remaining_fraction != null ? (1 - telemetry.remaining_fraction) * 100 : null;
+  renderProgressBar(key === "saving" ? 100 : percent);
+  renderChart(telemetry);
+  renderConnectionStatus(runJob, telemetry);
+  renderTechnicalTelemetry(telemetry);
 
   // Genuine byte-level download progress (never a manufactured percentage):
   // straight from the resumable downloader's own done/total byte counts.
@@ -382,9 +533,9 @@ function renderProgress(setupJob, runJob, benchJob) {
     Object.entries(setupJob.progress).forEach(([label, info]) => {
       const row = document.createElement("div");
       row.className = "progress-row";
-      const percent = info.total ? Math.min(100, (100 * info.done) / info.total) : 0;
+      const donePercent = info.total ? Math.min(100, (100 * info.done) / info.total) : 0;
       row.innerHTML = `<span>${label}: ${formatBytes(info.done)} / ${formatBytes(info.total)}</span>
-        <div class="progress-bar"><span style="width:${percent}%"></span></div>`;
+        <div class="progress-bar"><span style="width:${donePercent}%"></span></div>`;
       progressContainer.append(row);
     });
   }
@@ -393,7 +544,20 @@ function renderProgress(setupJob, runJob, benchJob) {
     $("server-log-wrap").hidden = false;
     $("server-log").textContent = runJob.server_log;
   }
-  if (benchJob) $("benchmark-log").textContent = benchJob.log || "Waiting…";
+  if (benchJob) renderLog(benchJob.log || "Waiting…");
+}
+
+function renderLog(text) {
+  if (text === lastLogText) return;
+  lastLogText = text;
+  const el = $("benchmark-log");
+  el.textContent = text;
+  if (logAutoFollow) {
+    el.scrollTop = el.scrollHeight;
+    $("jump-to-latest-button").hidden = true;
+  } else {
+    $("jump-to-latest-button").hidden = false;
+  }
 }
 
 function finishFlow(success, errorMessage, runJob) {
@@ -401,11 +565,18 @@ function finishFlow(success, errorMessage, runJob) {
   $("cancel-button").hidden = true;
   $("start-over-button").hidden = false;
   if (success && runJob && runJob.result) {
+    // 100% only here: execution finished *and* local evidence finalization
+    // (compression, environment.json, reproduce.md) already completed --
+    // runJob only reaches a terminal "completed" status after that.
+    renderProgressBar(100);
     finishedManagedJob = runJob;
     benchmarkJobId = runJob.benchmark_job_id;
     showResults(runJob.result);
     showScreen("results");
   } else {
+    // Cancellation or failure: leave the progress bar, stage list, and
+    // chart exactly as last rendered -- their real last-known state, not
+    // reset to zero and not advanced to 100%.
     $("run-error").hidden = false;
     $("run-error").textContent = errorMessage || "The run did not finish. Local logs above describe what happened.";
   }
@@ -429,7 +600,7 @@ function pollFlow() {
   clearTimers();
   const tick = async () => {
     try {
-      let setupJob = null, runJob = null, benchJob = null;
+      let setupJob = null, runJob = null, benchJob = null, telemetry = null;
       if (activeKind === "setup") {
         setupJob = await api(`/api/managed/setup-jobs/${activeJobId}`);
       } else if (activeKind === "run") {
@@ -437,11 +608,16 @@ function pollFlow() {
         if (runJob.benchmark_job_id) {
           benchmarkJobId = runJob.benchmark_job_id;
           benchJob = await api(`/api/runs/${benchmarkJobId}`);
+          // Telemetry is best-effort: a fetch failure here (or the panel
+          // simply not having any yet) must never break the main poll loop
+          // that tracks whether the benchmark itself is still running.
+          telemetry = await api(`/api/runs/${benchmarkJobId}/telemetry`).catch(() => null);
         }
       } else {
         return;
       }
-      renderProgress(setupJob, runJob, benchJob);
+      if (/^The request failed\.?$|Panel connection/.test($("notice").textContent)) notice(""); // a prior connection-lost notice, if any, is stale now
+      renderProgress(setupJob, runJob, benchJob, telemetry);
 
       if (setupJob) {
         if (setupJob.status === "completed") { await startExecute(); return; }
@@ -454,6 +630,7 @@ function pollFlow() {
       timers.push(setTimeout(tick, 1200));
     } catch (error) {
       if (isUnknownJobError(error)) { interruptedByRestart(); return; }
+      $("log-connection-status").textContent = "Panel connection lost — retrying…";
       notice(error.message, true);
       timers.push(setTimeout(tick, 2500));
     }
@@ -582,6 +759,19 @@ async function enterShareScreen() {
 }
 
 // -- Wiring ----------------------------------------------------------------
+
+$("benchmark-log").addEventListener("scroll", () => {
+  const el = $("benchmark-log");
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+  logAutoFollow = atBottom;
+  $("jump-to-latest-button").hidden = atBottom;
+});
+$("jump-to-latest-button").addEventListener("click", () => {
+  const el = $("benchmark-log");
+  el.scrollTop = el.scrollHeight;
+  logAutoFollow = true;
+  $("jump-to-latest-button").hidden = true;
+});
 
 $("change-location-button").addEventListener("click", () => {
   const editor = $("storage-location-editor");

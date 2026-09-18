@@ -261,8 +261,10 @@ class Controller:
                    "summary": None, "error": None, "validation": None, "submission": None}
             self.jobs[job_id] = job
             self._save(job)
+            telemetry_dir = directory.relative_to(self.root).as_posix() + "/telemetry"
             arguments = ["run", f"--endpoint={config['endpoint']}", f"--model={config['model']}",
-                         f"--profile={config['profile']}", f"--output-dir={directory.relative_to(self.root).as_posix()}", "--execute"]
+                         f"--profile={config['profile']}", f"--output-dir={directory.relative_to(self.root).as_posix()}",
+                         f"--telemetry-dir={telemetry_dir}", "--execute"]
             self.worker = threading.Thread(target=self._execute, args=(job, arguments), daemon=True)
             self.worker.start()
             return dict(job)
@@ -339,6 +341,28 @@ class Controller:
         if len(runs) != 1:
             raise UIError("This operation has no single completed evidence directory.")
         return self._inside(runs[0])
+
+    def telemetry(self, job_id: str) -> dict:
+        """The job's live telemetry, if any -- a small, bounded snapshot the
+        in-process GuideLLM adapter (telemetry.py) writes to
+        <job>/telemetry/telemetry.json, kept outside the run's own evidence
+        directory. Never required: an older job, one run without telemetry
+        attached, or one where the adapter disabled itself all just report
+        "available": false, honestly, rather than fabricating progress."""
+        directory = self._directory(job_id)
+        if job_id not in self.jobs:
+            raise UIError("Unknown run.", 404)
+        snapshot_path = self._inside(directory / "telemetry" / "telemetry.json")
+        if not snapshot_path.is_file():
+            return {"available": False}
+        try:
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {"available": False}
+        if not isinstance(snapshot, dict):
+            return {"available": False}
+        snapshot["available"] = True
+        return snapshot
 
     def set_prefill(self, job_id: str, **fields: Any) -> None:
         """Attach optional, editable prefill metadata to a job (for example a managed
@@ -559,6 +583,9 @@ class UIHandler(BaseHTTPRequestHandler):
                 if match[2]:
                     return self._send(200, controller.bundle(match[1]), "application/zip")
                 return self._json(controller.detail(match[1]))
+            match = re.fullmatch(r"/api/runs/(job-[a-f0-9]{16})/telemetry", self.path)
+            if match:
+                return self._json(controller.telemetry(match[1]))
             managed = self.server.managed
             if self.path == "/api/managed/recipes":
                 return self._json({"recipes": managed.recipes(), "default_storage_dir": managed.default_storage_dir()})

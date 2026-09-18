@@ -72,18 +72,53 @@
           </div>
         </section>
         <section class="panel" id="progress-panel" hidden>
-          <div class="section-head"><div><h2>Progress</h2></div><span id="elapsed" class="pill"></span></div>
+          <div class="section-head">
+            <div><h2>Running</h2><p id="dashboard-subtitle" class="muted small"></p></div>
+            <span id="elapsed" class="pill"></span>
+          </div>
+
+          <div class="progress-bar-wrap" role="progressbar" id="progress-bar-wrap" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Benchmark progress">
+            <div class="progress-bar-track"><div class="progress-bar-fill" id="progress-bar-fill"></div></div>
+            <span id="progress-bar-label" class="progress-bar-label">Starting…</span>
+          </div>
+
           <ol class="stage-list" id="stage-list"></ol>
           <div id="download-progress"></div>
+
+          <dl class="dashboard-facts" id="dashboard-facts">
+            <div><dt>Elapsed</dt><dd id="fact-elapsed">—</dd></div>
+            <div><dt>Estimated time remaining</dt><dd id="fact-eta">—</dd></div>
+            <div><dt>Requests completed</dt><dd id="fact-requests">—</dd></div>
+            <div><dt>Maximum duration</dt><dd id="fact-max-duration">—</dd></div>
+          </dl>
+          <p id="eta-basis-note" class="hint">The run ends at its configured request or time limit, whichever comes first; it may finish earlier.</p>
+
+          <div class="chart-wrap">
+            <div class="section-head chart-head"><h3>Output tokens / second</h3>
+              <span class="hint" id="chart-label">Cumulative average since the first request · live estimate</span></div>
+            <div id="chart-empty" class="muted">Waiting for the first measurement…</div>
+            <svg id="chart-svg" viewBox="0 0 600 160" preserveAspectRatio="none" role="img" aria-label="Output tokens per second over elapsed time" hidden>
+              <polyline id="chart-line" points=""></polyline>
+            </svg>
+          </div>
+
           <p id="run-error" class="notice error" role="status" hidden></p>
           <div class="actions">
             <button id="cancel-button" type="button" class="danger">Cancel</button>
             <button id="start-over-button" type="button" class="secondary" hidden>Choose a different test</button>
           </div>
-          <details id="live-log-details"><summary>Technical details <span class="hint">Live log · refreshes automatically</span></summary>
+
+          <details id="live-log-details" open>
+            <summary>Live log <span class="hint" id="log-connection-status">Refreshes automatically</span></summary>
+            <div class="log-toolbar">
+              <button id="jump-to-latest-button" type="button" class="quiet" hidden>Jump to latest ↓</button>
+            </div>
+            <pre id="benchmark-log" tabindex="0">Waiting…</pre>
+          </details>
+          <details id="technical-details-progress">
+            <summary>Technical details <span class="hint">Raw progress data and managed server diagnostic log</span></summary>
             <div id="server-log-wrap" hidden><p class="hint">Managed server diagnostic log</p><pre id="server-log"></pre></div>
-            <p class="hint">Runner log</p>
-            <pre id="benchmark-log">Waiting…</pre>
+            <dl class="kv" id="telemetry-technical-facts"></dl>
           </details>
         </section>
       </section>

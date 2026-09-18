@@ -52,4 +52,38 @@
 .recent-item{display:block;width:100%;text-align:left;background:transparent;border:1px solid var(--line);border-radius:7px;color:var(--text);padding:10px 12px;margin:6px 0;font-size:12px}
 .recent-item:hover:not(:disabled){filter:none;border-color:var(--accent)}
 
-@media(max-width:620px){.guided-layout main{padding:22px 16px}.stepper{gap:6px}.step-tab{flex:1 1 calc(50% - 6px);text-align:center}}
+/* Live dashboard: progress bar */
+.progress-bar-wrap{margin:16px 0 4px}
+.progress-bar-track{height:16px;border-radius:8px;background:#101a13;border:1px solid var(--line);overflow:hidden}
+.progress-bar-fill{display:block;height:100%;width:0%;background:linear-gradient(90deg,#4fae7a,var(--accent));transition:width .6s ease-out}
+.progress-bar-fill.indeterminate{width:35%!important;animation:omobench-indeterminate 1.6s ease-in-out infinite}
+.progress-bar-label{display:block;margin-top:6px;font:12px/1.4 ui-monospace,SFMono-Regular,monospace;color:var(--muted)}
+@keyframes omobench-indeterminate{0%{margin-left:0%}50%{margin-left:60%}100%{margin-left:0%}}
+
+/* Live dashboard: fact grid */
+.dashboard-facts{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin:18px 0 6px}
+.dashboard-facts>div{padding:12px 14px;border:1px solid var(--line);border-radius:7px;background:#0d130f}
+.dashboard-facts dt{font-size:11px;color:var(--muted);margin:0}
+.dashboard-facts dd{margin:6px 0 0;font:16px/1.3 ui-monospace,SFMono-Regular,monospace;color:var(--text);overflow-wrap:anywhere}
+
+/* Live dashboard: chart */
+.chart-wrap{margin:22px 0;border:1px solid var(--line);border-radius:9px;padding:16px;background:#0d130f}
+.chart-head{margin-bottom:10px}
+.chart-head h3{font-size:13px;margin:0}
+#chart-svg{width:100%;height:140px;display:block}
+#chart-line{fill:none;stroke:var(--accent);stroke-width:2;vector-effect:non-scaling-stroke;transition:points .8s ease-out}
+
+/* Live dashboard: log toolbar */
+.log-toolbar{display:flex;justify-content:flex-end;margin:6px 0}
+
+@media(prefers-reduced-motion:reduce){
+  .progress-bar-fill,#chart-line{transition:none}
+  .progress-bar-fill.indeterminate{animation:none;width:50%!important}
+}
+
+@media(max-width:620px){
+  .guided-layout main{padding:22px 16px}
+  .stepper{gap:6px}
+  .step-tab{flex:1 1 calc(50% - 6px);text-align:center}
+  .dashboard-facts{grid-template-columns:1fr}
+}

@@ -471,6 +471,92 @@ def build_guidellm_command(
     ]
 
 
+def profile_measured_requests(root: Path, profile_id: str) -> int | None:
+    """The profile's own declared measured-request target
+    (execution.measured_requests in benchmarks/profiles/<id>.yaml),
+    display-only: never fed into build_guidellm_command() or any stopping
+    condition, which continue to come from PROFILE_SPECS unchanged."""
+    try:
+        import yaml
+
+        path = root / "benchmarks" / "profiles" / f"{profile_id}.yaml"
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, ImportError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    value = document.get("execution", {}).get("measured_requests")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def run_guidellm_command(
+    command: list[str],
+    *,
+    log_path: Path,
+    root: Path,
+    profile_id: str,
+    telemetry_dir: Path | None,
+) -> int:
+    """Run `command` (as built by build_guidellm_command) exactly as the
+    plain subprocess path always has -- unless `telemetry_dir` is given, in
+    which case this additionally tries an in-process run with a live
+    telemetry observer attached (see telemetry.py), producing the identical
+    resolved configuration and the same evidence artifacts. Any problem
+    attaching telemetry falls back to the exact plain subprocess call, so a
+    telemetry-adapter issue can disable live monitoring but never prevent
+    the benchmark from running.
+    """
+    def plain_subprocess() -> int:
+        with log_path.open("w", encoding="utf-8") as log_file:
+            return subprocess.run(command, stdout=log_file, stderr=subprocess.STDOUT, text=True).returncode
+
+    if telemetry_dir is None:
+        return plain_subprocess()
+
+    # Telemetry calls the pinned guidellm *Python package* in-process, never
+    # the "guidellm" executable `command` itself would invoke on PATH. Only
+    # attempt that when the two are confirmed to be the exact same pinned
+    # install (same virtual environment as the current interpreter) --
+    # otherwise PATH may deliberately point elsewhere (for example a test's
+    # own stand-in executable), and running the real package in-process
+    # would silently stop honoring that redirection. This is a correctness
+    # guard, not a telemetry-only fallback: it keeps "the same resolved
+    # configuration" meaning the same install either way, not just the same
+    # arguments.
+    # Deliberately not .resolve()d: a venv's own bin/python is commonly a
+    # symlink to a system interpreter, which would make an interpreter-vs-
+    # executable comparison land on an unrelated directory (e.g. /usr/bin)
+    # even for a genuinely matching, pinned install. Comparing the
+    # as-reported directories is what actually answers "did PATH resolve
+    # guidellm to this same environment's own bin/", which is the question
+    # that matters here.
+    guidellm_executable = shutil.which("guidellm")
+    same_environment = guidellm_executable is not None and (
+        Path(guidellm_executable).parent == Path(sys.executable).parent
+    )
+    if not same_environment:
+        return plain_subprocess()
+
+    from . import telemetry as telemetry_module
+
+    try:
+        telemetry_dir.mkdir(parents=True, exist_ok=True)
+        argv = telemetry_module.argv_for_run_command(command)
+        return telemetry_module.run_generative_benchmark_with_telemetry(
+            argv,
+            snapshot_path=telemetry_dir / "telemetry.json",
+            history_path=telemetry_dir / "telemetry-history.json",
+            stdout_log_path=log_path,
+            run_label=profile_id,
+            total_measured_requests=profile_measured_requests(root, profile_id),
+        )
+    except telemetry_module.TelemetryUnavailable as error:
+        with log_path.open("w", encoding="utf-8") as log_file:
+            log_file.write(f"OmoBench: live telemetry unavailable ({error}); running without it.\n")
+            log_file.flush()
+            return subprocess.run(command, stdout=log_file, stderr=subprocess.STDOUT, text=True).returncode
+
+
 def redact_endpoint(text: str, endpoint: str) -> str:
     return text.replace(endpoint.rstrip("/"), "<LOCAL_ENDPOINT>")
 
@@ -895,8 +981,14 @@ def write_local_run(args: argparse.Namespace) -> int:
 
     run_directory.mkdir(parents=True, exist_ok=False)
     log_path = run_directory / "guidellm.stdout.log"
-    with log_path.open("w", encoding="utf-8") as log_file:
-        completed = subprocess.run(command, stdout=log_file, stderr=subprocess.STDOUT, text=True)
+    telemetry_dir = getattr(args, "telemetry_dir", None)
+    returncode = run_guidellm_command(
+        command,
+        log_path=log_path,
+        root=root,
+        profile_id=args.profile,
+        telemetry_dir=(root / telemetry_dir).resolve() if telemetry_dir else None,
+    )
 
     log_path.write_text(
         redact_endpoint(log_path.read_text(encoding="utf-8"), args.endpoint),
@@ -918,9 +1010,9 @@ def write_local_run(args: argparse.Namespace) -> int:
     if raw_output_path.exists():
         compress_file(raw_output_path)
 
-    if completed.returncode != 0:
+    if returncode != 0:
         print(f"GuideLLM failed; inspect {log_path}", file=sys.stderr)
-        return completed.returncode
+        return returncode
 
     compressed_raw_output = raw_output_path.with_suffix(".json.gz")
     if not compressed_raw_output.exists():
@@ -1270,6 +1362,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--profile", required=True, choices=sorted(PROFILE_SPECS), help="versioned OmoBench profile")
     run.add_argument("--output-dir", default=".omobench-runs", help="local staging directory, relative to repository root")
     run.add_argument("--execute", action="store_true", help="actually invoke GuideLLM; omit for a safe dry run")
+    run.add_argument(
+        "--telemetry-dir",
+        default=None,
+        help=(
+            "optional directory for a live-progress snapshot/history, read by the local panel's dashboard; "
+            "additive only -- omit for the exact existing behavior. Relative to repository root."
+        ),
+    )
 
     package = subcommands.add_parser("package", help="normalize a completed local GuideLLM staging run")
     package.add_argument("--run-dir", required=True, help="local staging directory created by omobench run --execute")

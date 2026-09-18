@@ -110,15 +110,19 @@ of five separate ones:
    execution together: review, platform/storage/space checks, download (only
    when needed — already-verified files are reused, never re-downloaded),
    re-verification, server startup, and the readiness check GuideLLM needs
-   all happen automatically, with no separate smoke-test button. Progress is
-   shown as real stages (checking system, downloading, verifying, loading the
-   model, benchmarking, saving results) with genuine download byte counts,
-   elapsed time, and the live runner log under "Technical details" — never a
-   manufactured request-count or completion estimate GuideLLM itself does not
-   report. Refreshing the page, or reopening the panel while a run is still
-   active, reconnects to it instead of starting a duplicate; if the panel
-   itself restarted mid-run, that is reported honestly as an interruption,
-   never as a resumed benchmark.
+   all happen automatically, with no separate smoke-test button. A live
+   dashboard then shows a progress bar and percentage, the current stage
+   (checking system, downloading, verifying, loading the model, warmup,
+   benchmarking, cooldown, or saving results — whichever GuideLLM's own
+   execution actually supports at that moment), elapsed time, an estimated
+   time remaining, completed requests against the run's total budget, an
+   animated output-tokens/second chart, and a live log — see
+   [Live progress, ETA, and the chart](#live-progress-eta-and-the-chart)
+   below for exactly what each of these means and where the numbers come
+   from. Refreshing the page, or reopening the panel while a run is still
+   active, reconnects to it and restores its progress and chart instead of
+   starting a duplicate; if the panel itself restarted mid-run, that is
+   reported honestly as an interruption, never as a resumed benchmark.
 3. **Your results.** Real throughput, time-to-first-token, latency,
    successful/attempted requests, and error rate, each with a short
    plain-language explanation — the same measurements described in the
@@ -129,6 +133,79 @@ of five separate ones:
 
 It requires the same panel token as the advanced page, stays loopback-only,
 and makes no external browser requests of its own.
+
+## Live progress, ETA, and the chart
+
+The "Prepare and run" dashboard's numbers come from a small, additive
+telemetry adapter (`cli/src/omobench/telemetry.py`), not from a second
+benchmark implementation. When it can attach (the pinned GuideLLM 0.7.3
+package resolved from the exact same environment as the panel itself, not a
+stand-in), it runs GuideLLM's own official `benchmark_generative_text()`
+entrypoint in-process — with the *identical* resolved configuration
+`build_guidellm_command()` already describes — and reads a public,
+documented GuideLLM interface (`BenchmarkerProgress`) to observe already-
+computed running statistics. It never drives the scheduler, never changes a
+constraint, seed, or workload, and — because it calls GuideLLM's own output
+formatter with the same `--output` argument — writes the exact same
+`guidellm-benchmarks.json.gz` evidence the plain command line always has. If
+attaching telemetry fails for any reason, `omobench run --execute` falls
+back to the exact plain command it has always run; a telemetry problem can
+disable the live dashboard, but never the benchmark itself, and the CLI's
+own direct use is completely unaffected either way.
+
+- **Stage.** Read from GuideLLM's own accumulator state
+  (`accumulator.timings.status`: pending/warmup/active/cooldown), not
+  guessed from elapsed time. Preparation/download/verification/model-startup
+  come from the existing managed-setup and launcher state machine described
+  above, unchanged.
+- **Progress bar and percentage.** GuideLLM's own
+  `SchedulerState.progress.remaining_fraction` — the fraction of whichever
+  stopping condition (request count or duration) is closer to firing,
+  combined the same way GuideLLM itself combines them (the smaller of the
+  two). When this is not yet known (for example, still starting up, or
+  telemetry is unavailable for this run), the bar shows an indeterminate
+  animation rather than a fabricated number.
+- **Completed requests and total budget.** Two different numbers, kept
+  visibly separate: the runner's total request budget (`total_budget`,
+  including warmup and cooldown — 60 for `chat-small-extended-v1`) and the
+  profile's own declared measured-request target (`measured_requests_target`
+  — 50 for both `chat-small-v1` and `chat-small-extended-v1`). Neither
+  changes how many requests actually run; see
+  [what each step does](#what-each-step-does) above for why the two numbers
+  differ for the extended profile specifically.
+- **Estimated time remaining.** Computed from the *observed* completion
+  rate (requests completed so far ÷ elapsed time), projected across the
+  remaining requests, capped by GuideLLM's own remaining-duration estimate
+  for the time limit. Shows "Estimating…" until there have been enough real
+  observations (never extrapolated from a single sample), and never shows
+  the duration ceiling itself as if it were the expected running time. Once
+  GuideLLM's own execution finishes and OmoBench is writing the final
+  evidence files, this becomes "Saving results…" rather than a countdown
+  that would otherwise read as stuck at zero.
+- **The chart.** Output tokens per second, plotted against elapsed
+  benchmark time, from GuideLLM's own running statistic
+  (`completed_metrics.output_tokens.rate_per_second`) — a **cumulative
+  average since the first request**, labelled as such; it is not an
+  instantaneous or per-request measurement. It shows "Waiting for the first
+  measurement…" until a real sample exists (never a placeholder waveform),
+  animates only when a genuinely new sample arrives, and keeps a separate,
+  bounded history per run so reopening the current run restores its own
+  chart. A long CPU prefill before the first token can mean this stays
+  empty for a while; that alone does not mean the benchmark is stuck — the
+  live log's own status line distinguishes "no recent runner update" (which
+  can be entirely normal on slow hardware) from "runner process exited" and
+  from "panel connection lost."
+- **100% and completion.** The bar only reaches 100% once GuideLLM's own
+  execution *and* OmoBench's local evidence finalization have both
+  finished. Cancelling a run, or a run that fails, keeps whatever progress,
+  stage, and chart were last genuinely observed — never reset to zero and
+  never advanced to 100%. A run that finishes normally can still fail its
+  profile's acceptance thresholds; "the benchmark completed" and "this
+  result is publishable" stay two separate, separately reported outcomes
+  (see [Packaging a managed CPU run](#packaging-a-managed-cpu-run) below).
+  Final displayed measurements always come from the existing,
+  unchanged `normalize_guidellm_report()` — the live dashboard's own numbers
+  are for following the run, not the report of record.
 
 ## Packaging a managed CPU run
 
