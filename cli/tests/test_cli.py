@@ -7,13 +7,15 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from omobench.cli import (
+    GUIDELLM_VERSION,
     OTHER_SERVER_FRAMEWORK,
     RUNTIME_FRAMEWORKS,
     build_guidellm_command,
@@ -24,6 +26,8 @@ from omobench.cli import (
     detect_nvidia_gpus,
     detect_windows_cim_gpus,
     doctor_report,
+    guidellm_installed_version,
+    guidellm_runner_preflight,
     hardware_from_environment,
     normalize_guidellm_report,
     package_local_run,
@@ -459,6 +463,86 @@ class GpuDetectionTests(unittest.TestCase):
         self.assertNotIn("NVIDIA GPUs", printed)
         self.assertIn("[amd] AMD Radeon RX 9070", printed)
         self.assertIn("unknown memory", printed)
+
+
+class GuidellmRunnerPreflightTests(unittest.TestCase):
+    """guidellm_runner_preflight() replaced a subprocess-based `guidellm
+    --version` probe (command_output()'s hardcoded 60s timeout) that could
+    hang long enough to waste a full managed model load before reporting a
+    misleading failure. These tests pin its two real jobs: (1) it must never
+    spawn a subprocess -- package metadata only; (2) it must produce a
+    distinct, actionable result for "not installed" vs. "wrong version"
+    vs. "installed and pinned", each naming the actual interpreter."""
+
+    def test_never_spawns_a_subprocess(self) -> None:
+        with patch("omobench.cli.subprocess.run", side_effect=AssertionError("must not spawn a subprocess")):
+            preflight = guidellm_runner_preflight()
+        # Whatever guidellm is actually pip-installed as in this test
+        # environment -- the point is only that reaching a result never
+        # touched subprocess.run.
+        self.assertIn(preflight.kind, {"ok", "missing", "version_mismatch"})
+
+    def test_missing_package_is_a_distinct_actionable_result(self) -> None:
+        with patch("omobench.cli.guidellm_installed_version", return_value=None):
+            preflight = guidellm_runner_preflight()
+        self.assertFalse(preflight.ok)
+        self.assertEqual(preflight.kind, "missing")
+        self.assertIsNone(preflight.version)
+        self.assertIn("not installed", preflight.message)
+        self.assertIn(sys.executable, preflight.message)
+
+    def test_version_mismatch_is_a_distinct_actionable_result(self) -> None:
+        with patch("omobench.cli.guidellm_installed_version", return_value="0.6.9"):
+            preflight = guidellm_runner_preflight()
+        self.assertFalse(preflight.ok)
+        self.assertEqual(preflight.kind, "version_mismatch")
+        self.assertEqual(preflight.version, "0.6.9")
+        self.assertIn(GUIDELLM_VERSION, preflight.message)
+        self.assertIn("0.6.9", preflight.message)
+        self.assertIn(sys.executable, preflight.message)
+
+    def test_matching_pinned_version_is_ok(self) -> None:
+        with patch("omobench.cli.guidellm_installed_version", return_value=GUIDELLM_VERSION):
+            preflight = guidellm_runner_preflight()
+        self.assertTrue(preflight.ok)
+        self.assertEqual(preflight.kind, "ok")
+        self.assertEqual(preflight.version, GUIDELLM_VERSION)
+
+    def test_installed_version_reads_package_metadata_not_a_subprocess(self) -> None:
+        with patch("omobench.cli.importlib.metadata.version", return_value="9.9.9") as metadata_version:
+            with patch("omobench.cli.subprocess.run", side_effect=AssertionError("must not spawn a subprocess")):
+                self.assertEqual(guidellm_installed_version(), "9.9.9")
+        metadata_version.assert_called_once_with("guidellm")
+
+    def test_installed_version_is_none_when_package_metadata_is_absent(self) -> None:
+        import importlib.metadata as real_importlib_metadata
+
+        with patch(
+            "omobench.cli.importlib.metadata.version",
+            side_effect=real_importlib_metadata.PackageNotFoundError("guidellm"),
+        ):
+            self.assertIsNone(guidellm_installed_version())
+
+    def test_doctor_report_guidellm_field_never_spawns_a_subprocess(self) -> None:
+        """doctor_report() runs on every guided/advanced page load; its
+        "guidellm" field must stay cheap even while a model server is up --
+        unlike its "git"/"github_cli" fields (still subprocess-based, and
+        deliberately left untouched here), it must never invoke
+        executable_version("guidellm") (the old subprocess-based probe)."""
+        import omobench.cli as omobench_cli_module
+
+        spy = Mock(wraps=omobench_cli_module.executable_version)
+        with patch("omobench.cli.guidellm_installed_version", return_value=GUIDELLM_VERSION):
+            with patch("omobench.cli.executable_version", spy):
+                report = doctor_report()
+        self.assertIn(GUIDELLM_VERSION, report["guidellm"])
+        for call in spy.call_args_list:
+            self.assertNotEqual(call.args[0], "guidellm")
+
+    def test_doctor_report_guidellm_field_is_none_when_not_installed(self) -> None:
+        with patch("omobench.cli.guidellm_installed_version", return_value=None):
+            report = doctor_report()
+        self.assertIsNone(report["guidellm"])
 
 
 class HardwareFromEnvironmentTests(unittest.TestCase):

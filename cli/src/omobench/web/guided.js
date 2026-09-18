@@ -32,6 +32,7 @@ let benchmarkJobId = null;
 let finishedManagedJob = null; // last terminal managed run job detail, with .result
 let flowStartedAt = null;
 let lastKnownStageIndex = 0;
+let lastKnownPercent = null; // real remaining_fraction-derived percent, frozen (never reset to 0, never advanced to 100) on failure/cancellation
 let preview = null;
 let pending = false;
 let timers = [];
@@ -179,6 +180,7 @@ async function loadRecentRuns() {
     activeJobId = active.id;
     flowStartedAt = new Date(active.created_at).getTime();
     lastKnownStageIndex = 0;
+    lastKnownPercent = null;
     showScreen("run");
     $("summary-panel").hidden = true;
     $("progress-panel").hidden = false;
@@ -201,13 +203,17 @@ async function loadRecentRuns() {
     const recipe = recipesById[job.recipe];
     row.textContent = `${recipe ? recipe.title : job.recipe} · ${job.status} · ${new Date(job.created_at).toLocaleString()}`;
     row.addEventListener("click", () => action(async () => {
+      selectedRecipeId = job.recipe; storageDir = job.storage_dir;
       if (job.result) {
-        selectedRecipeId = job.recipe; storageDir = job.storage_dir;
         finishedManagedJob = job; benchmarkJobId = job.benchmark_job_id;
         showResults(job.result); showScreen("results");
-      } else {
-        notice(job.error || "This run did not produce a result.", true);
+        return;
       }
+      // No result: a failed or cancelled run, reopened. Show the same
+      // terminal dashboard state a live failure/cancellation ends in --
+      // not just a top-level notice -- so refreshing or reopening this run
+      // later looks exactly like watching it fail just now would have.
+      await openTerminalRun(job.id);
     }));
     return row;
   }));
@@ -340,6 +346,9 @@ function renderStageList(activeStageIndex, cancelling) {
 async function doStart() {
   flowStartedAt = Date.now();
   lastKnownStageIndex = 0;
+  lastKnownPercent = null;
+  $("progress-heading").textContent = "Running";
+  $("elapsed").textContent = "";
   $("run-error").hidden = true;
   $("start-over-button").hidden = true;
   $("cancel-button").hidden = false;
@@ -353,6 +362,8 @@ async function doStart() {
   logAutoFollow = true;
   $("jump-to-latest-button").hidden = true;
   $("benchmark-log").textContent = "Waiting…";
+  $("log-connection-status").textContent = "Panel connected · refreshes automatically";
+  $("chart-empty").textContent = "Waiting for the first measurement…";
   renderProgressBar(null);
   renderChart(null);
   const recipe = recipesById[selectedRecipeId];
@@ -391,6 +402,16 @@ function currentStageKey(setupJob, runJob, telemetry) {
   if (runJob.status === "starting_server") return "verifying";
   if (runJob.status === "waiting_ready") return "loading_model";
   if (runJob.status === "running_benchmark") {
+    if (!runJob.benchmark_job_id) {
+      // The managed run's own status flipped to "running_benchmark" before
+      // the benchmark Controller job it delegates to was actually created
+      // (see ManagedController._run_managed) -- there is no runner process
+      // yet, so this must not be reported as "warmup"/"benchmarking" (that
+      // was the guided-dashboard bug: a startup failure at exactly this
+      // boundary showed "Running the benchmark" with warmup marked done,
+      // even though GuideLLM had never been invoked).
+      return "loading_model";
+    }
     if (telemetry && telemetry.available && telemetry.stage) {
       // GuideLLM's own accumulator.timings.status ("pending"/"warmup"/
       // "active"/"cooldown"), mapped to this page's vocabulary in
@@ -398,7 +419,7 @@ function currentStageKey(setupJob, runJob, telemetry) {
       // since no request has been sent yet.
       return telemetry.stage === "starting" ? "loading_model" : telemetry.stage;
     }
-    return "benchmarking"; // telemetry unavailable: a real stage, just not sub-divided
+    return "benchmarking"; // telemetry unavailable, but a real runner process exists: a real stage, just not sub-divided
   }
   return null; // terminal
 }
@@ -520,6 +541,8 @@ function renderProgress(setupJob, runJob, benchJob, telemetry) {
     : "—";
 
   const percent = telemetryOk && telemetry.remaining_fraction != null ? (1 - telemetry.remaining_fraction) * 100 : null;
+  if (key === "saving") lastKnownPercent = 100;
+  else if (percent !== null) lastKnownPercent = percent;
   renderProgressBar(key === "saving" ? 100 : percent);
   renderChart(telemetry);
   renderConnectionStatus(runJob, telemetry);
@@ -560,27 +583,159 @@ function renderLog(text) {
   }
 }
 
+function renderProgressBarFrozen() {
+  // A terminal state must never keep the indeterminate spinner animating
+  // (it is a pure CSS animation -- once polling stops, nothing else would
+  // ever remove it) and must never claim a percentage that was never
+  // actually observed. Freezes at whatever real, determinate value was
+  // last rendered; a bar that never left "indeterminate" is shown as no
+  // progress at all, honestly, rather than picking a number.
+  const fill = $("progress-bar-fill"), label = $("progress-bar-label"), wrap = $("progress-bar-wrap");
+  const wasIndeterminate = fill.classList.contains("indeterminate");
+  fill.classList.remove("indeterminate");
+  if (wasIndeterminate) {
+    fill.style.width = "0%";
+    label.textContent = "No progress was recorded before this run stopped.";
+    wrap.setAttribute("aria-valuenow", "0");
+  } else {
+    const value = wrap.getAttribute("aria-valuenow") || "0";
+    label.textContent = `${value}% — stopped here`;
+  }
+}
+
+// True exactly when the runner (the GuideLLM-driving benchmark Controller
+// job a managed run delegates to) never actually started -- as opposed to
+// starting and then exiting, failing, or being cancelled mid-run. A managed
+// run's own job.benchmark_job_id is only ever set once that delegated job
+// is genuinely created (see ManagedController._run_managed), so it is a
+// reliable, server-persisted signal even after the job has gone terminal
+// (unlike its transient status, which is overwritten to "failed"/
+// "cancelled" and so cannot itself say what was reached beforehand).
+function runnerNeverStarted(runJob) {
+  return !runJob || !runJob.benchmark_job_id;
+}
+
 function finishFlow(success, errorMessage, runJob) {
   clearTimers();
   $("cancel-button").hidden = true;
   $("start-over-button").hidden = false;
+
+  // A real created_at/finished_at pair is the honest total duration,
+  // whether this is a live poll noticing the run just ended or a much
+  // later reopen -- never a live "elapsed" figure that would otherwise
+  // keep climbing against the current time once nothing is polling anymore.
+  if (runJob && runJob.created_at && runJob.finished_at) {
+    const totalSeconds = (new Date(runJob.finished_at).getTime() - new Date(runJob.created_at).getTime()) / 1000;
+    $("elapsed").textContent = formatDuration(totalSeconds) + " total";
+    $("fact-elapsed").textContent = formatDuration(totalSeconds);
+  }
+
   if (success && runJob && runJob.result) {
     // 100% only here: execution finished *and* local evidence finalization
     // (compression, environment.json, reproduce.md) already completed --
     // runJob only reaches a terminal "completed" status after that.
+    $("progress-heading").textContent = "Running";
     renderProgressBar(100);
     finishedManagedJob = runJob;
     benchmarkJobId = runJob.benchmark_job_id;
     showResults(runJob.result);
     showScreen("results");
-  } else {
-    // Cancellation or failure: leave the progress bar, stage list, and
-    // chart exactly as last rendered -- their real last-known state, not
-    // reset to zero and not advanced to 100%.
-    $("run-error").hidden = false;
-    $("run-error").textContent = errorMessage || "The run did not finish. Local logs above describe what happened.";
+    loadRecentRuns().catch(() => {});
+    return;
   }
+
+  // Cancellation or failure: the stage list, chart, and technical facts
+  // were already rendered from the real last-known data by the
+  // renderProgress() call that always precedes this one (see pollFlow()
+  // and openTerminalRun()) -- never reset to zero, never advanced past
+  // what the runner actually reached. This section only freezes the
+  // still-live-looking pieces (the progress bar's animation) and makes the
+  // terminal state itself unmistakable, distinguishing a runner that never
+  // started from one that started and then exited or was cancelled.
+  const cancelled = runJob && runJob.status === "cancelled";
+  const neverStarted = runnerNeverStarted(runJob);
+  $("progress-heading").textContent = cancelled
+    ? "Benchmark cancelled"
+    : neverStarted ? "Could not start benchmark" : "Benchmark failed";
+  renderProgressBarFrozen();
+  // "Estimating…"/"Xm Ys remaining" implied more progress was still coming;
+  // once terminal, a remaining-time estimate is stale, not a real fact.
+  $("fact-eta").textContent = neverStarted ? "—" : cancelled ? "Cancelled" : "Stopped — did not finish";
+
+  if ($("chart-empty").hidden === false) {
+    $("chart-empty").textContent = neverStarted
+      ? "No measurements: the benchmark process never started."
+      : "No measurements were recorded before the run stopped.";
+  }
+  if (neverStarted) {
+    $("fact-requests").textContent = "Benchmark measurements never started.";
+    if (lastLogText === "" || lastLogText === "Waiting…") {
+      $("benchmark-log").textContent = "No runner log: the benchmark process never started.";
+    }
+    $("log-connection-status").textContent = "The benchmark runner never started.";
+    if (!runJob || !runJob.server_log) {
+      $("server-log-wrap").hidden = false;
+      $("server-log").textContent = "No managed server diagnostic log is available for this run.";
+    }
+  } else {
+    $("log-connection-status").textContent = cancelled ? "Runner process stopped (cancelled)." : "Runner process exited.";
+  }
+
+  $("run-error").hidden = false;
+  $("run-error").textContent = errorMessage || (neverStarted
+    ? "The benchmark process never started. See the technical details below for why."
+    : "The run did not finish. Local logs above describe what happened.");
   loadRecentRuns().catch(() => {});
+}
+
+// A terminal job's own status ("failed"/"cancelled") no longer says which
+// stage was active right before that -- unlike a live poll, which tracks
+// lastKnownStageIndex incrementally as it happens, reopening a run cold
+// only has this one final snapshot to work from. telemetry.stage (still
+// on disk after the run ends) is the most specific real signal available;
+// otherwise a real benchmark_job_id at least proves the runner reached
+// "benchmarking", and its complete absence means it never got that far.
+function lastReachedStageIndexForTerminalJob(runJob, telemetry) {
+  if (telemetry && telemetry.available && telemetry.stage) {
+    const key = telemetry.stage === "starting" ? "loading_model" : telemetry.stage;
+    const index = stageIndex(key);
+    if (index >= 0) return index;
+  }
+  return runJob && runJob.benchmark_job_id ? stageIndex("benchmarking") : 0;
+}
+
+async function openTerminalRun(jobId) {
+  const runJob = await api(`/api/managed/runs/${jobId}`);
+  let benchJob = null, telemetry = null;
+  if (runJob.benchmark_job_id) {
+    benchJob = await api(`/api/runs/${runJob.benchmark_job_id}`).catch(() => null);
+    telemetry = await api(`/api/runs/${runJob.benchmark_job_id}/telemetry`).catch(() => null);
+  }
+  activeKind = null;
+  activeJobId = null;
+  benchmarkJobId = runJob.benchmark_job_id;
+  flowStartedAt = new Date(runJob.created_at).getTime();
+  lastKnownStageIndex = lastReachedStageIndexForTerminalJob(runJob, telemetry);
+  lastKnownPercent = telemetry && telemetry.available && telemetry.remaining_fraction != null
+    ? (1 - telemetry.remaining_fraction) * 100
+    : null;
+  showScreen("run");
+  $("summary-panel").hidden = true;
+  $("progress-panel").hidden = false;
+  $("cancel-button").hidden = true;
+  $("start-over-button").hidden = false;
+  $("run-error").hidden = true;
+  $("server-log-wrap").hidden = true;
+  lastLogText = "";
+  logAutoFollow = true;
+  $("jump-to-latest-button").hidden = true;
+  $("benchmark-log").textContent = "Waiting…";
+  const recipe = recipesById[runJob.recipe];
+  $("dashboard-subtitle").textContent = recipe
+    ? `${recipe.model_id} (${recipe.quantization}) · ${recipe.benchmark_profile} · ${recipe.execution_device.toUpperCase()}`
+    : "";
+  renderProgress(null, runJob, benchJob, telemetry);
+  finishFlow(runJob.status === "completed", runJob.error, runJob);
 }
 
 function interruptedByRestart() {

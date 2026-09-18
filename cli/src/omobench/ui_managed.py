@@ -268,6 +268,18 @@ class ManagedController:
     def start_run(self, data: dict, *, mode: str) -> dict:
         recipe_id = text_field(data, "recipe")
         storage_dir = self._resolve_storage_dir(data)
+        if mode == "execute":
+            # Fail fast, before spending any time on the managed server:
+            # loading a model can take the better part of a minute, and a
+            # runner that will never be reachable should never cost the
+            # contributor that wait. Smoke runs never touch GuideLLM at
+            # all (see the mode == "smoke" branch in _run_managed below),
+            # so this check is deliberately execute-only.
+            from . import cli as omobench_cli
+
+            preflight = omobench_cli.guidellm_runner_preflight()
+            if not preflight.ok:
+                raise UIError(preflight.message)
         with self.lock:
             if self.closing:
                 raise UIError("The panel is shutting down.")

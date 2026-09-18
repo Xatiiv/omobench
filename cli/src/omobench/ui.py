@@ -209,7 +209,7 @@ class Controller:
 
     def setup(self) -> dict:
         report = cli.doctor_report()
-        version = cli.parsed_guidellm_version(report.get("guidellm"))
+        preflight = cli.guidellm_runner_preflight()
         native_windows = sys.platform == "win32"
         catalog = []
         import yaml
@@ -222,10 +222,9 @@ class Controller:
                 continue
         return {"environment": report, "profiles": cli.PROFILE_SPECS,
                 "frameworks": cli.RUNTIME_FRAMEWORKS, "catalog": sorted(set(catalog)),
-                "can_execute": not native_windows and version == cli.GUIDELLM_VERSION,
+                "can_execute": not native_windows and preflight.ok,
                 "runner_message": ("Start this panel from WSL2 or Linux to execute benchmarks." if native_windows else
-                    f"GuideLLM {cli.GUIDELLM_VERSION} ready." if version == cli.GUIDELLM_VERSION else
-                    f"Install the pinned runner in this environment: python -m pip install -e './cli[ui,runner]'"),
+                    preflight.message),
                 "can_validate": importlib.util.find_spec("jsonschema") is not None}
 
     def _cli_command(self, arguments: list[str]) -> list[str]:
@@ -246,9 +245,9 @@ class Controller:
         config = run_config(data)
         if sys.platform == "win32":
             raise UIError("The current GuideLLM runner needs WSL2, Linux, or macOS. Start omobench ui there.")
-        version = cli.parsed_guidellm_version(cli.executable_version("guidellm"))
-        if version != cli.GUIDELLM_VERSION:
-            raise UIError(f"GuideLLM {cli.GUIDELLM_VERSION} is required. Install './cli[ui,runner]' in this environment.")
+        preflight = cli.guidellm_runner_preflight()
+        if not preflight.ok:
+            raise UIError(preflight.message)
         with self.lock:
             if self.busy or self.closing:
                 raise UIError("Another operation is active. Wait or cancel the current benchmark.", 409)

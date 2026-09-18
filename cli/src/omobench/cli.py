@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import hashlib
+import importlib.metadata
 import json
 import math
 import os
@@ -14,6 +15,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -144,6 +146,88 @@ def executable_version(executable: str) -> str | None:
         return None
     output = command_output([executable, "--version"])
     return output.splitlines()[0] if output else None
+
+
+def guidellm_installed_version() -> str | None:
+    """The installed GuideLLM distribution's version, from package metadata
+    only -- no subprocess, no import of guidellm itself. Cheap (a metadata
+    file read, not a process spawn) and safe to call at any time, including
+    while a model server is loaded: unlike `executable_version("guidellm")`
+    (which runs the real "guidellm --version" subprocess -- itself a cold
+    import of GuideLLM's full dependency tree, observed to occasionally
+    exceed command_output()'s 60s timeout under real load), this cannot
+    hang or time out.
+
+    Reflects *this* interpreter's own environment (sys.executable), which
+    is exactly the Python binary `omobench run --execute` launches as a
+    subprocess (see Controller._cli_command in ui.py) -- so this is an
+    accurate proxy for what that subprocess will actually have available,
+    not a possibly-different "guidellm" resolved elsewhere on PATH.
+    """
+    try:
+        return importlib.metadata.version("guidellm")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+@dataclass
+class RunnerPreflight:
+    """Result of guidellm_runner_preflight(): whether the pinned GuideLLM
+    version is installed in this environment, and a specific, actionable
+    reason when it is not. `kind` distinguishes the two things package
+    metadata can actually tell us apart -- "missing" and "version_mismatch"
+    -- from any later, separate runtime problem (a broken install, or an
+    import/initialization failure), which this never claims to detect; see
+    guidellm_runner_preflight()'s docstring.
+    """
+
+    ok: bool
+    kind: str  # "ok" | "missing" | "version_mismatch"
+    version: str | None
+    message: str
+
+
+def guidellm_runner_preflight() -> RunnerPreflight:
+    """Fast, cheap, execute-mode preflight check: is the pinned GuideLLM
+    version installed in this same environment? Meant to run before any
+    expensive managed preparation or model startup, so a real problem is
+    reported in milliseconds instead of after loading a model server (the
+    slow, subprocess-based version check this replaces could take up to a
+    minute -- long enough that a user could see a fully-loaded model server
+    followed by a generic "GuideLLM is required" failure with no model ever
+    benchmarked).
+
+    This verifies installation and version only, via package metadata --
+    never runtime health. A package that is installed at the right version
+    can still fail to import or initialize later (a corrupted install, a
+    missing native dependency, and so on); that is a genuinely different
+    problem, already handled where it actually happens: a nonzero GuideLLM
+    exit code in write_local_run(), or telemetry.TelemetryUnavailable for
+    the in-process telemetry adapter. This function does not attempt to
+    predict or replace that handling.
+    """
+    version = guidellm_installed_version()
+    if version is None:
+        return RunnerPreflight(
+            ok=False,
+            kind="missing",
+            version=None,
+            message=(
+                f"GuideLLM is not installed in this environment ({sys.executable}). "
+                "Run: python -m pip install -e './cli[ui,runner]'"
+            ),
+        )
+    if version != GUIDELLM_VERSION:
+        return RunnerPreflight(
+            ok=False,
+            kind="version_mismatch",
+            version=version,
+            message=(
+                f"OmoBench v1 requires GuideLLM {GUIDELLM_VERSION}; found {version} installed in "
+                f"{sys.executable}. Run: python -m pip install -e './cli[ui,runner]'"
+            ),
+        )
+    return RunnerPreflight(ok=True, kind="ok", version=version, message=f"GuideLLM {GUIDELLM_VERSION} ready.")
 
 
 def detect_nvidia_gpus() -> list[dict[str, Any]]:
@@ -404,7 +488,11 @@ def doctor_report() -> dict[str, Any]:
         "operating_system": platform.platform(),
         "cpu": detect_cpu(),
         "ram_gb": detect_ram_gb(),
-        "guidellm": executable_version("guidellm"),
+        "guidellm": (
+            f"guidellm version: {version}"
+            if (version := guidellm_installed_version()) is not None
+            else None
+        ),
         "git": executable_version("git"),
         "github_cli": executable_version("gh"),
         "gpus": detect_gpus(),
@@ -968,18 +1056,9 @@ def write_local_run(args: argparse.Namespace) -> int:
         print("\nAdd --execute to create a local evidence bundle under .omobench-runs/.")
         return 0
 
-    installed_version = parsed_guidellm_version(executable_version("guidellm"))
-    if installed_version is None:
-        print(
-            "GuideLLM is not installed. Run: pip install -e './cli[runner]'",
-            file=sys.stderr,
-        )
-        return 2
-    if installed_version != GUIDELLM_VERSION:
-        print(
-            f"OmoBench v1 requires GuideLLM {GUIDELLM_VERSION}; found {installed_version}.",
-            file=sys.stderr,
-        )
+    preflight = guidellm_runner_preflight()
+    if not preflight.ok:
+        print(preflight.message, file=sys.stderr)
         return 2
 
     run_directory.mkdir(parents=True, exist_ok=False)

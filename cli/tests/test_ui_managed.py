@@ -452,6 +452,50 @@ class GuidedRunLifecycleTests(unittest.TestCase):
         listing = json.loads(self.request("/api/managed/runs", self.auth())[2])
         self.assertEqual(next(j for j in listing if j["id"] == job_id)["status"], "completed")
 
+    def test_execute_mode_runner_preflight_fails_fast_before_any_server_work(self):
+        """Regression for the guided-benchmark startup failure: a broken
+        GuideLLM install must be caught before the managed server ever
+        starts loading a model, not ~45s later once `Controller.start()`
+        happens to run its own check. No run job, no server process, and
+        no server.log should exist afterward -- the failure must be
+        reported synchronously from the POST itself."""
+        from omobench import cli as omobench_cli
+
+        preflight = omobench_cli.RunnerPreflight(
+            ok=False, kind="missing", version=None, message="GuideLLM is not installed in this environment (test)."
+        )
+        with patch("omobench.cli.guidellm_runner_preflight", return_value=preflight):
+            with patch("omobench.launcher.managed_server", side_effect=AssertionError("must not start the managed server")):
+                status, _, body = self.post(
+                    "/api/managed/runs", {"recipe": "fixture-recipe", "storage_dir": str(self.root), "mode": "execute"}
+                )
+        self.assertEqual(status, 400, body)
+        self.assertIn("not installed", json.loads(body)["error"])
+        self.assertEqual(json.loads(self.request("/api/managed/runs", self.auth())[2]), [])
+
+    def test_smoke_mode_is_unaffected_by_the_execute_only_preflight(self):
+        """Smoke mode never runs GuideLLM at all (see the mode == "smoke"
+        branch in _run_managed), so it must keep working even when the
+        runner preflight would fail -- the guard must be execute-only."""
+        from omobench import cli as omobench_cli
+
+        preflight = omobench_cli.RunnerPreflight(
+            ok=False, kind="missing", version=None, message="GuideLLM is not installed in this environment (test)."
+        )
+        with patch("omobench.cli.guidellm_runner_preflight", return_value=preflight):
+            status, _, body = self.post(
+                "/api/managed/runs", {"recipe": "fixture-recipe", "storage_dir": str(self.root), "mode": "smoke"}
+            )
+        self.assertEqual(status, 202, body)
+        job_id = json.loads(body)["id"]
+
+        def finished():
+            detail = json.loads(self.request(f"/api/managed/runs/{job_id}", self.auth())[2])
+            return detail if detail["status"] not in {"starting_server", "waiting_ready"} else None
+
+        detail = wait_for(finished)
+        self.assertEqual(detail["status"], "completed", detail)
+
     def test_a_download_failure_is_reported_honestly_and_never_starts_a_server(self):
         """"Missing downloads": a corrupted/interrupted download must fail the
         setup job with its real reason, and must never let the launcher start a
