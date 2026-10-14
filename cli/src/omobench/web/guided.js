@@ -424,7 +424,7 @@ function currentStageKey(setupJob, runJob, telemetry) {
   return null; // terminal
 }
 
-function renderProgressBar(percent) {
+function renderProgressBar(percent, { complete = false } = {}) {
   const fill = $("progress-bar-fill"), label = $("progress-bar-label"), wrap = $("progress-bar-wrap");
   if (percent === null || percent === undefined || !Number.isFinite(percent)) {
     fill.classList.add("indeterminate");
@@ -432,7 +432,12 @@ function renderProgressBar(percent) {
     label.textContent = "Progress unavailable for this stage";
     wrap.setAttribute("aria-valuenow", "0");
   } else {
-    const clamped = Math.max(0, Math.min(100, Math.round(percent)));
+    // 100% is reserved for a run that genuinely finished: execution *and*
+    // local evidence finalization both succeeded (`complete: true`, set only
+    // by the terminal success path). An in-flight run rounds DOWN and is
+    // capped at 99, so a real 99.6% never displays as a finished 100% while
+    // requests are still running.
+    const clamped = complete ? 100 : Math.max(0, Math.min(99, Math.floor(percent)));
     fill.classList.remove("indeterminate");
     fill.style.width = `${clamped}%`;
     label.textContent = `${clamped}%`;
@@ -557,10 +562,13 @@ function renderProgress(setupJob, runJob, benchJob, telemetry) {
     : "—";
 
   const percent = telemetryOk && telemetry.remaining_fraction != null ? (1 - telemetry.remaining_fraction) * 100 : null;
-  if (key === "saving") lastKnownPercent = 100;
-  else if (percent !== null) lastKnownPercent = percent;
+  // Never record 100 for "saving": evidence finalization can still fail, and
+  // a frozen-at-100 bar would then describe a failed run as a finished one.
+  if (percent !== null) lastKnownPercent = percent;
   if (key === "saving") {
-    renderProgressBar(100);
+    // GuideLLM has stopped, but compression, environment.json, and
+    // reproduce.md are still being written. Not finished yet.
+    renderProgressBarSaving();
   } else if (overrunning) {
     // remaining_fraction is legitimately 0 once the budget is spent, which
     // would render a finished-looking 100% bar over a still-running
@@ -606,6 +614,17 @@ function renderLog(text) {
   } else {
     $("jump-to-latest-button").hidden = false;
   }
+}
+
+function renderProgressBarSaving() {
+  // Deliberately 99%, not 100%: execution has finished, but the evidence
+  // files are still being written and that step can still fail. 100% is
+  // reserved for the terminal success path, after finalization succeeded.
+  const fill = $("progress-bar-fill"), label = $("progress-bar-label"), wrap = $("progress-bar-wrap");
+  fill.classList.remove("indeterminate");
+  fill.style.width = "99%";
+  label.textContent = "Benchmark finished — writing and verifying the evidence files";
+  wrap.setAttribute("aria-valuenow", "99");
 }
 
 function renderProgressBarOverrunning() {
@@ -669,9 +688,12 @@ function finishFlow(success, errorMessage, runJob) {
   if (success && runJob && runJob.result) {
     // 100% only here: execution finished *and* local evidence finalization
     // (compression, environment.json, reproduce.md) already completed --
-    // runJob only reaches a terminal "completed" status after that.
+    // runJob only reaches a terminal "completed" status after that. Every
+    // other caller of renderProgressBar() is capped below 100 (see its
+    // `complete` option), so this is the single place that can display a
+    // finished run.
     $("progress-heading").textContent = "Running";
-    renderProgressBar(100);
+    renderProgressBar(100, { complete: true });
     finishedManagedJob = runJob;
     benchmarkJobId = runJob.benchmark_job_id;
     showResults(runJob.result);

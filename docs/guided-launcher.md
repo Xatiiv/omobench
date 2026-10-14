@@ -169,6 +169,14 @@ own direct use is completely unaffected either way.
   remaining — so instead of a finished-looking 100% bar over a still-running
   benchmark, the bar holds just short of complete and says the runner is
   finishing its current request and stopping.
+
+  100% is reserved for a run that genuinely finished: the benchmark executed
+  *and* its evidence files (compressed runner output, `environment.json`,
+  `reproduce.md`) were written successfully. While those files are still
+  being written the bar says so and stays below 100%, so a failure during
+  that step is never left displaying a completed run. An in-flight
+  percentage is rounded down for the same reason: 99.6% reads as 99%, not as
+  a finished 100%.
 - **Completed requests and total budget.** Two different numbers, kept
   visibly separate: the runner's total request budget (`total_budget`,
   including warmup and cooldown — 60 for `chat-small-extended-v1`) and the

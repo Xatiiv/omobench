@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from omobench.ui import UIServer
 from omobench import managed_setup as ms
-from test_cli import GUIDELLM_REPORT_V2
+from test_cli import GUIDELLM_REPORT_V2, install_guidellm_module_stub
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -290,15 +290,17 @@ class GuidedRunLifecycleTests(unittest.TestCase):
             script = self.bin / tool
             script.write_text("#!/bin/sh\nexit 0\n")
             script.chmod(0o755)
-        guidellm = self.bin / "guidellm"
-        guidellm.write_text(
-            f"#!{sys.executable}\n"
+        # The runner stand-in shadows the guidellm *module* on the subprocess's
+        # PYTHONPATH (set below): execution runs "<interpreter> -m guidellm"
+        # and deliberately ignores anything named "guidellm" on PATH.
+        self.stub = self.root / "stub"
+        install_guidellm_module_stub(
+            self.stub,
             "import json, pathlib, sys\n"
             "if '--version' in sys.argv:\n print('GuideLLM 0.7.3'); sys.exit(0)\n"
             "output = pathlib.Path(sys.argv[sys.argv.index('--output') + 1].split('path=', 1)[1])\n"
-            f"output.write_text(json.dumps({GUIDELLM_REPORT_V2!r}))\n"
+            f"output.write_text(json.dumps({GUIDELLM_REPORT_V2!r}))\n",
         )
-        guidellm.chmod(0o755)
 
         self.llama_server = self.root / "llama-server"
         self.llama_server.write_text(
@@ -324,7 +326,7 @@ class GuidedRunLifecycleTests(unittest.TestCase):
         self.model_path.write_bytes(b"fixture-model")
 
         self.server = UIServer(("127.0.0.1", 0), self.root)
-        self.server.controller.environment["PYTHONPATH"] = str(ROOT / "cli" / "src")
+        self.server.controller.environment["PYTHONPATH"] = str(self.stub) + os.pathsep + str(ROOT / "cli" / "src")
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 

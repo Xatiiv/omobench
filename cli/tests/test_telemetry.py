@@ -305,50 +305,64 @@ class RunGuidellmCommandFallbackTests(unittest.TestCase):
     setup-time telemetry problem must fall back to the plain subprocess
     exactly once -- never crash, never run twice."""
 
-    def test_telemetry_dir_none_never_imports_the_telemetry_module(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            log_path = Path(tmp) / "log.txt"
-            returncode = cli.run_guidellm_command(
-                [sys.executable, "-c", "print('plain subprocess ran')"],
-                log_path=log_path, root=Path(tmp), profile_id="chat-small-v1", telemetry_dir=None,
-            )
-            self.assertEqual(returncode, 0)
-            self.assertIn("plain subprocess ran", log_path.read_text())
+    COMMAND = ["guidellm", "run", "--backend", "irrelevant-to-this-test"]
 
-    def test_guidellm_on_path_from_a_different_environment_skips_telemetry_entirely(self):
+    def _fake_subprocess_run(self, expected: list[str]):
+        """Stands in for the real process launch, asserting the argv actually
+        executed is this interpreter's guidellm, never a PATH lookup."""
+
+        def fake_subprocess_run(cmd, *, stdout, **_kwargs):
+            self.assertEqual(cmd, expected)
+            stdout.write("plain subprocess ran\n")
+            return type("Result", (), {"returncode": 0})()
+
+        return fake_subprocess_run
+
+    def test_telemetry_dir_none_runs_the_verified_runner_without_touching_telemetry(self):
+        expected = cli.guidellm_runner_invocation(self.COMMAND)
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "log.txt"
-            telemetry_dir = Path(tmp) / "telemetry"
-            with patch("omobench.cli.shutil.which", return_value="/some/unrelated/bin/guidellm"):
+            with patch("omobench.cli.subprocess.run", side_effect=self._fake_subprocess_run(expected)) as run_mock:
                 returncode = cli.run_guidellm_command(
-                    [sys.executable, "-c", "print('plain subprocess ran')"],
-                    log_path=log_path, root=Path(tmp), profile_id="chat-small-v1", telemetry_dir=telemetry_dir,
+                    self.COMMAND, log_path=log_path, root=Path(tmp),
+                    profile_id="chat-small-v1", telemetry_dir=None,
                 )
             self.assertEqual(returncode, 0)
+            run_mock.assert_called_once()
             self.assertIn("plain subprocess ran", log_path.read_text())
-            self.assertFalse(telemetry_dir.exists())
 
-    def test_a_setup_time_telemetry_failure_falls_back_exactly_once(self):
+    def test_a_foreign_guidellm_on_path_no_longer_decides_which_runner_executes(self):
+        """PATH used to pick the runner, so a foreign "guidellm" meant the
+        in-process telemetry path was skipped to avoid overriding it. Execution
+        now always goes through this interpreter's own installation -- the one
+        preflight verified -- so PATH decides nothing and telemetry is still
+        attempted."""
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "log.txt"
             telemetry_dir = Path(tmp) / "telemetry"
-            # A real "guidellm run ..." command (satisfies argv_for_run_command's
-            # own precondition), but subprocess.run itself is mocked so the
-            # fallback's actual process launch is fully controlled here rather
-            # than really invoking guidellm a second time.
-            command = ["guidellm", "run", "--backend", "irrelevant-to-this-test"]
+            with patch("omobench.cli.shutil.which", return_value="/some/unrelated/bin/guidellm"), patch(
+                "omobench.telemetry.run_generative_benchmark_with_telemetry", return_value=0
+            ) as telemetry_mock, patch("omobench.cli.subprocess.run") as run_mock:
+                returncode = cli.run_guidellm_command(
+                    self.COMMAND, log_path=log_path, root=Path(tmp),
+                    profile_id="chat-small-v1", telemetry_dir=telemetry_dir,
+                )
+            self.assertEqual(returncode, 0)
+            telemetry_mock.assert_called_once()
+            run_mock.assert_not_called()
 
-            def fake_subprocess_run(cmd, *, stdout, **_kwargs):
-                self.assertEqual(cmd, command)  # the exact original command, unmodified
-                stdout.write("plain subprocess ran\n")
-                return type("Result", (), {"returncode": 0})()
-
-            with patch("omobench.cli.shutil.which", return_value=sys.executable), patch(
+    def test_a_setup_time_telemetry_failure_falls_back_exactly_once(self):
+        expected = cli.guidellm_runner_invocation(self.COMMAND)
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "log.txt"
+            telemetry_dir = Path(tmp) / "telemetry"
+            with patch(
                 "omobench.telemetry.run_generative_benchmark_with_telemetry",
                 side_effect=telemetry.TelemetryUnavailable("simulated setup-time failure"),
-            ), patch("omobench.cli.subprocess.run", side_effect=fake_subprocess_run) as run_mock:
+            ), patch("omobench.cli.subprocess.run", side_effect=self._fake_subprocess_run(expected)) as run_mock:
                 returncode = cli.run_guidellm_command(
-                    command, log_path=log_path, root=Path(tmp), profile_id="chat-small-v1", telemetry_dir=telemetry_dir,
+                    self.COMMAND, log_path=log_path, root=Path(tmp),
+                    profile_id="chat-small-v1", telemetry_dir=telemetry_dir,
                 )
             self.assertEqual(returncode, 0)
             run_mock.assert_called_once()  # exactly one attempt, never a duplicate
@@ -360,17 +374,19 @@ class RunGuidellmCommandFallbackTests(unittest.TestCase):
         """telemetry_dir.mkdir() runs before anything telemetry-specific;
         an OSError there (for example a permissions problem) must fall back
         exactly like a TelemetryUnavailable, not crash write_local_run."""
+        expected = cli.guidellm_runner_invocation(self.COMMAND)
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "log.txt"
             telemetry_dir = Path(tmp) / "telemetry"
-            with patch("omobench.cli.shutil.which", return_value=sys.executable), patch.object(
+            with patch.object(
                 Path, "mkdir", side_effect=PermissionError("simulated permission error"),
-            ):
+            ), patch("omobench.cli.subprocess.run", side_effect=self._fake_subprocess_run(expected)) as run_mock:
                 returncode = cli.run_guidellm_command(
-                    [sys.executable, "-c", "print('plain subprocess ran')"],
-                    log_path=log_path, root=Path(tmp), profile_id="chat-small-v1", telemetry_dir=telemetry_dir,
+                    self.COMMAND, log_path=log_path, root=Path(tmp),
+                    profile_id="chat-small-v1", telemetry_dir=telemetry_dir,
                 )
             self.assertEqual(returncode, 0)
+            run_mock.assert_called_once()
             self.assertIn("plain subprocess ran", log_path.read_text())
 
 
@@ -741,6 +757,97 @@ sys.exit(rc)
         finally:
             server.shutdown()
         self.assertNotEqual(returncode, 0, "A cancelled run must not report success.")
+
+
+class _FailingLog:
+    """A log file whose write/flush/close fail the way a full disk or a
+    revoked handle does, while still recording what was written."""
+
+    def __init__(self, *, fail_on: str):
+        self.fail_on = fail_on
+        self.written: list[str] = []
+        self.closed = False
+
+    def write(self, text: str) -> int:
+        if self.fail_on == "write":
+            raise OSError(28, "No space left on device")
+        self.written.append(text)
+        return len(text)
+
+    def flush(self) -> None:
+        if self.fail_on == "flush":
+            raise OSError(28, "No space left on device")
+
+    def close(self) -> None:
+        self.closed = True
+        if self.fail_on == "close":
+            raise OSError(5, "Input/output error")
+
+
+class PostStartLogFailureTests(unittest.TestCase):
+    """Once the benchmark has actually been invoked, a failing log write,
+    flush, or close must never escape run_generative_benchmark_with_telemetry().
+
+    The caller treats any exception from it as "telemetry could not start"
+    and falls back -- which would reopen this run's own log with "w",
+    destroying its output, and run a second benchmark. The run's real exit
+    status is the only honest answer once execution has begun."""
+
+    def setUp(self):
+        _skip_unless_guidellm_pinned()
+
+    def _run(self, *, fail_on: str, entrypoint_fails: bool = False):
+        import guidellm.utils.console as console_module
+
+        log = _FailingLog(fail_on=fail_on)
+        invocations = []
+
+        async def fake_entrypoint(**kwargs):
+            invocations.append(kwargs)
+            if entrypoint_fails:
+                raise RuntimeError("backend exploded mid-run")
+            return None
+
+        entrypoints_module = sys.modules["guidellm.benchmark.entrypoints"]
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = Path(temporary)
+            with patch.object(entrypoints_module, "benchmark_generative_text", fake_entrypoint), patch.object(
+                telemetry, "resolve_benchmark_scenario", return_value=object()
+            ), patch.object(telemetry, "build_progress_observer", return_value=object()), patch.object(
+                console_module, "Console", lambda **_kwargs: object()
+            ), patch.object(Path, "open", return_value=log):
+                returncode = telemetry.run_generative_benchmark_with_telemetry(
+                    ["--backend", "x"],
+                    snapshot_path=paths / "telemetry.json",
+                    history_path=paths / "history.json",
+                    stdout_log_path=paths / "guidellm.stdout.log",
+                    run_label="chat-small-v1",
+                    total_measured_requests=50,
+                )
+        return returncode, log, invocations
+
+    def test_a_failing_close_after_a_successful_run_still_reports_success(self):
+        returncode, log, invocations = self._run(fail_on="close")
+        self.assertEqual(returncode, 0)
+        self.assertEqual(len(invocations), 1, "the benchmark must be invoked exactly once")
+        self.assertTrue(log.closed)
+
+    def test_a_failing_flush_after_a_successful_run_still_reports_success(self):
+        returncode, _log, invocations = self._run(fail_on="flush")
+        self.assertEqual(returncode, 0)
+        self.assertEqual(len(invocations), 1)
+
+    def test_a_failing_write_while_reporting_an_execution_failure_still_reports_that_failure(self):
+        """The failure note cannot be written, but the run still failed: the
+        exit code must stay 1, not become an exception the caller would retry."""
+        returncode, _log, invocations = self._run(fail_on="write", entrypoint_fails=True)
+        self.assertEqual(returncode, 1)
+        self.assertEqual(len(invocations), 1)
+
+    def test_a_failing_close_after_an_execution_failure_still_reports_that_failure(self):
+        returncode, _log, invocations = self._run(fail_on="close", entrypoint_fails=True)
+        self.assertEqual(returncode, 1)
+        self.assertEqual(len(invocations), 1)
 
 
 if __name__ == "__main__":

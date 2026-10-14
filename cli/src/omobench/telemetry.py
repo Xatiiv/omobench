@@ -21,6 +21,7 @@ can disable live monitoring but never the benchmark itself.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import signal
@@ -598,14 +599,26 @@ def run_generative_benchmark_with_telemetry(
     # like the plain subprocess path's own nonzero exit code -- never a
     # second attempt, and never a silent overwrite of anything this run
     # itself already wrote.
-    with log_file:
+    #
+    # Log I/O below is therefore best-effort and deliberately swallowed. A
+    # failing write, flush, or close (a full disk, a revoked handle, an
+    # unwritable mount) cannot un-run a benchmark that has already executed,
+    # and must not escape: the caller's fallback treats an exception here as
+    # "telemetry could not start", reopens this very log with "w" -- erasing
+    # the finished run's output -- and launches a duplicate benchmark. The
+    # run's real exit status is the honest answer, and is what is returned.
+    try:
         try:
             outcome = _run_coroutine_cancellable_by_sigterm(
                 real_entrypoint(args=scenario, progress=observer, console=console)
             )
         except Exception as error:  # noqa: BLE001
-            log_file.write(f"\nOmoBench: benchmark execution failed: {error}\n")
+            with contextlib.suppress(OSError, ValueError):
+                log_file.write(f"\nOmoBench: benchmark execution failed: {error}\n")
             return 1
-        if outcome == "cancelled":
-            return 130
-    return 0
+        return 130 if outcome == "cancelled" else 0
+    finally:
+        # Explicit, suppressed close instead of `with log_file:`, whose
+        # implicit close raises straight through a `return`.
+        with contextlib.suppress(OSError, ValueError):
+            log_file.close()

@@ -160,6 +160,205 @@ class GuideLLMCommandTests(unittest.TestCase):
         )
 
 
+GUIDELLM_MODULE_STUB = (
+    "import pathlib, sys\n"
+    "pathlib.Path({marker!r}).write_text(' '.join(sys.argv[1:]), encoding='utf-8')\n"
+)
+
+
+def install_guidellm_module_stub(directory: Path, body: str) -> Path:
+    """Shadow the real `guidellm` *package* for any subprocess whose
+    PYTHONPATH includes `directory`.
+
+    Execution goes through `<this interpreter> -m guidellm`
+    (cli.guidellm_runner_invocation), so a stand-in runner must shadow the
+    module; a script named "guidellm" on PATH is deliberately not consulted."""
+    package = directory / "guidellm"
+    package.mkdir(parents=True, exist_ok=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "__main__.py").write_text(body, encoding="utf-8")
+    return directory
+
+
+def install_conflicting_path_executable(directory: Path, marker: Path) -> Path:
+    """A different, unverified "guidellm" on PATH -- the exact situation that
+    used to decide which runner actually executed. It records its own
+    invocation so a test can prove it was never run."""
+    directory.mkdir(parents=True, exist_ok=True)
+    script = directory / "guidellm"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import pathlib, sys\n"
+        f"pathlib.Path({str(marker)!r}).write_text(' '.join(sys.argv[1:]), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return directory
+
+
+class RunnerInvocationTests(unittest.TestCase):
+    """The runner that executes must be the one preflight verified."""
+
+    def test_the_canonical_command_is_rewritten_onto_this_interpreter(self) -> None:
+        from omobench.cli import guidellm_runner_invocation
+
+        invocation = guidellm_runner_invocation(["guidellm", "run", "--backend", "x"])
+        self.assertEqual(invocation, [sys.executable, "-m", "guidellm", "run", "--backend", "x"])
+
+    def test_a_non_guidellm_command_is_rejected(self) -> None:
+        from omobench.cli import guidellm_runner_invocation
+
+        for command in ([], ["something-else", "run"]):
+            with self.subTest(command=command), self.assertRaises(ValueError):
+                guidellm_runner_invocation(command)
+
+    def test_reproduce_evidence_keeps_the_portable_form_not_an_interpreter_path(self) -> None:
+        """build_guidellm_command() stays canonical: reproduce.md is published
+        evidence, and a local interpreter path (/home/<user>/.venvs/...) must
+        not end up in it."""
+        command = build_guidellm_command(
+            root=ROOT, endpoint="http://127.0.0.1:9", model="m",
+            profile_id="chat-small-v1", raw_output_path=Path("/tmp/out.json"),
+        )
+        self.assertEqual(command[:2], ["guidellm", "run"])
+        self.assertNotIn(sys.executable, command)
+
+
+@unittest.skipIf(os.name == "nt", "Uses a POSIX executable stub on PATH")
+class ConflictingPathExecutableTests(unittest.TestCase):
+    """A different `guidellm` on PATH must never be what runs: preflight can
+    only vouch for this interpreter's installation."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.module_marker = self.root / "module-stub-ran.txt"
+        self.path_marker = self.root / "path-executable-ran.txt"
+        install_guidellm_module_stub(
+            self.root / "stub", GUIDELLM_MODULE_STUB.format(marker=str(self.module_marker))
+        )
+        install_conflicting_path_executable(self.root / "bin", self.path_marker)
+        self.log_path = self.root / "guidellm.stdout.log"
+        self.environment = patch.dict(
+            os.environ,
+            {
+                "PATH": str(self.root / "bin") + os.pathsep + os.environ["PATH"],
+                "PYTHONPATH": str(self.root / "stub"),
+            },
+        )
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+
+    def _command(self) -> list[str]:
+        return ["guidellm", "run", "--backend", "kind=openai_http,target=http://127.0.0.1:9"]
+
+    def test_ordinary_cli_execution_ignores_the_conflicting_executable(self) -> None:
+        from omobench.cli import run_guidellm_command
+
+        returncode = run_guidellm_command(
+            self._command(), log_path=self.log_path, root=self.root,
+            profile_id="chat-small-v1", telemetry_dir=None,
+        )
+        self.assertEqual(returncode, 0)
+        self.assertTrue(self.module_marker.is_file(), "this interpreter's guidellm module should have run")
+        self.assertFalse(self.path_marker.exists(), "the conflicting PATH executable must never be invoked")
+
+    def test_telemetry_fallback_ignores_the_conflicting_executable(self) -> None:
+        """The fallback path had the same defect: it re-ran bare "guidellm"."""
+        from omobench import telemetry as telemetry_module
+        from omobench.cli import run_guidellm_command
+
+        with patch.object(
+            telemetry_module,
+            "run_generative_benchmark_with_telemetry",
+            side_effect=telemetry_module.TelemetryUnavailable("no observer here"),
+        ):
+            returncode = run_guidellm_command(
+                self._command(), log_path=self.log_path, root=self.root,
+                profile_id="chat-small-v1", telemetry_dir=self.root / "telemetry",
+            )
+        self.assertEqual(returncode, 0)
+        self.assertTrue(self.module_marker.is_file())
+        self.assertFalse(self.path_marker.exists())
+        self.assertIn("live telemetry unavailable", self.log_path.read_text(encoding="utf-8"))
+
+
+class TelemetryFallbackBoundaryTests(unittest.TestCase):
+    """Fallback is for failures *before* the benchmark is invoked. After that,
+    an error must never start a second run or truncate the first one's log."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.log_path = self.root / "guidellm.stdout.log"
+
+    def _run(self, telemetry_side_effect, subprocess_mock):
+        from omobench import telemetry as telemetry_module
+        from omobench.cli import run_guidellm_command
+
+        with patch.object(
+            telemetry_module, "run_generative_benchmark_with_telemetry", side_effect=telemetry_side_effect
+        ), patch("omobench.cli.subprocess.run", subprocess_mock):
+            return run_guidellm_command(
+                ["guidellm", "run", "--backend", "x"],
+                log_path=self.log_path, root=self.root,
+                profile_id="chat-small-v1", telemetry_dir=self.root / "telemetry",
+            )
+
+    def test_a_setup_failure_before_execution_falls_back_exactly_once(self) -> None:
+        from omobench import telemetry as telemetry_module
+
+        subprocess_mock = Mock(return_value=subprocess.CompletedProcess(args=[], returncode=0))
+        returncode = self._run(telemetry_module.TelemetryUnavailable("could not attach"), subprocess_mock)
+        self.assertEqual(returncode, 0)
+        self.assertEqual(subprocess_mock.call_count, 1, "exactly one benchmark invocation")
+        self.assertIn("live telemetry unavailable", self.log_path.read_text(encoding="utf-8"))
+
+    def test_a_log_failure_after_execution_never_starts_a_second_run(self) -> None:
+        """The regression: an OSError raised after the benchmark ran (a failing
+        log write, flush, or close) used to reopen the log with "w" -- erasing
+        the finished run's output -- and launch a duplicate benchmark."""
+        evidence = "runner output from the run that already happened\n"
+
+        def already_executed(*_args, **kwargs):
+            Path(kwargs["stdout_log_path"]).write_text(evidence, encoding="utf-8")
+            raise OSError(5, "Input/output error")
+
+        subprocess_mock = Mock(return_value=subprocess.CompletedProcess(args=[], returncode=0))
+        with self.assertRaises(OSError):
+            self._run(already_executed, subprocess_mock)
+        subprocess_mock.assert_not_called()
+        self.assertEqual(
+            self.log_path.read_text(encoding="utf-8"), evidence,
+            "the finished run's log must not be truncated by a fallback attempt",
+        )
+
+    def test_an_unexpected_error_after_execution_never_starts_a_second_run(self) -> None:
+        """Any non-TelemetryUnavailable error is treated as post-invocation."""
+        subprocess_mock = Mock(return_value=subprocess.CompletedProcess(args=[], returncode=0))
+        with self.assertRaises(RuntimeError):
+            self._run(RuntimeError("something went wrong mid-run"), subprocess_mock)
+        subprocess_mock.assert_not_called()
+
+    def test_a_telemetry_directory_failure_is_still_pre_execution(self) -> None:
+        """mkdir happens before anything is invoked, so it still falls back."""
+        from omobench.cli import run_guidellm_command
+
+        blocker = self.root / "telemetry"
+        blocker.write_text("not a directory", encoding="utf-8")
+        subprocess_mock = Mock(return_value=subprocess.CompletedProcess(args=[], returncode=0))
+        with patch("omobench.cli.subprocess.run", subprocess_mock):
+            returncode = run_guidellm_command(
+                ["guidellm", "run", "--backend", "x"],
+                log_path=self.log_path, root=self.root,
+                profile_id="chat-small-v1", telemetry_dir=blocker,
+            )
+        self.assertEqual(returncode, 0)
+        self.assertEqual(subprocess_mock.call_count, 1)
+
+
 def _guidellm_full_pipeline_classes():
     """Import the complete set of pinned GuideLLM 0.7.3 classes this profile's
     accounting depends on: real scheduler-facing objects (RequestInfo,

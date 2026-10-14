@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +9,7 @@ from pathlib import Path
 from omobench.ui import Controller
 
 from test_telemetry import FIXTURE_MODEL_ID, _require_offline_tokenizer, _skip_unless_guidellm_pinned, _start_fixture_server
+from test_cli import install_guidellm_module_stub
 from test_ui import RUN_CONFIG, ROOT, make_root, wait_for
 
 
@@ -33,53 +32,32 @@ class ControllerTelemetryEndpointTests(unittest.TestCase):
         with self.assertRaises(Exception):
             self.controller.telemetry("job-0000000000000000")
 
+    def _install_stub_runner(self, body: str) -> None:
+        """Shadow the guidellm *module* for the Controller's subprocess.
+        Execution goes through "<interpreter> -m guidellm", so a script named
+        "guidellm" on PATH is deliberately never consulted."""
+        stub = self.root / "stub"
+        install_guidellm_module_stub(stub, body)
+        self.controller.environment["PYTHONPATH"] = str(stub) + os.pathsep + str(ROOT / "cli" / "src")
+
     def test_a_job_with_no_telemetry_file_yet_reports_unavailable(self):
-        bin_dir = self.root / "bin"
-        bin_dir.mkdir()
-        script = bin_dir / "guidellm"
-        script.write_text(
-            f"#!{sys.executable}\n"
+        self._install_stub_runner(
             "import json, pathlib, sys\n"
-            "if '--version' in sys.argv:\n print('GuideLLM 0.7.3'); sys.exit(0)\n"
             "output = pathlib.Path(sys.argv[sys.argv.index('--output') + 1].split('path=', 1)[1])\n"
             "output.write_text(json.dumps({'metadata': {'version': 2}}))\n"
         )
-        script.chmod(0o755)
-        original_path = os.environ["PATH"]
-        os.environ["PATH"] = str(bin_dir) + os.pathsep + original_path
-        self.controller.environment["PYTHONPATH"] = str(ROOT / "cli" / "src")
-        self.controller.environment["PATH"] = os.environ["PATH"]
-        try:
-            job = self.controller.start(RUN_CONFIG)
-            wait_for(lambda: not self.controller.busy)
-        finally:
-            os.environ["PATH"] = original_path
-        # The fake executable shadows guidellm on PATH, so the environment
-        # gate in run_guidellm_command() correctly declines the in-process
-        # telemetry path here -- no telemetry.json was ever written.
+        job = self.controller.start(RUN_CONFIG)
+        wait_for(lambda: not self.controller.busy)
+        # The stand-in shadows the guidellm *module*, so the in-process
+        # telemetry path cannot resolve GuideLLM's real internals and declines
+        # (TelemetryUnavailable) -- no telemetry.json was ever written.
         detail = self.controller.telemetry(job["id"])
         self.assertEqual(detail, {"available": False})
 
     def test_reads_a_real_snapshot_once_one_exists(self):
-        bin_dir = self.root / "bin"
-        bin_dir.mkdir()
-        script = bin_dir / "guidellm"
-        script.write_text(
-            f"#!{sys.executable}\n"
-            "import sys\n"
-            "if '--version' in sys.argv:\n print('GuideLLM 0.7.3'); sys.exit(0)\n"
-            "sys.exit(1)\n"
-        )
-        script.chmod(0o755)
-        original_path = os.environ["PATH"]
-        os.environ["PATH"] = str(bin_dir) + os.pathsep + original_path
-        self.controller.environment["PYTHONPATH"] = str(ROOT / "cli" / "src")
-        self.controller.environment["PATH"] = os.environ["PATH"]
-        try:
-            job = self.controller.start(RUN_CONFIG)
-            wait_for(lambda: not self.controller.busy)
-        finally:
-            os.environ["PATH"] = original_path
+        self._install_stub_runner("import sys\nsys.exit(1)\n")
+        job = self.controller.start(RUN_CONFIG)
+        wait_for(lambda: not self.controller.busy)
 
         telemetry_dir = self.controller._directory(job["id"]) / "telemetry"
         telemetry_dir.mkdir(parents=True, exist_ok=True)
@@ -96,25 +74,9 @@ class ControllerTelemetryEndpointTests(unittest.TestCase):
         call -- from a real timestamp the backend always reports as-is, and
         never silently expires or drops. Also doubles as the reconnection
         contract: a page that reconnects reads exactly this same file."""
-        bin_dir = self.root / "bin"
-        bin_dir.mkdir()
-        script = bin_dir / "guidellm"
-        script.write_text(
-            f"#!{sys.executable}\n"
-            "import sys\n"
-            "if '--version' in sys.argv:\n print('GuideLLM 0.7.3'); sys.exit(0)\n"
-            "sys.exit(1)\n"
-        )
-        script.chmod(0o755)
-        original_path = os.environ["PATH"]
-        os.environ["PATH"] = str(bin_dir) + os.pathsep + original_path
-        self.controller.environment["PYTHONPATH"] = str(ROOT / "cli" / "src")
-        self.controller.environment["PATH"] = os.environ["PATH"]
-        try:
-            job = self.controller.start(RUN_CONFIG)
-            wait_for(lambda: not self.controller.busy)
-        finally:
-            os.environ["PATH"] = original_path
+        self._install_stub_runner("import sys\nsys.exit(1)\n")
+        job = self.controller.start(RUN_CONFIG)
+        wait_for(lambda: not self.controller.busy)
 
         telemetry_dir = self.controller._directory(job["id"]) / "telemetry"
         telemetry_dir.mkdir(parents=True, exist_ok=True)
@@ -139,21 +101,13 @@ class ControllerTelemetryEndpointTests(unittest.TestCase):
 class RealTelemetryThroughControllerTests(unittest.TestCase):
     """End-to-end proof that the Controller's own subprocess -- unchanged --
     reaches the new in-process telemetry path for real, when (and only
-    when) `guidellm` on PATH is confirmed to be this same environment's own
-    pinned install; not a fake test double."""
+    when) this interpreter's own pinned GuideLLM install resolves; not a fake
+    test double. PATH is no longer consulted at all: execution and telemetry
+    both use this interpreter's installation (cli.guidellm_runner_invocation)."""
 
     def setUp(self):
         _skip_unless_guidellm_pinned()
         _require_offline_tokenizer(self)
-        guidellm_executable = shutil.which("guidellm")
-        if guidellm_executable is None or (
-            Path(guidellm_executable).parent != Path(sys.executable).parent
-        ):
-            raise unittest.SkipTest(
-                "This test needs guidellm's real console script in the same environment as this "
-                "interpreter (not shadowed on PATH), so the Controller's subprocess reaches the "
-                "real in-process telemetry path rather than falling back."
-            )
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         make_root(self.root)

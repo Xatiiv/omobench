@@ -625,6 +625,32 @@ def profile_measured_requests(root: Path, profile_id: str) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def guidellm_runner_invocation(command: list[str]) -> list[str]:
+    """Rewrite a canonical `["guidellm", "run", ...]` command so it executes
+    the GuideLLM installation `guidellm_runner_preflight()` actually verified.
+
+    Preflight reads `importlib.metadata` in *this* interpreter, so the only
+    runner it can vouch for is this interpreter's own. A bare "guidellm" is
+    resolved by PATH, which can point at an entirely different environment
+    (a second virtual environment, a pipx shim, a stale global install): the
+    version check would pass against one install while a different one ran
+    the benchmark -- discovered, if at all, only after the full run, when
+    normalization rejects the report's `guidellm_version`.
+
+    `python -m guidellm` is the *same entry point* as the console script --
+    GuideLLM 0.7.3 declares `guidellm = guidellm.__main__:cli` -- just
+    resolved through `sys.executable` instead of PATH, so this changes which
+    install runs, never what it does.
+
+    The canonical form is deliberately kept in `build_guidellm_command()`:
+    it is what reproduce.md publishes, and an interpreter path
+    (`/home/<user>/.venvs/...`) does not belong in a public evidence bundle.
+    """
+    if not command or command[0] != "guidellm":
+        raise ValueError(f"Expected a 'guidellm ...' command, got: {command[:1]!r}")
+    return [sys.executable, "-m", "guidellm", *command[1:]]
+
+
 def run_guidellm_command(
     command: list[str],
     *,
@@ -637,47 +663,47 @@ def run_guidellm_command(
     plain subprocess path always has -- unless `telemetry_dir` is given, in
     which case this additionally tries an in-process run with a live
     telemetry observer attached (see telemetry.py), producing the identical
-    resolved configuration and the same evidence artifacts. Any problem
-    attaching telemetry falls back to the exact plain subprocess call, so a
-    telemetry-adapter issue can disable live monitoring but never prevent
-    the benchmark from running.
+    resolved configuration and the same evidence artifacts.
+
+    Fallback to the plain subprocess path is restricted to failures that
+    happen *before* the benchmark is invoked, so a telemetry-adapter problem
+    can disable live monitoring but never prevent the benchmark from running
+    -- and, equally important, never cause a second one. Once execution has
+    begun, its outcome is reported as-is: nothing here may re-run it or
+    truncate the evidence it already wrote.
     """
-    def plain_subprocess() -> int:
+    invocation = guidellm_runner_invocation(command)
+
+    def plain_subprocess(note: str | None = None) -> int:
         with log_path.open("w", encoding="utf-8") as log_file:
-            return subprocess.run(command, stdout=log_file, stderr=subprocess.STDOUT, text=True).returncode
+            if note is not None:
+                log_file.write(note)
+                log_file.flush()
+            return subprocess.run(invocation, stdout=log_file, stderr=subprocess.STDOUT, text=True).returncode
 
     if telemetry_dir is None:
         return plain_subprocess()
 
-    # Telemetry calls the pinned guidellm *Python package* in-process, never
-    # the "guidellm" executable `command` itself would invoke on PATH. Only
-    # attempt that when the two are confirmed to be the exact same pinned
-    # install (same virtual environment as the current interpreter) --
-    # otherwise PATH may deliberately point elsewhere (for example a test's
-    # own stand-in executable), and running the real package in-process
-    # would silently stop honoring that redirection. This is a correctness
-    # guard, not a telemetry-only fallback: it keeps "the same resolved
-    # configuration" meaning the same install either way, not just the same
-    # arguments.
-    # Deliberately not .resolve()d: a venv's own bin/python is commonly a
-    # symlink to a system interpreter, which would make an interpreter-vs-
-    # executable comparison land on an unrelated directory (e.g. /usr/bin)
-    # even for a genuinely matching, pinned install. Comparing the
-    # as-reported directories is what actually answers "did PATH resolve
-    # guidellm to this same environment's own bin/", which is the question
-    # that matters here.
-    guidellm_executable = shutil.which("guidellm")
-    same_environment = guidellm_executable is not None and (
-        Path(guidellm_executable).parent == Path(sys.executable).parent
-    )
-    if not same_environment:
-        return plain_subprocess()
-
     from . import telemetry as telemetry_module
 
+    # Pre-invocation setup. A failure here means nothing has been sent and
+    # the log is still untouched, so the plain subprocess path can safely
+    # (re)open it and run the benchmark for the first time.
     try:
         telemetry_dir.mkdir(parents=True, exist_ok=True)
         argv = telemetry_module.argv_for_run_command(command)
+    except (OSError, ValueError) as error:
+        return plain_subprocess(f"OmoBench: live telemetry unavailable ({error}); running without it.\n")
+
+    # The benchmark itself. TelemetryUnavailable is contractually raised only
+    # from this function's own setup block, before the entrypoint is invoked
+    # (see run_generative_benchmark_with_telemetry's docstring), so it is the
+    # ONLY exception that may start a second attempt here. Anything else --
+    # notably an OSError from writing, flushing, or closing the run's own log
+    # -- happens after execution began: catching it would reopen the log with
+    # "w", destroying the finished run's output, and launch a duplicate
+    # benchmark. It is allowed to propagate instead.
+    try:
         return telemetry_module.run_generative_benchmark_with_telemetry(
             argv,
             snapshot_path=telemetry_dir / "telemetry.json",
@@ -686,14 +712,8 @@ def run_guidellm_command(
             run_label=profile_id,
             total_measured_requests=profile_measured_requests(root, profile_id),
         )
-    except (telemetry_module.TelemetryUnavailable, OSError) as error:
-        # OSError here can only come from telemetry_dir.mkdir() above, which
-        # runs before anything else in this block -- equally pre-execution,
-        # equally safe to fall back from.
-        with log_path.open("w", encoding="utf-8") as log_file:
-            log_file.write(f"OmoBench: live telemetry unavailable ({error}); running without it.\n")
-            log_file.flush()
-            return subprocess.run(command, stdout=log_file, stderr=subprocess.STDOUT, text=True).returncode
+    except telemetry_module.TelemetryUnavailable as error:
+        return plain_subprocess(f"OmoBench: live telemetry unavailable ({error}); running without it.\n")
 
 
 def redact_endpoint(text: str, endpoint: str) -> str:
