@@ -490,6 +490,9 @@ function renderTechnicalTelemetry(telemetry) {
     ["Reported stage", telemetry.stage || "unknown"],
     ["Remaining fraction", telemetry.remaining_fraction != null ? telemetry.remaining_fraction.toFixed(3) : "unknown"],
     ["Remaining seconds (time limit)", telemetry.remaining_seconds_duration_limit != null ? Math.round(telemetry.remaining_seconds_duration_limit) : "unknown"],
+    ["Time budget", telemetry.duration_budget_exhausted === true
+      ? "Spent — the runner cannot interrupt an in-flight request, so it finishes the current one before stopping"
+      : "Within budget"],
     ["Last update", new Date(telemetry.updated_at * 1000).toLocaleTimeString()],
   ];
   if (telemetry.observer_error) {
@@ -517,8 +520,18 @@ function renderProgress(setupJob, runJob, benchJob, telemetry) {
   $("elapsed").textContent = formatElapsed(flowStartedAt);
   $("fact-elapsed").textContent = elapsedSeconds != null ? formatDuration(elapsedSeconds) : "—";
 
+  // The run's own time budget is spent, but the runner is still working:
+  // GuideLLM cannot interrupt an in-flight request, so it finishes the
+  // current one before stopping. This is reported by telemetry.py from
+  // GuideLLM's own clamped remaining_duration, and only ever while the run is
+  // still active -- never for a finished, cancelled, or failed run.
+  const overrunning = telemetryOk && telemetry.duration_budget_exhausted === true && key !== "saving";
   if (key === "saving") {
     $("fact-eta").textContent = "Saving results…";
+  } else if (overrunning) {
+    // Never "0s remaining": a countdown frozen at zero while work continues
+    // reads as a stuck run, not as an honest "we are past the budget".
+    $("fact-eta").textContent = "Time limit reached — finishing current request";
   } else if (!telemetryOk) {
     $("fact-eta").textContent = "—";
   } else if (telemetry.eta_seconds === null || telemetry.eta_seconds === undefined) {
@@ -536,14 +549,26 @@ function renderProgress(setupJob, runJob, benchJob, telemetry) {
   } else {
     $("fact-requests").textContent = "—";
   }
+  // The ceiling bounds the benchmark's own execution, not model startup or
+  // cleanup -- which is why elapsed flow time can exceed it without the
+  // benchmark having overrun anything.
   $("fact-max-duration").textContent = recipe && recipe.max_duration_seconds
-    ? `${Math.round(recipe.max_duration_seconds / 60)} min ceiling`
+    ? `${Math.round(recipe.max_duration_seconds / 60)} min ceiling (benchmark execution only)`
     : "—";
 
   const percent = telemetryOk && telemetry.remaining_fraction != null ? (1 - telemetry.remaining_fraction) * 100 : null;
   if (key === "saving") lastKnownPercent = 100;
   else if (percent !== null) lastKnownPercent = percent;
-  renderProgressBar(key === "saving" ? 100 : percent);
+  if (key === "saving") {
+    renderProgressBar(100);
+  } else if (overrunning) {
+    // remaining_fraction is legitimately 0 once the budget is spent, which
+    // would render a finished-looking 100% bar over a still-running
+    // benchmark. Hold just short of complete and say why.
+    renderProgressBarOverrunning();
+  } else {
+    renderProgressBar(percent);
+  }
   renderChart(telemetry);
   renderConnectionStatus(runJob, telemetry);
   renderTechnicalTelemetry(telemetry);
@@ -581,6 +606,17 @@ function renderLog(text) {
   } else {
     $("jump-to-latest-button").hidden = false;
   }
+}
+
+function renderProgressBarOverrunning() {
+  // Deliberately 99%, not 100%: the benchmark's time budget is spent, but its
+  // last request is still streaming, so claiming completion would be wrong.
+  // Not indeterminate either -- real, near-complete progress is known.
+  const fill = $("progress-bar-fill"), label = $("progress-bar-label"), wrap = $("progress-bar-wrap");
+  fill.classList.remove("indeterminate");
+  fill.style.width = "99%";
+  label.textContent = "Time limit reached — the runner is finishing its current request and stopping";
+  wrap.setAttribute("aria-valuenow", "99");
 }
 
 function renderProgressBarFrozen() {

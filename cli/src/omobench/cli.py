@@ -104,21 +104,29 @@ PROFILE_SPECS: dict[str, dict[str, Any]] = {
     # percentage/prefer_duration scheme, so the sample size holds regardless
     # of how long each request takes.
     #
-    # cooldown.value=4, not 5: GuideLLM 0.7.3's own request-count cooldown
-    # boundary excludes phase_requests + 1 trailing requests, not
-    # phase_requests -- confirmed by driving the real scheduler-facing
-    # accumulator (GenerativeBenchmarkAccumulator.update_estimate) through a
-    # full synthetic request sequence and reading GenerativeMetrics.compile()'s
-    # final request_totals, not by inspecting compute_transition_time alone.
-    # A bare cooldown.value=5 excludes 6 requests; value=4 is the documented
-    # compensation that makes the *actual* excluded count 5, matching the
-    # declared contract exactly: 5 warmup + 50 measured + 5 cooldown = 60
-    # total, verified end to end. See ChatSmallExtendedBoundaryTests in
-    # cli/tests/test_cli.py and docs/proposals/chat-small-extended-v1.md.
+    # warmup.value=4 and cooldown.value=4, not 5: GuideLLM 0.7.3's own
+    # request-count phase boundaries each exclude phase_requests + 1 requests,
+    # not phase_requests. Both are compensated here so the *actual* excluded
+    # counts match this profile's declared contract exactly: 5 warmup +
+    # 50 measured + 5 cooldown = 60 total.
+    #
+    # Verified by driving the real scheduler-facing accumulator
+    # (GenerativeBenchmarkAccumulator.update_estimate) through the real
+    # per-request event sequence -- queued, pending, in_progress, first_token,
+    # terminal -- and reading GenerativeMetrics.compile()'s final
+    # request_totals. The full lifecycle matters: GenerativeBenchmarkTimings
+    # re-evaluates TransientPhaseConfig.compute_transition_time on *every*
+    # scheduler event, keyed on info.started_at, which is only populated once a
+    # request reaches "in_progress". An earlier completion-only simulation
+    # (one update_estimate call per request) made warmup.value=5 look correct
+    # and shipped it; a real extended CPU run then recorded 24 successful
+    # requests with six warmup requests excluded instead of the declared five.
+    # See ChatSmallExtendedBoundaryTests in cli/tests/test_cli.py and
+    # docs/proposals/chat-small-extended-v1.md.
     "chat-small-extended-v1": {
         "input_tokens": 1024,
         "output_tokens": 256,
-        "profile": "kind=synchronous,warmup.value=5,warmup.mode=requests,cooldown.value=4,cooldown.mode=requests",
+        "profile": "kind=synchronous,warmup.value=4,warmup.mode=requests,cooldown.value=4,cooldown.mode=requests",
         "max_requests": 60,
         "max_duration_seconds": 5400,
     },
@@ -525,8 +533,32 @@ def parsed_guidellm_version(version_text: str | None) -> str | None:
     return match.group(1) if match else None
 
 
+def profile_request_timeout_seconds(root: Path, profile_id: str) -> float | None:
+    """The profile's own declared execution.request_timeout_seconds, from
+    benchmarks/profiles/<id>.yaml.
+
+    Unlike profile_measured_requests() this IS fed into the runner: it becomes
+    the openai_http backend's `timeout`. Returns None when the profile declares
+    no timeout or cannot be read, in which case the backend keeps GuideLLM's
+    own default rather than OmoBench inventing a value."""
+    try:
+        import yaml
+
+        path = root / "benchmarks" / "profiles" / f"{profile_id}.yaml"
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, ImportError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    value = document.get("execution", {}).get("request_timeout_seconds")
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value) if value > 0 else None
+
+
 def build_guidellm_command(
     *,
+    root: Path,
     endpoint: str,
     model: str,
     profile_id: str,
@@ -534,11 +566,27 @@ def build_guidellm_command(
 ) -> list[str]:
     spec = PROFILE_SPECS[profile_id]
     target = endpoint.rstrip("/")
+    backend = f"kind=openai_http,target={target},model={model},request_format=/v1/chat/completions"
+    # execution.request_timeout_seconds -> OpenAIHTTPBackendArgs.timeout, which
+    # GuideLLM 0.7.3 passes to httpx as its READ timeout
+    # (httpx.Timeout(read=args.timeout, connect=args.timeout_connect, ...), see
+    # guidellm/backends/openai/http.py). That bounds how long a request may wait
+    # for its NEXT response chunk -- not the total duration of a streaming
+    # request. A slow-but-steadily-streaming response can therefore still run
+    # far longer than this value, and legitimately does on slow CPU hosts; this
+    # alone does not cap a long request at the profile's timeout, nor prevent a
+    # single request from overrunning the max_duration ceiling. What it does
+    # bound is a server that stops producing: a stall of more than this many
+    # seconds between chunks (or before any first byte) now fails that request
+    # instead of hanging until the duration constraint fires.
+    timeout_seconds = profile_request_timeout_seconds(root, profile_id)
+    if timeout_seconds is not None:
+        backend += f",timeout={timeout_seconds}"
     return [
         "guidellm",
         "run",
         "--backend",
-        f"kind=openai_http,target={target},model={model},request_format=/v1/chat/completions",
+        backend,
         "--data",
         f"kind=synthetic_text,prompt_tokens={spec['input_tokens']},output_tokens={spec['output_tokens']}",
         "--profile",
@@ -1043,6 +1091,7 @@ def write_local_run(args: argparse.Namespace) -> int:
         return 2
     raw_output_path = run_directory / "guidellm-benchmarks.json"
     command = build_guidellm_command(
+        root=root,
         endpoint=args.endpoint,
         model=args.model,
         profile_id=args.profile,

@@ -144,6 +144,11 @@ def scenario_equivalence_summary(scenario: Any) -> dict[str, Any]:
         "backend_target": backend.target,
         "backend_model": backend.model,
         "backend_request_format": backend.request_format,
+        # The profile's execution.request_timeout_seconds, as GuideLLM actually
+        # resolved it onto the backend (its httpx read timeout). Included so the
+        # equivalence test proves the in-process telemetry path and the plain
+        # subprocess path agree on it too, not just on the workload.
+        "backend_timeout": getattr(backend, "timeout", None),
         "prompt_tokens": getattr(data, "prompt_tokens", None),
         "output_tokens": getattr(data, "output_tokens", None),
         "profile_kind": profile.kind,
@@ -265,7 +270,18 @@ def compute_eta_seconds(
     infinite value, and never reports the duration ceiling alone as the
     estimate (a report of "5400s remaining" the instant a 90-minute-ceiling
     run starts would just be restating the ceiling, not an estimate).
+
+    Also returns None once the duration budget is exhausted while the run is
+    still going. GuideLLM clamps its own remaining_duration at 0.0 (see
+    `min(max(0.0, max_duration - elapsed), max_duration)` in
+    guidellm/scheduler/constraints/request.py), so a naive cap would report
+    exactly "0s remaining" for as long as a long in-flight request keeps the
+    runner busy past the ceiling -- a countdown that has reached zero and
+    stopped moving, while work demonstrably continues. No estimate is honest
+    here; `duration_budget_exhausted` in the snapshot says why.
     """
+    if remaining_duration is not None and remaining_duration <= 0:
+        return None
     if (
         processed_requests is None
         or elapsed_since_first_request is None
@@ -387,6 +403,15 @@ class OmoBenchTelemetryProgress:
                 "remaining_fraction": progress.remaining_fraction,
                 "remaining_seconds_duration_limit": progress.remaining_duration,
                 "eta_seconds": eta,
+                # The run's time budget is spent, but the runner is still
+                # active: GuideLLM cannot interrupt an in-flight request, so it
+                # finishes the current one before stopping. Reported explicitly
+                # so the dashboard can say that, instead of inferring
+                # "complete" from a remaining_fraction/eta that have both hit
+                # zero while work continues.
+                "duration_budget_exhausted": (
+                    progress.remaining_duration is not None and progress.remaining_duration <= 0
+                ),
                 "latest_metrics": {
                     "output_tokens_per_second": throughput,
                     "time_to_first_token_ms": accumulator.completed_metrics.time_to_first_token_ms.mean,
@@ -436,6 +461,7 @@ class OmoBenchTelemetryProgress:
             "remaining_fraction": None,
             "remaining_seconds_duration_limit": None,
             "eta_seconds": None,
+            "duration_budget_exhausted": False,
             "observer_error": None,
         }
 
@@ -452,6 +478,9 @@ class OmoBenchTelemetryProgress:
             "remaining_fraction": 0.0,
             "remaining_seconds_duration_limit": None,
             "eta_seconds": None,
+            # Terminal: the benchmark is genuinely over, so there is no
+            # outstanding in-flight request to explain.
+            "duration_budget_exhausted": False,
             "observer_error": None,
         }
 

@@ -164,7 +164,11 @@ own direct use is completely unaffected either way.
   combined the same way GuideLLM itself combines them (the smaller of the
   two). When this is not yet known (for example, still starting up, or
   telemetry is unavailable for this run), the bar shows an indeterminate
-  animation rather than a fabricated number.
+  animation rather than a fabricated number. Once the time budget is spent
+  while a request is still in flight, that fraction legitimately reads zero
+  remaining — so instead of a finished-looking 100% bar over a still-running
+  benchmark, the bar holds just short of complete and says the runner is
+  finishing its current request and stopping.
 - **Completed requests and total budget.** Two different numbers, kept
   visibly separate: the runner's total request budget (`total_budget`,
   including warmup and cooldown — 60 for `chat-small-extended-v1`) and the
@@ -182,6 +186,14 @@ own direct use is completely unaffected either way.
   GuideLLM's own execution finishes and OmoBench is writing the final
   evidence files, this becomes "Saving results…" rather than a countdown
   that would otherwise read as stuck at zero.
+
+  A run can also pass its time budget *before* finishing: `max_duration`
+  stops the scheduler from starting new work, but cannot interrupt a request
+  already streaming. Rather than a countdown frozen at "0s remaining", the
+  dashboard then states that the time limit has been reached and the runner
+  is finishing its current request. The displayed ceiling covers benchmark
+  execution only — model startup and cleanup are separate stages and were
+  never inside it.
 - **The chart.** Output tokens per second, plotted against elapsed
   benchmark time, from GuideLLM's own running statistic
   (`completed_metrics.output_tokens.rate_per_second`) — a **cumulative

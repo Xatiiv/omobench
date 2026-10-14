@@ -23,18 +23,20 @@ workload:
 execution:
   concurrency: 1
   measured_requests: 50
-  warmup_requests: 5
-  # GuideLLM 0.7.3's request-count cooldown boundary excludes one more
-  # trailing request than requested of it (verified end to end by driving
-  # its real scheduler-facing accumulator, not by inspecting the boundary
-  # function in isolation): asking for cooldown.value=5 actually excludes
-  # 6. cli.py's PROFILE_SPECS runner mapping compensates by requesting
-  # cooldown.value=4, so the *actual* excluded count matches this
-  # declared 5 exactly -- the contract here (5 warmup, 50 measured,
-  # 5 cooldown, 60 total) is what the runner actually executes, not
-  # merely what it was asked for. See
+  # Each of GuideLLM 0.7.3's request-count phase boundaries excludes one
+  # more request than requested of it -- warmup and cooldown alike (verified
+  # end to end by driving its real scheduler-facing accumulator through the
+  # real per-request event lifecycle: queued, pending, in_progress,
+  # first_token, completed -- not by inspecting the boundary function in
+  # isolation, and not by replaying completions alone). Asking for a phase
+  # value of 5 actually excludes 6. cli.py's PROFILE_SPECS runner mapping
+  # compensates by requesting warmup.value=4 and cooldown.value=4, so the
+  # *actual* excluded counts match these declared 5s exactly -- the contract
+  # here (5 warmup, 50 measured, 5 cooldown, 60 total) is what the runner
+  # actually executes, not merely what it was asked for. See
   # docs/proposals/chat-small-extended-v1.md and
   # ChatSmallExtendedBoundaryTests in cli/tests/test_cli.py.
+  warmup_requests: 5
   cooldown_requests: 5
   request_timeout_seconds: 300
   maximum_duration_seconds: 5400

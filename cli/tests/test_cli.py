@@ -100,6 +100,7 @@ GUIDELLM_REPORT_V2 = {
 class GuideLLMCommandTests(unittest.TestCase):
     def test_chat_small_is_a_fixed_single_stream_workload(self) -> None:
         command = build_guidellm_command(
+            root=ROOT,
             endpoint="http://localhost:8000/v1",
             model="Qwen/Qwen3-4B",
             profile_id="chat-small-v1",
@@ -112,6 +113,7 @@ class GuideLLMCommandTests(unittest.TestCase):
 
     def test_throughput_is_fixed_at_sixteen_streams(self) -> None:
         command = build_guidellm_command(
+            root=ROOT,
             endpoint="http://localhost:8000/v1",
             model="Qwen/Qwen3-4B",
             profile_id="throughput-v1",
@@ -126,19 +128,21 @@ class GuideLLMCommandTests(unittest.TestCase):
     def test_chat_small_extended_uses_explicit_request_count_phases_and_both_stopping_constraints(self) -> None:
         """Same workload as chat-small-v1 (tokens, single stream), but warmup/cooldown
         are explicit request counts, not the percent/prefer_duration scheme.
-        cooldown.value=4 (not the naively-expected 5) is the documented compensation
-        for GuideLLM's own cooldown-boundary off-by-one (a cooldown.value=N excludes
-        N+1 trailing requests, verified end to end in ChatSmallExtendedBoundaryTests),
-        so the *actual* excluded cooldown is 5, matching the declared contract exactly:
-        5 warmup + 50 measured + 5 cooldown = 60, not 61."""
+        warmup.value=4 and cooldown.value=4 (not the naively-expected 5 for either)
+        are the documented compensation for GuideLLM's own phase-boundary off-by-one
+        (a phase value of N excludes N+1 requests, verified end to end against the
+        real multi-event request lifecycle in ChatSmallExtendedBoundaryTests), so the
+        *actual* excluded counts are 5 and 5, matching the declared contract exactly:
+        5 warmup + 50 measured + 5 cooldown = 60, not 61 or 62."""
         command = build_guidellm_command(
+            root=ROOT,
             endpoint="http://localhost:8000/v1",
             model="Qwen/Qwen3-4B",
             profile_id="chat-small-extended-v1",
             raw_output_path=Path("/tmp/benchmarks.json"),
         )
         self.assertIn(
-            "kind=synchronous,warmup.value=5,warmup.mode=requests,cooldown.value=4,cooldown.mode=requests",
+            "kind=synchronous,warmup.value=4,warmup.mode=requests,cooldown.value=4,cooldown.mode=requests",
             command,
         )
         # Same workload as chat-small-v1: unchanged tokens and request format.
@@ -191,29 +195,135 @@ def _guidellm_full_pipeline_classes():
 
 class ChatSmallExtendedBoundaryTests(unittest.TestCase):
     """Drives the pinned GuideLLM 0.7.3 package's real scheduler-facing accumulator
-    (GenerativeBenchmarkAccumulator.update_estimate, fed with real RequestInfo/
-    SchedulerState/GenerationRequest objects for a synthetic, deterministic
-    sequential -- concurrency=1 -- request timeline) through to the real final
-    compiled metrics (GenerativeMetrics.compile()'s request_totals, itself backed
-    by the real get_within_range() overlap filter). This is the complete counting
-    path chat-small-extended-v1 depends on: checking compute_transition_time in
-    isolation is not enough, since the accumulator and the final compile step have
-    their own logic (event ordering, inclusive/exclusive timestamp boundaries,
-    the overlap filter) that a narrower test would not exercise. Skipped
-    automatically wherever GuideLLM is not installed."""
+    (GenerativeBenchmarkAccumulator.update_estimate) through the *actual* per-request
+    event sequence the real scheduler emits -- queued, pending, in_progress,
+    first_token, then a terminal completed/errored/cancelled (confirmed directly in
+    guidellm/scheduler/worker_group.py's WorkerProcessGroup._update_state_request_counts
+    and guidellm/scheduler/scheduler.py's Scheduler.run() docstring) -- to the real
+    final compiled metrics (GenerativeMetrics.compile()'s request_totals, itself backed
+    by the real get_within_range() overlap filter).
+
+    A single "completed"-only call per request (this class's previous approach) is
+    NOT equivalent: GenerativeBenchmarkTimings.update_estimate() runs its warmup/
+    cooldown transition check (TransientPhaseConfig.compute_transition_time) on
+    *every* scheduler event, not just the terminal one, and does so based on
+    `info.started_at`, which is only populated once a request reaches "in_progress".
+    Replaying only the terminal event hid a real, separate warmup off-by-one (see
+    test_uncompensated_warmup_of_five_actually_excludes_six_not_five below) that a
+    real benchmark run surfaced: 24 successful requests recorded against a 50-request
+    minimum, traced back to warmup excluding six requests instead of the declared
+    five (see docs/proposals/chat-small-extended-v1.md). Skipped automatically
+    wherever GuideLLM is not installed."""
 
     def setUp(self) -> None:
         self.g = _guidellm_full_pipeline_classes()
+        self._counters = {
+            "processed_requests": 0, "created_requests": 0, "successful_requests": 0,
+            "errored_requests": 0, "cancelled_requests": 0,
+            "queued_requests": 0, "pending_requests": 0, "processing_requests": 0,
+        }
 
-    def _run_full_pipeline(self, configured_total: int, completed_count: int, warmup_value: int = 5, cooldown_value: int = 4):
-        """Replay `completed_count` sequential (concurrency=1), successful requests
-        through the real accumulator, with `configured_total` fixed throughout as
-        the --constraint max_requests value -- unaffected by how many requests
-        actually complete before a cutoff, exactly as the real scheduler's
-        constraint (`remaining_requests = max_num - state.processed_requests`,
-        confirmed in guidellm/scheduler/constraints/request.py) behaves. Returns
-        the real GenerativeMetrics.compile() result's request_totals.
-        """
+    def _state(self, configured_total: int):
+        c = self._counters
+        return self.g["SchedulerState"](
+            processed_requests=c["processed_requests"], successful_requests=c["successful_requests"],
+            errored_requests=c["errored_requests"], cancelled_requests=c["cancelled_requests"],
+            created_requests=c["created_requests"], queued_requests=c["queued_requests"],
+            pending_requests=c["pending_requests"], processing_requests=c["processing_requests"],
+            start_requests_time=0.0,
+            progress=self.g["SchedulerProgress"](
+                remaining_requests=configured_total - c["processed_requests"], total_requests=configured_total
+            ),
+        )
+
+    def _replay_request(
+        self, accumulator, configured_total: int, request_id: str, start: float, duration: float,
+        *, terminal_status: str = "completed",
+    ) -> None:
+        """Replay one request through the real, full five-event lifecycle a real
+        scheduler emits -- queued, pending, in_progress, first_token, terminal --
+        mutating `self._counters` exactly as
+        WorkerProcessGroup._update_state_request_counts does, and calling
+        accumulator.update_estimate() once per event (never once per request)."""
+        c = self._counters
+        request = self.g["GenerationRequest"](request_id=request_id)
+        info = self.g["RequestInfo"](request_id=request_id, status="queued")
+
+        c["created_requests"] += 1
+        c["queued_requests"] += 1
+        info.timings.queued = start
+        accumulator.update_estimate(None, request, info, self._state(configured_total))
+
+        c["queued_requests"] -= 1
+        c["pending_requests"] += 1
+        info.status = "pending"
+        info.timings.dequeued = start + 0.001
+        accumulator.update_estimate(None, request, info, self._state(configured_total))
+
+        c["pending_requests"] -= 1
+        c["processing_requests"] += 1
+        info.status = "in_progress"
+        info.timings.scheduled_at = start + 0.002
+        info.timings.resolve_start = start + 0.003
+        info.timings.request_start = start + 0.003
+        accumulator.update_estimate(None, request, info, self._state(configured_total))
+
+        if terminal_status == "cancelled_before_start":
+            # A request cut off before the backend ever began resolving it: no
+            # resolve_start, so the accumulator's incomplete-bucket guard
+            # (`info.timings.resolve_start is not None`) correctly drops it
+            # entirely rather than counting it as incomplete evidence.
+            c["processing_requests"] -= 1
+            c["cancelled_requests"] += 1
+            c["processed_requests"] += 1
+            info.status = "cancelled"
+            info.timings.resolve_start = None
+            info.timings.request_start = None
+            accumulator.update_estimate(None, request, info, self._state(configured_total))
+            return
+
+        info.status = "first_token"
+        info.timings.first_request_iteration = start + 0.01
+        info.timings.first_token_iteration = start + 0.01
+        info.timings.first_output_token_iteration = start + 0.01
+        accumulator.update_estimate(None, request, info, self._state(configured_total))
+
+        end = start + duration - 0.01
+        if terminal_status == "completed":
+            c["processing_requests"] -= 1
+            c["processed_requests"] += 1
+            c["successful_requests"] += 1
+        elif terminal_status == "errored":
+            c["processing_requests"] -= 1
+            c["processed_requests"] += 1
+            c["errored_requests"] += 1
+        elif terminal_status == "cancelled":
+            c["processing_requests"] -= 1
+            c["processed_requests"] += 1
+            c["cancelled_requests"] += 1
+        else:
+            raise ValueError(terminal_status)
+        info.status = terminal_status
+        info.timings.last_token_iteration = end
+        info.timings.last_request_iteration = end
+        info.timings.request_iterations = 1
+        info.timings.token_iterations = 1
+        info.timings.request_end = end
+        info.timings.resolve_end = end
+        info.timings.finalized = end
+        accumulator.update_estimate(None, request, info, self._state(configured_total))
+
+    def _run_full_pipeline(self, configured_total: int, completed_count: int, warmup_value: int = 4, cooldown_value: int = 4):
+        """Replay `completed_count` sequential (concurrency=1), successful requests,
+        each through the real five-event lifecycle above, with `configured_total`
+        fixed throughout as the --constraint max_requests value -- unaffected by how
+        many requests actually complete before a cutoff, exactly as the real
+        scheduler's constraint (`remaining_requests = max_num -
+        state.processed_requests`, confirmed in
+        guidellm/scheduler/constraints/request.py) behaves. `warmup_value`/
+        `cooldown_value` default to this profile's actually-shipped, compensated
+        mapping (4, not the naively-expected 5 for either phase). Returns the real
+        GenerativeMetrics.compile() result's request_totals."""
         warmup = self.g["TransientPhaseConfig"](value=warmup_value, mode="requests")
         cooldown = self.g["TransientPhaseConfig"](value=cooldown_value, mode="requests")
         config = self.g["BenchmarkConfig"](
@@ -223,53 +333,45 @@ class ChatSmallExtendedBoundaryTests(unittest.TestCase):
         )
         accumulator = self.g["GenerativeBenchmarkAccumulator"](config=config)
         for i in range(1, completed_count + 1):
-            # Sequential, non-overlapping, inclusive-at-both-ends per-request window:
-            # request i occupies [i - 1, i), matching concurrency=1 (one in flight
-            # at a time, back to back).
-            start, end = float(i - 1), float(i) - 0.01
-            request_id = f"req-{i}"
-            info = self.g["RequestInfo"](
-                request_id=request_id,
-                status="completed",
-                timings=self.g["RequestTimings"](
-                    targeted_start=start, queued=start, dequeued=start, scheduled_at=start,
-                    resolve_start=start, request_start=start,
-                    first_request_iteration=start + 0.001, first_token_iteration=start + 0.001,
-                    first_output_token_iteration=start + 0.001, last_token_iteration=end,
-                    last_request_iteration=end, request_iterations=1, token_iterations=1,
-                    request_end=end, resolve_end=end, finalized=end,
-                ),
-            )
-            # processed_requests/remaining_requests mirror the real constraint's
-            # own bookkeeping exactly (see docstring above): both are driven by
-            # how many requests have TERMINALLY completed so far, not by how many
-            # were merely dispatched.
-            state = self.g["SchedulerState"](
-                processed_requests=i, successful_requests=i, created_requests=i, queued_requests=i,
-                progress=self.g["SchedulerProgress"](remaining_requests=configured_total - i, total_requests=configured_total),
-            )
-            request = self.g["GenerationRequest"](request_id=request_id)
-            accumulator.update_estimate(None, request, info, state)
+            # Sequential, non-overlapping, back-to-back per-request window, matching
+            # concurrency=1 (one in flight at a time): request i starts at i - 1.
+            self._replay_request(accumulator, configured_total, f"req-{i}", float(i - 1), 1.0)
         return self.g["GenerativeMetrics"].compile(accumulator).request_totals
 
-    def test_warmup_of_five_excludes_exactly_five_requests(self) -> None:
-        totals = self._run_full_pipeline(configured_total=60, completed_count=60)
-        self.assertEqual(totals.total, 50)  # 60 - 5 warmup - 5 cooldown
+    def test_uncompensated_warmup_of_five_actually_excludes_six_not_five(self) -> None:
+        """The real-world bug: GuideLLM 0.7.3's own request-count warmup boundary
+        excludes phase_requests + 1 leading requests, not phase_requests, under the
+        real multi-event lifecycle -- the same off-by-one already documented and
+        compensated for cooldown, now confirmed to apply to warmup too. Left
+        uncompensated (warmup.value=5, the naive declared-value-as-input choice,
+        which is what chat-small-extended-v1 shipped with before this fix), cooldown
+        disabled (huge value) to isolate warmup's own effect: 20 requests in, this
+        excludes six, not five."""
+        totals = self._run_full_pipeline(configured_total=1000, completed_count=20, warmup_value=5, cooldown_value=0)
+        self.assertEqual(totals.total, 14)  # 20 - 6, not the declared 20 - 5 = 15
+
+    def test_compensated_warmup_of_four_actually_excludes_exactly_five_requests(self) -> None:
+        """warmup.value=4 (not the naively-expected 5) is the smallest correction that
+        makes the runner's *actual* behavior match the declared five-warmup-request
+        contract exactly, mirroring the already-shipped cooldown.value=4 compensation.
+        Cooldown disabled (huge value) to isolate warmup's own effect."""
+        totals = self._run_full_pipeline(configured_total=1000, completed_count=20, warmup_value=4, cooldown_value=0)
+        self.assertEqual(totals.total, 15)  # 20 - 5, matching the declared contract
 
     def test_uncompensated_cooldown_of_five_actually_excludes_six_not_five(self) -> None:
-        """The documented, verified GuideLLM 0.7.3 quirk this profile's runner
-        mapping compensates for: asking for cooldown.value=N excludes N+1 trailing
-        requests, not N. Left uncompensated (cooldown.value=5, the naive
-        declared-value-as-input choice) at a total of 60, this falls one short."""
+        """The same documented, verified GuideLLM 0.7.3 quirk, for cooldown: asking
+        for cooldown.value=N excludes N+1 trailing requests, not N. Left
+        uncompensated (cooldown.value=5) at a total of 60, this falls one short."""
         totals = self._run_full_pipeline(configured_total=60, completed_count=60, cooldown_value=5)
         self.assertEqual(totals.total, 49)
 
     def test_compensated_mapping_achieves_exactly_the_declared_five_warmup_fifty_measured_five_cooldown(self) -> None:
-        """The shipped runner mapping: cooldown.value=4 (not 5) at a total of 60
-        (not 61) -- the smallest correction that makes the runner's *actual*
-        behavior match the declared contract exactly, rather than inflating the
-        request budget to compensate. Verified end to end: real accumulator,
-        real final compiled metrics."""
+        """The shipped runner mapping: warmup.value=4 and cooldown.value=4 (not the
+        naively-expected 5 for either) at a total of 60 (not 61 or 62) -- the
+        smallest correction that makes the runner's *actual* behavior match the
+        declared contract exactly, rather than inflating the request budget to
+        compensate. Verified end to end: real accumulator, real multi-event
+        lifecycle, real final compiled metrics."""
         totals = self._run_full_pipeline(configured_total=60, completed_count=60)
         self.assertEqual(totals.successful, 50)
         self.assertEqual(totals.incomplete, 0)
@@ -307,10 +409,42 @@ class ChatSmallExtendedBoundaryTests(unittest.TestCase):
         """A host slow enough to only complete 27 of the 60 requests in 5400s (200 s/req)
         still gets correctly-scoped partial evidence, but that evidence legitimately
         falls short of minimum_successful_requests: 40 -- the correct, honest outcome
-        for hardware this slow, not a bug."""
+        for hardware this slow, not a bug. This is also, concretely, what the real
+        preserved extended run's shortfall looks like once the warmup fix above is
+        applied: a genuinely too-slow host, not a miscounted one."""
         totals = self._run_full_pipeline(configured_total=60, completed_count=27)
         self.assertEqual(totals.successful, 22)
         self.assertLess(totals.successful, 40)
+
+    def test_duration_limited_run_preserves_errored_and_incomplete_requests_correctly(self) -> None:
+        """Mixed terminal statuses under the real multi-event lifecycle: successful
+        requests land in `successful`, a request that errors after dispatch lands in
+        `errored` (not silently dropped or miscounted as successful), and a request
+        cut off before the backend ever began resolving it is excluded entirely
+        (never phantom-counted as incomplete evidence) -- matching
+        GenerativeBenchmarkAccumulator.update_estimate's own incomplete-bucket guard."""
+        warmup = self.g["TransientPhaseConfig"](value=4, mode="requests")
+        cooldown = self.g["TransientPhaseConfig"](value=4, mode="requests")
+        config = self.g["BenchmarkConfig"](
+            run_id="test-run", run_index=0, strategy=self.g["SynchronousStrategy"](),
+            constraints={}, warmup=warmup, cooldown=cooldown,
+            profile={}, requests={}, backend={}, environment={},
+        )
+        accumulator = self.g["GenerativeBenchmarkAccumulator"](config=config)
+        configured_total = 1000
+        for i in range(1, 6):  # 5 warmup requests
+            self._replay_request(accumulator, configured_total, f"warmup-{i}", float(i - 1), 1.0)
+        for i in range(1, 6):  # 5 measured successes
+            self._replay_request(accumulator, configured_total, f"ok-{i}", float(4 + i), 1.0)
+        self._replay_request(accumulator, configured_total, "err-1", 10.0, 1.0, terminal_status="errored")
+        self._replay_request(
+            accumulator, configured_total, "cancelled-1", 11.0, 1.0, terminal_status="cancelled_before_start"
+        )
+        totals = self.g["GenerativeMetrics"].compile(accumulator).request_totals
+        self.assertEqual(totals.successful, 5)
+        self.assertEqual(totals.errored, 1)
+        self.assertEqual(totals.incomplete, 0)
+        self.assertEqual(totals.total, 6)
 
 
 class RunIntentTests(unittest.TestCase):

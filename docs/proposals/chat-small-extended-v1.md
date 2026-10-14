@@ -91,7 +91,7 @@ in §3). The shipped entry:
 "chat-small-extended-v1": {
     "input_tokens": 1024,
     "output_tokens": 256,
-    "profile": "kind=synchronous,warmup.value=5,warmup.mode=requests,cooldown.value=4,cooldown.mode=requests",
+    "profile": "kind=synchronous,warmup.value=4,warmup.mode=requests,cooldown.value=4,cooldown.mode=requests",
     "max_requests": 60,
     "max_duration_seconds": 5400,
 },
@@ -108,17 +108,20 @@ Two changes from `chat-small-v1`, both explained and verified in §3:
    warmup and 540 s for cooldown regardless of how many requests that
    actually is. `mode=requests` ties each phase to an explicit request count
    instead, independent of how long each request takes.
-2. **`cooldown.value: 4`, not 5 — a documented compensation, not the declared
-   count.** GuideLLM 0.7.3's own request-count cooldown boundary excludes one
-   *more* trailing request than the value it is given (verified end to end
-   in §3: asking for `cooldown.value=5` actually excludes 6). Asking for
-   `cooldown.value=4` is the smallest correction that makes the runner's
-   *actual* excluded count equal to the declared 5 — not a change to what
-   "cooldown" means, and not a change to `cooldown_requests: 5` in the YAML,
-   which stays the accurate description of what actually happens.
-   `max_requests: 60` (5 + 50 + 5, the declared sum) follows directly once
-   the *actual* cooldown is corrected to 5 — no inflation of the request
-   budget is needed.
+2. **`warmup.value: 4` and `cooldown.value: 4`, not 5 — a documented
+   compensation, not the declared count.** Each of GuideLLM 0.7.3's own
+   request-count phase boundaries excludes one *more* request than the value
+   it is given (verified end to end in §3, against the real multi-event
+   request lifecycle: asking for 5 actually excludes 6, for either phase).
+   Asking for 4 is the smallest correction that makes each runner's *actual*
+   excluded count equal to the declared 5 — not a change to what "warmup" or
+   "cooldown" means, and not a change to `warmup_requests: 5` /
+   `cooldown_requests: 5` in the YAML, which stay the accurate description of
+   what actually happens. `max_requests: 60` (5 + 50 + 5, the declared sum)
+   follows directly once both *actual* phases are corrected to 5 — no
+   inflation of the request budget is needed. The warmup half of this was
+   missed on first implementation and corrected after a real run surfaced it;
+   see "Correction" in §3.
 
 `managed_setup.validate_recipe` and the `--profile` argparse `choices` on
 `run`/`package` both derive from `PROFILE_SPECS`, so adding this entry alone
@@ -152,11 +155,18 @@ increments on *terminal* completion, and `remaining_requests` is recomputed
 from it on every event, so both quantities mean exactly what a real run's
 constraint bookkeeping means, not an approximation of it), for a synthetic,
 sequential (concurrency = 1) request timeline where request *i* occupies the
-inclusive-start/exclusive-end window `[i − 1, i)`. Each event is fed through
-the real `GenerativeBenchmarkAccumulator.update_estimate()`, and the final
-answer is read from the real `GenerativeMetrics.compile(accumulator)` —
-i.e., scheduler events, accumulator updates, and final compiled metrics, the
-complete path, not one link in it.
+inclusive-start/exclusive-end window `[i − 1, i)`.
+
+Crucially, each request is replayed as the **full five-event lifecycle a real
+scheduler emits** — `queued`, `pending`, `in_progress`, `first_token`, then a
+terminal `completed`/`errored`/`cancelled` — with the `SchedulerState`
+counters mutated exactly as `WorkerProcessGroup._update_state_request_counts`
+mutates them, and `GenerativeBenchmarkAccumulator.update_estimate()` called
+once per *event*, not once per request. The final answer is read from the real
+`GenerativeMetrics.compile(accumulator)` — i.e., scheduler events, accumulator
+updates, and final compiled metrics, the complete path, not one link in it.
+(An earlier revision of this test replayed terminal events only; see the
+correction below for what that hid.)
 
 Findings, all from that test, verified rather than assumed:
 
@@ -173,18 +183,15 @@ Findings, all from that test, verified rather than assumed:
   would silently reinterpret a bare `warmup=5` as "5 **seconds**", not 5
   requests, then discard even that if a duration constraint is present).
   This is the trap explicit `mode=requests` avoids.
-- **Warmup is exact.** A `warmup.value=5` run, driven through the complete
-  path, excludes precisely requests 1–5 regardless of the configured total
-  (confirmed at totals of 59, 60, and 61 in earlier exploratory runs, and at
-  60 in the committed test).
-- **Cooldown is not exact — verified, not assumed, through the complete
-  path.** A `cooldown.value=5` run at a configured total of 60 yields
+- **Neither phase is exact: both exclude one more request than asked.**
+  A `cooldown.value=5` run at a configured total of 60 yields
   `request_totals.total = 49`, not 50: the boundary excludes the *last six*
-  requests, one more than asked. A `cooldown.value=4` run at the same total
-  of 60 yields exactly `request_totals = {successful: 50, incomplete: 0,
-  errored: 0, total: 50}` — the compensation exactly cancels the off-by-one,
-  and 60 (5 declared warmup + 50 declared measured + 5 *actual* cooldown) is
-  reached with no inflation of the request budget.
+  requests, one more than asked. **The same is true of warmup** — see the
+  correction below — so both are compensated to `value=4`, and a
+  `warmup.value=4, cooldown.value=4` run at a total of 60 yields exactly
+  `request_totals = {successful: 50, incomplete: 0, errored: 0, total: 50}`:
+  5 declared warmup + 50 declared measured + 5 *actual* cooldown, with no
+  inflation of the request budget.
 - `build_guidellm_command()` passes **two independent stop constraints**:
   `kind=max_requests,count=60` and `kind=max_duration,seconds=5400`.
   GuideLLM stops on whichever fires first — this is what makes 5,400 s a
@@ -203,6 +210,132 @@ Findings, all from that test, verified rather than assumed:
   normalizer reads (fixed in a prior session);
   `scheduler_metrics.requests_made` spans the full warmup+measured+cooldown
   lifecycle and must not be used for reporting.
+
+### Correction: the earlier "warmup is exact" finding was wrong
+
+An earlier revision of this document stated, under this same heading, that
+**"Warmup is exact: a `warmup.value=5` run, driven through the complete path,
+excludes precisely requests 1–5."** That claim was incorrect, and the profile
+shipped `warmup.value=5` on the strength of it. A real extended CPU run then
+recorded **24 successful measured requests** with **six** warmup requests
+excluded rather than the declared five
+(`.omobench-runs/ui/job-c21fd7c4b2735658/run-f59ec5667fd0/`).
+
+**Why the earlier test missed it.** It replayed each request as a *single*
+`update_estimate()` call already carrying `status="completed"`. A real run does
+not look like that. `Scheduler.run()` yields several updates per request —
+`queued`, `pending`, `in_progress`, `first_token`, then a terminal
+`completed`/`errored`/`cancelled` (see
+`WorkerProcessGroup._update_state_request_counts`) — and the benchmarker calls
+`accumulator.update_estimate()` on *each* of them.
+`GenerativeBenchmarkTimings.update_estimate()` in turn re-evaluates
+`TransientPhaseConfig.compute_transition_time()` on every one of those events,
+before the terminal-status check that routes a request into a sub-accumulator.
+The warmup branch keys its transition on `info.started_at`, which is only
+populated once a request reaches `in_progress`. A completion-only replay
+therefore exercised a sequence that cannot occur, and the boundary landed one
+request away from where it lands in production.
+
+**What the test does now.** `ChatSmallExtendedBoundaryTests` replays the full
+five-event lifecycle per request, mutating its `SchedulerState` counters
+exactly as `_update_state_request_counts` does, and asserts both the bug and
+its compensation explicitly:
+
+| Mapping (realistic lifecycle) | Requests excluded | Measured at a 60-request budget |
+| --- | --- | --- |
+| `warmup.value=5` (shipped before this fix) | 6 | 49 |
+| `warmup.value=4` (shipped now) | 5 | 50 |
+
+Both phases share one root cause — a phase value of *N* excludes *N + 1*
+requests — so both are compensated the same way, and the declared contract
+(5 warmup, 50 measured, 5 cooldown, 60 total) is what the runner now actually
+executes. The YAML's `warmup_requests: 5` / `cooldown_requests: 5` are
+unchanged: the correction is in the runner mapping only, so no declared
+workload, threshold, or count moved.
+
+**Scope.** This fixes the *accounting*. It does not make the preserved run's
+host faster: with warmup correctly excluding five, that run's own shortfall
+against `minimum_successful_requests: 40` remains a genuine
+too-slow-for-this-budget outcome, not a miscount (see §4, and
+`test_a_much_slower_duration_limited_run_falls_below_the_acceptance_minimum`).
+
+### `execution.request_timeout_seconds` is now wired to the backend
+
+`execution.request_timeout_seconds` was declared by every profile but read by
+nothing: `build_guidellm_command()` never passed it on, so runs used GuideLLM's
+own default. It now resolves from the selected profile's YAML into the
+`openai_http` backend as `timeout=…`, on both execution paths (the plain
+subprocess path and the in-process telemetry path resolve the same argv, and
+`scenario_equivalence_summary()` now compares `backend_timeout` too).
+
+**What it actually bounds.** GuideLLM 0.7.3 passes this value to HTTPX as the
+**read** timeout — `httpx.Timeout(read=args.timeout, connect=args.timeout_connect, …)`
+in `guidellm/backends/openai/http.py`. A read timeout bounds the wait for the
+*next* response chunk, not the total duration of a streaming request. So:
+
+- a server that accepts the connection and then sends nothing fails after the
+  timeout instead of hanging;
+- a stream that stalls between chunks fails at the timeout;
+- **a response that keeps streaming steadily does not fail, however long it
+  runs in total.**
+
+All three are pinned by fixture-server tests against the real backend in
+`cli/tests/test_request_timeout.py`. The third is the important one: this
+change alone does **not** cap a long request at 300 s, and does not prevent a
+single request from overrunning the duration budget. A slow CPU host producing
+a token every few seconds is streaming normally as far as HTTPX is concerned.
+
+### Duration overrun: what the runner does, and what the dashboard now says
+
+`max_duration` stops the *scheduler from starting new work*; it cannot
+interrupt a request already in flight. GuideLLM clamps its own
+`remaining_duration` at zero (`min(max(0.0, max_duration - elapsed), max_duration)`,
+`guidellm/scheduler/constraints/request.py`), so once the budget is spent both
+`remaining_duration` and `remaining_fraction` sit at 0 while the final request
+keeps streaming — which is exactly what the preserved run did, its last two
+requests slowing sharply near the end.
+
+Read naively, that state made the dashboard claim the run was finished while it
+was still working: ETA capped to `min(eta, 0)` rendered **"0s remaining"**, and
+`1 − remaining_fraction` rendered a **100%** progress bar. Both are now handled
+explicitly (`DurationOverrunTests` in `cli/tests/test_telemetry.py`):
+
+- `compute_eta_seconds()` returns `None`, not `0.0`, once the budget is spent —
+  a countdown frozen at zero while work continues reads as a stuck run.
+- The snapshot carries `duration_budget_exhausted`, so the page states the
+  situation rather than inferring completion from zeroed figures.
+- The bar holds at 99% with "Time limit reached — the runner is finishing its
+  current request and stopping". It never shows 100% or "Saving results" until
+  the benchmark genuinely completes (that stage comes only from
+  `on_benchmark_complete`/`on_finalize`).
+- The ceiling is labelled "benchmark execution only", distinguishing it from
+  model startup and cleanup, which it never covered.
+
+The raw telemetry figures are still reported truthfully; the flag explains
+them rather than replacing them.
+
+### Proposal (not implemented): true request and benchmark deadlines
+
+Neither change above gives a *deadline*. Two gaps remain, both worth a separate,
+reviewed change rather than a quiet one here:
+
+1. **A real per-request deadline.** A read timeout cannot bound a steadily
+   streaming response. A true per-request cap would need either a wall-clock
+   deadline applied around the streaming loop, or a server-side bound
+   (llama.cpp's own `--timeout`, or a `max_tokens` low enough that a request
+   cannot run long at the host's observed token rate).
+2. **A benchmark deadline that accounts for in-flight work.** `max_duration`
+   is a "stop starting work" boundary. A profile wanting a bounded *total*
+   wall-clock time would need a second, explicit grace window after it, with
+   the behaviour at the end of that window stated in the profile.
+
+Deliberately out of scope for this change: any hard-kill policy. Terminating an
+in-flight request mid-stream converts a slow-but-valid measurement into a
+cancelled one, which changes what a duration-limited result *means* — and
+`chat-small-extended-v1` exists precisely so slow hosts can finish honestly.
+Any such policy belongs in a profile's declared semantics, versioned with it,
+not bolted onto the runner. Existing profile semantics are unchanged here:
+`maximum_duration_seconds` still means what it has always meant.
 
 ### Discrepancy flagged, not silently worked around
 
@@ -438,3 +571,22 @@ adding a second recipe surfaces a genuine picker with no JS changes.
   `GenerativeMetrics.compile()` end to end (`ChatSmallExtendedBoundaryTests`
   in `cli/tests/test_cli.py`, run — not skipped — against the pinned
   GuideLLM 0.7.3 package), not through the boundary function alone.
+- **Third correction, after a real extended run**: the second correction's
+  verification replayed one `update_estimate()` call per request, already
+  carrying `status="completed"`. A real scheduler yields several events per
+  request (`queued`, `pending`, `in_progress`, `first_token`, terminal), and
+  the warmup boundary is re-evaluated on each of them, keyed on a timestamp
+  that only exists from `in_progress` onward. Under that real sequence
+  `warmup.value=5` excludes **six** requests, not five — which a real
+  extended CPU run then exhibited. Corrected here: `warmup.value=4`
+  (matching the existing cooldown compensation), with
+  `ChatSmallExtendedBoundaryTests` rewritten to replay the full lifecycle and
+  to assert the uncompensated bug explicitly; the earlier "warmup is exact"
+  finding is retracted in §3. Two further gaps the same run exposed are
+  addressed alongside it: `execution.request_timeout_seconds` is now actually
+  passed to the backend (as HTTPX's read timeout — documented for what it
+  does and does not bound), and the dashboard no longer reports a
+  zero-second ETA or a 100% bar while a run is past its time budget but still
+  finishing an in-flight request. True request/benchmark deadlines are
+  proposed in §3 but deliberately not implemented, and no hard-kill policy is
+  introduced.

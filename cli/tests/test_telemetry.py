@@ -166,6 +166,7 @@ class ConfigurationEquivalenceTests(unittest.TestCase):
 
     def _resolve(self, profile_id: str, raw_output_path: Path):
         command = cli.build_guidellm_command(
+            root=ROOT,
             endpoint="http://127.0.0.1:9",
             model="Qwen/Qwen3-4B",
             profile_id=profile_id,
@@ -192,18 +193,25 @@ class ConfigurationEquivalenceTests(unittest.TestCase):
         self.assertEqual(summary["seed"], {"kind": "static", "value": 20260828})
         self.assertEqual(summary["metrics_kind"], "generative")
         self.assertEqual(summary["outputs"], [("json", str(raw_output_path))])
+        # The profile's own declared execution.request_timeout_seconds, as
+        # GuideLLM resolved it onto the backend (its httpx read timeout).
+        self.assertEqual(summary["backend_timeout"], cli.profile_request_timeout_seconds(ROOT, "chat-small-v1"))
 
     def test_chat_small_extended_v1_resolves_its_own_warmup_cooldown_contract(self):
         """Regression guard: the extended profile's request-count warmup/
-        cooldown compensation (cooldown.value=4 to actually exclude 5) must
-        resolve identically through this path -- telemetry must never be
-        able to see, let alone change, a different warmup/cooldown."""
+        cooldown compensation (warmup.value=4 and cooldown.value=4, each to
+        actually exclude 5) must resolve identically through this path --
+        telemetry must never be able to see, let alone change, a different
+        warmup/cooldown, or a different request timeout."""
         with tempfile.TemporaryDirectory() as tmp:
             summary = self._resolve("chat-small-extended-v1", Path(tmp) / "out.json")
         spec = cli.PROFILE_SPECS["chat-small-extended-v1"]
         constraint_json = dict(summary["constraints"])
         self.assertIn(f'"count":{spec["max_requests"]}', constraint_json["max_requests"])
         self.assertEqual(summary["profile_kind"], "synchronous")
+        self.assertEqual(summary["warmup"], {"percent": None, "value": 4, "mode": "requests"})
+        self.assertEqual(summary["cooldown"], {"percent": None, "value": 4, "mode": "requests"})
+        self.assertEqual(summary["backend_timeout"], 300.0)
 
     def test_resolution_is_identical_whether_or_not_telemetry_is_the_caller(self):
         """Calling resolve_benchmark_scenario twice against the same argv --
@@ -211,7 +219,7 @@ class ConfigurationEquivalenceTests(unittest.TestCase):
         resolution -- must produce the same configuration. Telemetry
         observes; it does not get a different, second configuration."""
         command = cli.build_guidellm_command(
-            endpoint="http://127.0.0.1:9", model="Qwen/Qwen3-4B",
+            root=ROOT, endpoint="http://127.0.0.1:9", model="Qwen/Qwen3-4B",
             profile_id="chat-small-v1", raw_output_path=Path("/tmp/out.json"),
         )
         argv = telemetry.argv_for_run_command(command)
@@ -439,11 +447,108 @@ class EtaEstimationTests(unittest.TestCase):
     def test_never_negative_or_infinite(self):
         eta = telemetry.compute_eta_seconds(
             processed_requests=10, elapsed_since_first_request=10.0,
-            remaining_requests=0, remaining_duration=0.0,
+            remaining_requests=0, remaining_duration=1.0,
         )
         self.assertIsNotNone(eta)
         self.assertGreaterEqual(eta, 0.0)
         self.assertTrue(eta < float("inf"))
+
+
+class DurationOverrunTests(unittest.TestCase):
+    """Controlled reproduction of what the dashboard is told once a run's time
+    budget is spent while its last request is still streaming -- the state a
+    real extended CPU run reached, where a single long request outlived the
+    nominal duration budget.
+
+    GuideLLM clamps its own remaining_duration at 0.0
+    (`min(max(0.0, max_duration - elapsed), max_duration)` in
+    guidellm/scheduler/constraints/request.py), and remaining_fraction is the
+    minimum of the request- and duration-derived fractions, so both legitimately
+    read "finished" while the runner demonstrably is not."""
+
+    def test_an_exhausted_budget_reports_no_estimate_rather_than_zero_seconds(self):
+        """The misleading case this replaces: a rate-based estimate capped by a
+        remaining_duration of 0.0 produced exactly "0s remaining", and kept
+        producing it for as long as the in-flight request ran."""
+        eta = telemetry.compute_eta_seconds(
+            processed_requests=20, elapsed_since_first_request=5400.0,
+            remaining_requests=36, remaining_duration=0.0,
+        )
+        self.assertIsNone(eta)
+
+    def test_an_estimate_still_appears_while_any_budget_remains(self):
+        """The guard is specific to an exhausted budget: a run with even a
+        little time left still gets a real estimate."""
+        eta = telemetry.compute_eta_seconds(
+            processed_requests=20, elapsed_since_first_request=5390.0,
+            remaining_requests=36, remaining_duration=10.0,
+        )
+        self.assertEqual(eta, 10.0)
+
+    def test_snapshot_flags_the_exhausted_budget_while_the_run_is_still_active(self):
+        """What the dashboard actually polls: an explicit flag, rather than the
+        page having to infer "still running" from a zeroed fraction and ETA."""
+        snapshot = self._emit_snapshot(remaining_duration=0.0, remaining_requests=36.0)
+        self.assertTrue(snapshot["duration_budget_exhausted"])
+        self.assertIsNone(snapshot["eta_seconds"])
+        # The raw figures are still reported truthfully, not massaged: the flag
+        # explains them, it does not replace them.
+        self.assertEqual(snapshot["remaining_seconds_duration_limit"], 0.0)
+        self.assertEqual(snapshot["stage"], "benchmarking")
+
+    def test_snapshot_does_not_flag_a_run_inside_its_budget(self):
+        snapshot = self._emit_snapshot(remaining_duration=600.0, remaining_requests=36.0)
+        self.assertFalse(snapshot["duration_budget_exhausted"])
+
+    def _emit_snapshot(self, *, remaining_duration: float, remaining_requests: float) -> dict:
+        """Drive the real observer's own update path with a stand-in accumulator
+        and scheduler state, and return the snapshot it wrote."""
+
+        class _Stats:
+            rate_per_second = 1.2
+            mean = 1.0
+
+        class _Metrics:
+            output_tokens = _Stats()
+            time_to_first_token_ms = _Stats()
+            request_latency = _Stats()
+
+        class _Timings:
+            status = "active"
+            duration = 5400.0
+
+        class _Accumulator:
+            timings = _Timings()
+            completed_metrics = _Metrics()
+
+        class _Progress:
+            def __init__(self):
+                self.remaining_requests = remaining_requests
+                self.remaining_duration = remaining_duration
+                self.total_requests = 60.0
+                self.remaining_fraction = 0.0 if remaining_duration <= 0 else 0.1
+
+        class _State:
+            def __init__(self):
+                self.processed_requests = 24
+                self.successful_requests = 24
+                self.errored_requests = 0
+                self.cancelled_requests = 0
+                self.progress = _Progress()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            snapshot_path = Path(temporary) / "telemetry.json"
+            observer = telemetry.OmoBenchTelemetryProgress(
+                writer=telemetry.TelemetryWriter(
+                    snapshot_path=snapshot_path,
+                    history_path=Path(temporary) / "history.json",
+                    min_interval=0.0,
+                ),
+                run_label="chat-small-extended-v1",
+                total_measured_requests=50,
+            )
+            observer._emit_update(_Accumulator(), _State())
+            return json.loads(snapshot_path.read_text(encoding="utf-8"))
 
 
 @unittest.skipIf(os.name == "nt", "The fixture server and SIGTERM cancellation test use POSIX signal semantics")
