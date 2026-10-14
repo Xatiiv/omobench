@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import gzip
 import hashlib
 import importlib.metadata
@@ -625,6 +626,33 @@ def profile_measured_requests(root: Path, profile_id: str) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+# A benchmark that ran, but whose required evidence log could not be
+# finalized (flushed and closed): the measurements exist, but the bundle is
+# incomplete, so the run is not a completed result. Value borrowed from
+# sysexits' EX_IOERR.
+#
+# The code alone is never used to *identify* this case -- a runner is free to
+# exit 74 for its own reasons -- so RunnerOutcome below carries the fact
+# explicitly, reported only by the code that actually observed it.
+EVIDENCE_FINALIZATION_EXIT_CODE = 74
+
+
+@dataclass
+class RunnerOutcome:
+    """How a benchmark invocation ended.
+
+    `returncode` is the runner's own exit status (or
+    EVIDENCE_FINALIZATION_EXIT_CODE when an otherwise successful run could not
+    have its required log finalized). `evidence_log_finalized` records whether
+    guidellm.stdout.log -- required evidence, unlike the optional telemetry
+    snapshot -- was actually flushed and closed, so callers never have to infer
+    that from a number that could mean something else.
+    """
+
+    returncode: int
+    evidence_log_finalized: bool = True
+
+
 def guidellm_runner_invocation(command: list[str]) -> list[str]:
     """Rewrite a canonical `["guidellm", "run", ...]` command so it executes
     the GuideLLM installation `guidellm_runner_preflight()` actually verified.
@@ -658,7 +686,7 @@ def run_guidellm_command(
     root: Path,
     profile_id: str,
     telemetry_dir: Path | None,
-) -> int:
+) -> RunnerOutcome:
     """Run `command` (as built by build_guidellm_command) exactly as the
     plain subprocess path always has -- unless `telemetry_dir` is given, in
     which case this additionally tries an in-process run with a live
@@ -674,12 +702,28 @@ def run_guidellm_command(
     """
     invocation = guidellm_runner_invocation(command)
 
-    def plain_subprocess(note: str | None = None) -> int:
-        with log_path.open("w", encoding="utf-8") as log_file:
+    def plain_subprocess(note: str | None = None) -> RunnerOutcome:
+        log_file = log_path.open("w", encoding="utf-8")
+        try:
             if note is not None:
                 log_file.write(note)
                 log_file.flush()
-            return subprocess.run(invocation, stdout=log_file, stderr=subprocess.STDOUT, text=True).returncode
+            returncode = subprocess.run(invocation, stdout=log_file, stderr=subprocess.STDOUT, text=True).returncode
+        except BaseException:
+            with contextlib.suppress(OSError, ValueError):
+                log_file.close()
+            raise
+        # Same contract as the telemetry path: the benchmark has already run,
+        # so a failure finalizing its required log never re-runs it and never
+        # touches what was written -- but it does stop the run being reported
+        # as completed. See EVIDENCE_FINALIZATION_EXIT_CODE.
+        try:
+            log_file.flush()
+            log_file.close()
+        except (OSError, ValueError) as error:
+            print(f"Could not finalize the required evidence log {log_path}: {error}", file=sys.stderr)
+            return RunnerOutcome(returncode or EVIDENCE_FINALIZATION_EXIT_CODE, evidence_log_finalized=False)
+        return RunnerOutcome(returncode)
 
     if telemetry_dir is None:
         return plain_subprocess()
@@ -704,7 +748,7 @@ def run_guidellm_command(
     # "w", destroying the finished run's output, and launch a duplicate
     # benchmark. It is allowed to propagate instead.
     try:
-        return telemetry_module.run_generative_benchmark_with_telemetry(
+        returncode = telemetry_module.run_generative_benchmark_with_telemetry(
             argv,
             snapshot_path=telemetry_dir / "telemetry.json",
             history_path=telemetry_dir / "telemetry-history.json",
@@ -714,6 +758,12 @@ def run_guidellm_command(
         )
     except telemetry_module.TelemetryUnavailable as error:
         return plain_subprocess(f"OmoBench: live telemetry unavailable ({error}); running without it.\n")
+    # telemetry.py reports an unfinalized required log through this code, and
+    # reports it only when it actually observed the failure itself.
+    return RunnerOutcome(
+        returncode,
+        evidence_log_finalized=returncode != EVIDENCE_FINALIZATION_EXIT_CODE,
+    )
 
 
 def redact_endpoint(text: str, endpoint: str) -> str:
@@ -1133,13 +1183,14 @@ def write_local_run(args: argparse.Namespace) -> int:
     run_directory.mkdir(parents=True, exist_ok=False)
     log_path = run_directory / "guidellm.stdout.log"
     telemetry_dir = getattr(args, "telemetry_dir", None)
-    returncode = run_guidellm_command(
+    outcome = run_guidellm_command(
         command,
         log_path=log_path,
         root=root,
         profile_id=args.profile,
         telemetry_dir=(root / telemetry_dir).resolve() if telemetry_dir else None,
     )
+    returncode = outcome.returncode
 
     log_path.write_text(
         redact_endpoint(log_path.read_text(encoding="utf-8"), args.endpoint),
@@ -1161,6 +1212,20 @@ def write_local_run(args: argparse.Namespace) -> int:
     if raw_output_path.exists():
         compress_file(raw_output_path)
 
+    if not outcome.evidence_log_finalized:
+        # The benchmark itself ran. Everything it produced above -- the
+        # compressed runner output, environment.json, reproduce.md, and the
+        # partial log -- is preserved and left untouched; the run is simply
+        # not a complete result, because its required runner log is not.
+        # Driven by the explicit flag, never by the exit code alone: a runner
+        # is free to exit 74 for reasons of its own.
+        print(
+            f"The benchmark ran, but its required evidence log could not be finalized: {log_path}\n"
+            f"The measurements and files already written in {run_directory} are preserved. "
+            "This run is not a completed result: check the disk and re-run when it can be written in full.",
+            file=sys.stderr,
+        )
+        return returncode
     if returncode != 0:
         print(f"GuideLLM failed; inspect {log_path}", file=sys.stderr)
         return returncode

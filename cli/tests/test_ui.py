@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 from omobench.cli import build_parser
 from omobench.ui import Controller, UIError, UIServer, endpoint_origin, panel_lock, probe_connection, run_config, safe_log
-from test_cli import GUIDELLM_REPORT_V2, install_guidellm_module_stub
+from test_cli import GUIDELLM_REPORT_V2, install_guidellm_module_stub, patch_parent_process_preflight
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -223,6 +223,9 @@ class ExecutionTests(unittest.TestCase):
         self.stub.mkdir()
         self.path_patch = patch.dict(os.environ, {"PATH": str(self.bin) + os.pathsep + os.environ["PATH"]})
         self.path_patch.start()
+        # Controller.start() runs the real preflight in *this* process, before
+        # spawning anything; the stub runner's metadata reaches only the child.
+        patch_parent_process_preflight(self)
         self.controller = Controller(self.root)
         # The fixture checkout uses the real CLI under test, not a separately
         # installed worktree. The runner stand-in shadows the guidellm *module*

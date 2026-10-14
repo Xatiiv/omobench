@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from omobench.ui import UIServer
 from omobench import managed_setup as ms
-from test_cli import GUIDELLM_REPORT_V2, install_guidellm_module_stub
+from test_cli import GUIDELLM_REPORT_V2, install_guidellm_module_stub, patch_parent_process_preflight
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -325,6 +325,10 @@ class GuidedRunLifecycleTests(unittest.TestCase):
         self.model_path = self.root / "model.gguf"
         self.model_path.write_bytes(b"fixture-model")
 
+        # ManagedController runs the real preflight in *this* process before
+        # any managed run starts; the stub runner's metadata reaches only the
+        # child. See patch_parent_process_preflight in test_cli.py.
+        patch_parent_process_preflight(self)
         self.server = UIServer(("127.0.0.1", 0), self.root)
         self.server.controller.environment["PYTHONPATH"] = str(self.stub) + os.pathsep + str(ROOT / "cli" / "src")
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)

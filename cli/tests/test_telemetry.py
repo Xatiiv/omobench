@@ -323,11 +323,11 @@ class RunGuidellmCommandFallbackTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "log.txt"
             with patch("omobench.cli.subprocess.run", side_effect=self._fake_subprocess_run(expected)) as run_mock:
-                returncode = cli.run_guidellm_command(
+                outcome = cli.run_guidellm_command(
                     self.COMMAND, log_path=log_path, root=Path(tmp),
                     profile_id="chat-small-v1", telemetry_dir=None,
                 )
-            self.assertEqual(returncode, 0)
+            self.assertEqual(outcome.returncode, 0)
             run_mock.assert_called_once()
             self.assertIn("plain subprocess ran", log_path.read_text())
 
@@ -343,11 +343,11 @@ class RunGuidellmCommandFallbackTests(unittest.TestCase):
             with patch("omobench.cli.shutil.which", return_value="/some/unrelated/bin/guidellm"), patch(
                 "omobench.telemetry.run_generative_benchmark_with_telemetry", return_value=0
             ) as telemetry_mock, patch("omobench.cli.subprocess.run") as run_mock:
-                returncode = cli.run_guidellm_command(
+                outcome = cli.run_guidellm_command(
                     self.COMMAND, log_path=log_path, root=Path(tmp),
                     profile_id="chat-small-v1", telemetry_dir=telemetry_dir,
                 )
-            self.assertEqual(returncode, 0)
+            self.assertEqual(outcome.returncode, 0)
             telemetry_mock.assert_called_once()
             run_mock.assert_not_called()
 
@@ -360,11 +360,11 @@ class RunGuidellmCommandFallbackTests(unittest.TestCase):
                 "omobench.telemetry.run_generative_benchmark_with_telemetry",
                 side_effect=telemetry.TelemetryUnavailable("simulated setup-time failure"),
             ), patch("omobench.cli.subprocess.run", side_effect=self._fake_subprocess_run(expected)) as run_mock:
-                returncode = cli.run_guidellm_command(
+                outcome = cli.run_guidellm_command(
                     self.COMMAND, log_path=log_path, root=Path(tmp),
                     profile_id="chat-small-v1", telemetry_dir=telemetry_dir,
                 )
-            self.assertEqual(returncode, 0)
+            self.assertEqual(outcome.returncode, 0)
             run_mock.assert_called_once()  # exactly one attempt, never a duplicate
             log_text = log_path.read_text()
             self.assertIn("live telemetry unavailable", log_text)
@@ -381,11 +381,11 @@ class RunGuidellmCommandFallbackTests(unittest.TestCase):
             with patch.object(
                 Path, "mkdir", side_effect=PermissionError("simulated permission error"),
             ), patch("omobench.cli.subprocess.run", side_effect=self._fake_subprocess_run(expected)) as run_mock:
-                returncode = cli.run_guidellm_command(
+                outcome = cli.run_guidellm_command(
                     self.COMMAND, log_path=log_path, root=Path(tmp),
                     profile_id="chat-small-v1", telemetry_dir=telemetry_dir,
                 )
-            self.assertEqual(returncode, 0)
+            self.assertEqual(outcome.returncode, 0)
             run_mock.assert_called_once()
             self.assertIn("plain subprocess ran", log_path.read_text())
 
@@ -785,18 +785,20 @@ class _FailingLog:
 
 
 class PostStartLogFailureTests(unittest.TestCase):
-    """Once the benchmark has actually been invoked, a failing log write,
-    flush, or close must never escape run_generative_benchmark_with_telemetry().
+    """guidellm.stdout.log is required evidence, and finalizing it can fail
+    after the benchmark has already run.
 
-    The caller treats any exception from it as "telemetry could not start"
-    and falls back -- which would reopen this run's own log with "w",
-    destroying its output, and run a second benchmark. The run's real exit
-    status is the only honest answer once execution has begun."""
+    Two rules apply at once. Nothing may escape as an exception: the caller
+    reads that as "telemetry could not start", reopens this run's own log with
+    "w" -- destroying its output -- and runs a second benchmark. And nothing
+    may report success either: a bundle whose runner log was never finalized
+    is incomplete, so the run is reported through
+    EVIDENCE_FINALIZATION_EXIT_CODE instead."""
 
     def setUp(self):
         _skip_unless_guidellm_pinned()
 
-    def _run(self, *, fail_on: str, entrypoint_fails: bool = False):
+    def _run(self, *, fail_on: str, entrypoint_fails: bool = False, entrypoint_writes: str | None = None):
         import guidellm.utils.console as console_module
 
         log = _FailingLog(fail_on=fail_on)
@@ -804,6 +806,8 @@ class PostStartLogFailureTests(unittest.TestCase):
 
         async def fake_entrypoint(**kwargs):
             invocations.append(kwargs)
+            if entrypoint_writes is not None:
+                log.write(entrypoint_writes)
             if entrypoint_fails:
                 raise RuntimeError("backend exploded mid-run")
             return None
@@ -826,16 +830,25 @@ class PostStartLogFailureTests(unittest.TestCase):
                 )
         return returncode, log, invocations
 
-    def test_a_failing_close_after_a_successful_run_still_reports_success(self):
+    def test_a_failing_close_is_reported_as_an_evidence_failure_not_success(self):
         returncode, log, invocations = self._run(fail_on="close")
-        self.assertEqual(returncode, 0)
+        self.assertEqual(returncode, cli.EVIDENCE_FINALIZATION_EXIT_CODE)
+        self.assertNotEqual(returncode, 0, "a run with an unfinalized required log is not completed")
         self.assertEqual(len(invocations), 1, "the benchmark must be invoked exactly once")
         self.assertTrue(log.closed)
 
-    def test_a_failing_flush_after_a_successful_run_still_reports_success(self):
+    def test_a_failing_flush_is_reported_as_an_evidence_failure_not_success(self):
         returncode, _log, invocations = self._run(fail_on="flush")
-        self.assertEqual(returncode, 0)
+        self.assertEqual(returncode, cli.EVIDENCE_FINALIZATION_EXIT_CODE)
         self.assertEqual(len(invocations), 1)
+
+    def test_whatever_the_run_did_write_is_preserved_not_discarded(self):
+        """The measurements and the partial log stay exactly as the run left
+        them: finalization failing changes the exit status, nothing else."""
+        returncode, log, invocations = self._run(fail_on="close", entrypoint_writes="partial runner output\n")
+        self.assertEqual(returncode, cli.EVIDENCE_FINALIZATION_EXIT_CODE)
+        self.assertEqual(len(invocations), 1)
+        self.assertEqual(log.written, ["partial runner output\n"])
 
     def test_a_failing_write_while_reporting_an_execution_failure_still_reports_that_failure(self):
         """The failure note cannot be written, but the run still failed: the
@@ -844,10 +857,18 @@ class PostStartLogFailureTests(unittest.TestCase):
         self.assertEqual(returncode, 1)
         self.assertEqual(len(invocations), 1)
 
-    def test_a_failing_close_after_an_execution_failure_still_reports_that_failure(self):
+    def test_an_already_failed_run_keeps_its_own_failure_status(self):
+        """A run that failed is already not completed; its own exit code is the
+        more informative one, so the evidence code does not mask it."""
         returncode, _log, invocations = self._run(fail_on="close", entrypoint_fails=True)
         self.assertEqual(returncode, 1)
         self.assertEqual(len(invocations), 1)
+
+    def test_a_healthy_log_still_reports_plain_success(self):
+        returncode, log, invocations = self._run(fail_on="none")
+        self.assertEqual(returncode, 0)
+        self.assertEqual(len(invocations), 1)
+        self.assertTrue(log.closed)
 
 
 if __name__ == "__main__":

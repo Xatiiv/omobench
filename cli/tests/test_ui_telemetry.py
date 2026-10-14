@@ -9,7 +9,7 @@ from pathlib import Path
 from omobench.ui import Controller
 
 from test_telemetry import FIXTURE_MODEL_ID, _require_offline_tokenizer, _skip_unless_guidellm_pinned, _start_fixture_server
-from test_cli import install_guidellm_module_stub
+from test_cli import install_guidellm_module_stub, patch_parent_process_preflight
 from test_ui import RUN_CONFIG, ROOT, make_root, wait_for
 
 
@@ -22,6 +22,9 @@ class ControllerTelemetryEndpointTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         make_root(self.root)
+        # Controller.start() runs the real preflight in *this* process; the
+        # stub runner's metadata reaches only the child. See the helper.
+        patch_parent_process_preflight(self)
         self.controller = Controller(self.root)
 
     def tearDown(self):

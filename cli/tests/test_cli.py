@@ -172,12 +172,42 @@ def install_guidellm_module_stub(directory: Path, body: str) -> Path:
 
     Execution goes through `<this interpreter> -m guidellm`
     (cli.guidellm_runner_invocation), so a stand-in runner must shadow the
-    module; a script named "guidellm" on PATH is deliberately not consulted."""
+    module; a script named "guidellm" on PATH is deliberately not consulted.
+
+    Distribution metadata is written alongside it, because the child process
+    runs the same real preflight (guidellm_runner_preflight -> package
+    metadata) before executing anything. CI installs the base CLI without
+    GuideLLM, so a stub supplying only code is rejected before it ever runs.
+    This metadata is confined to `directory`: it exists only on the PYTHONPATH
+    handed to that subprocess, never in any installed environment."""
     package = directory / "guidellm"
     package.mkdir(parents=True, exist_ok=True)
     (package / "__init__.py").write_text("", encoding="utf-8")
     (package / "__main__.py").write_text(body, encoding="utf-8")
+    dist_info = directory / f"guidellm-{GUIDELLM_VERSION}.dist-info"
+    dist_info.mkdir(parents=True, exist_ok=True)
+    (dist_info / "METADATA").write_text(
+        f"Metadata-Version: 2.1\nName: guidellm\nVersion: {GUIDELLM_VERSION}\n", encoding="utf-8"
+    )
     return directory
+
+
+def patch_parent_process_preflight(test_case: unittest.TestCase) -> None:
+    """Satisfy the preflight the *parent* process runs, for the duration of
+    one test only.
+
+    Controller.start()/ManagedController check `guidellm_runner_preflight()`
+    themselves, in this process, before spawning anything -- and the stub's
+    metadata above lives only on the child's PYTHONPATH. Without this, a
+    GuideLLM-less environment (exactly what CI's Python job installs) rejects
+    the fixture before any runner, real or stand-in, is reached.
+
+    Scoped through addCleanup so it is undone even on failure, and so tests
+    that assert genuine missing/wrong-version behaviour -- which patch the
+    same seam with their own values -- are unaffected."""
+    patcher = patch("omobench.cli.guidellm_installed_version", return_value=GUIDELLM_VERSION)
+    patcher.start()
+    test_case.addCleanup(patcher.stop)
 
 
 def install_conflicting_path_executable(directory: Path, marker: Path) -> Path:
@@ -256,11 +286,12 @@ class ConflictingPathExecutableTests(unittest.TestCase):
     def test_ordinary_cli_execution_ignores_the_conflicting_executable(self) -> None:
         from omobench.cli import run_guidellm_command
 
-        returncode = run_guidellm_command(
+        outcome = run_guidellm_command(
             self._command(), log_path=self.log_path, root=self.root,
             profile_id="chat-small-v1", telemetry_dir=None,
         )
-        self.assertEqual(returncode, 0)
+        self.assertEqual(outcome.returncode, 0)
+        self.assertTrue(outcome.evidence_log_finalized)
         self.assertTrue(self.module_marker.is_file(), "this interpreter's guidellm module should have run")
         self.assertFalse(self.path_marker.exists(), "the conflicting PATH executable must never be invoked")
 
@@ -274,11 +305,11 @@ class ConflictingPathExecutableTests(unittest.TestCase):
             "run_generative_benchmark_with_telemetry",
             side_effect=telemetry_module.TelemetryUnavailable("no observer here"),
         ):
-            returncode = run_guidellm_command(
+            outcome = run_guidellm_command(
                 self._command(), log_path=self.log_path, root=self.root,
                 profile_id="chat-small-v1", telemetry_dir=self.root / "telemetry",
             )
-        self.assertEqual(returncode, 0)
+        self.assertEqual(outcome.returncode, 0)
         self.assertTrue(self.module_marker.is_file())
         self.assertFalse(self.path_marker.exists())
         self.assertIn("live telemetry unavailable", self.log_path.read_text(encoding="utf-8"))
@@ -311,8 +342,9 @@ class TelemetryFallbackBoundaryTests(unittest.TestCase):
         from omobench import telemetry as telemetry_module
 
         subprocess_mock = Mock(return_value=subprocess.CompletedProcess(args=[], returncode=0))
-        returncode = self._run(telemetry_module.TelemetryUnavailable("could not attach"), subprocess_mock)
-        self.assertEqual(returncode, 0)
+        outcome = self._run(telemetry_module.TelemetryUnavailable("could not attach"), subprocess_mock)
+        self.assertEqual(outcome.returncode, 0)
+        self.assertTrue(outcome.evidence_log_finalized)
         self.assertEqual(subprocess_mock.call_count, 1, "exactly one benchmark invocation")
         self.assertIn("live telemetry unavailable", self.log_path.read_text(encoding="utf-8"))
 
@@ -342,6 +374,25 @@ class TelemetryFallbackBoundaryTests(unittest.TestCase):
             self._run(RuntimeError("something went wrong mid-run"), subprocess_mock)
         subprocess_mock.assert_not_called()
 
+    def test_an_unfinalizable_required_log_is_reported_not_retried(self) -> None:
+        """guidellm.stdout.log is required evidence. If it cannot be finalized
+        after a benchmark that already ran, the run must be reported as an
+        evidence failure -- never retried, never truncated."""
+        from omobench.cli import EVIDENCE_FINALIZATION_EXIT_CODE
+
+        evidence = "runner output from the run that already happened\n"
+
+        def already_executed(*_args, **kwargs):
+            Path(kwargs["stdout_log_path"]).write_text(evidence, encoding="utf-8")
+            return EVIDENCE_FINALIZATION_EXIT_CODE
+
+        subprocess_mock = Mock(return_value=subprocess.CompletedProcess(args=[], returncode=0))
+        outcome = self._run(already_executed, subprocess_mock)
+        self.assertEqual(outcome.returncode, EVIDENCE_FINALIZATION_EXIT_CODE)
+        self.assertFalse(outcome.evidence_log_finalized, "the caller must be told explicitly, not left to infer")
+        subprocess_mock.assert_not_called()
+        self.assertEqual(self.log_path.read_text(encoding="utf-8"), evidence)
+
     def test_a_telemetry_directory_failure_is_still_pre_execution(self) -> None:
         """mkdir happens before anything is invoked, so it still falls back."""
         from omobench.cli import run_guidellm_command
@@ -350,13 +401,68 @@ class TelemetryFallbackBoundaryTests(unittest.TestCase):
         blocker.write_text("not a directory", encoding="utf-8")
         subprocess_mock = Mock(return_value=subprocess.CompletedProcess(args=[], returncode=0))
         with patch("omobench.cli.subprocess.run", subprocess_mock):
-            returncode = run_guidellm_command(
+            outcome = run_guidellm_command(
                 ["guidellm", "run", "--backend", "x"],
                 log_path=self.log_path, root=self.root,
                 profile_id="chat-small-v1", telemetry_dir=blocker,
             )
-        self.assertEqual(returncode, 0)
+        self.assertEqual(outcome.returncode, 0)
         self.assertEqual(subprocess_mock.call_count, 1)
+
+
+class EvidenceFinalizationFailureTests(unittest.TestCase):
+    """What a contributor is left with when the benchmark ran but its required
+    log could not be finalized: every file the run produced, and an honest
+    failure -- not a completed result."""
+
+    def test_measurements_and_partial_files_are_preserved_and_the_run_is_not_completed(self) -> None:
+        from omobench.cli import EVIDENCE_FINALIZATION_EXIT_CODE, RunnerOutcome, write_local_run
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            copy_repo_tree_for_registry_validation(root)
+            partial_log = "runner output written before the disk filled\n"
+
+            def ran_then_failed_to_finalize(command, *, log_path, root, profile_id, telemetry_dir):
+                # The benchmark itself completed: it wrote its raw report and
+                # part of its log before finalization failed.
+                log_path.write_text(partial_log, encoding="utf-8")
+                raw = log_path.parent / "guidellm-benchmarks.json"
+                raw.write_text(json.dumps(GUIDELLM_REPORT_V2), encoding="utf-8")
+                return RunnerOutcome(EVIDENCE_FINALIZATION_EXIT_CODE, evidence_log_finalized=False)
+
+            args = argparse.Namespace(
+                endpoint="http://127.0.0.1:8092", model="Qwen/Qwen3-4B", profile="chat-small-v1",
+                output_dir=".omobench-runs", execute=True,
+            )
+            original_directory = Path.cwd()
+            os.chdir(root)
+            try:
+                with patch("omobench.cli.guidellm_installed_version", return_value=GUIDELLM_VERSION), patch(
+                    "omobench.cli.run_guidellm_command", side_effect=ran_then_failed_to_finalize
+                ), patch("omobench.cli.doctor_report", return_value={"cpu": "fixture"}):
+                    stderr = io.StringIO()
+                    with redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+                        returncode = write_local_run(args)
+            finally:
+                os.chdir(original_directory)
+
+            self.assertEqual(returncode, EVIDENCE_FINALIZATION_EXIT_CODE)
+            self.assertNotEqual(returncode, 0, "an unfinalized required log is not a completed run")
+            message = stderr.getvalue()
+            self.assertIn("could not be finalized", message)
+            self.assertIn("preserved", message)
+
+            runs = list((root / ".omobench-runs").glob("run-*"))
+            self.assertEqual(len(runs), 1, "exactly one run directory: the benchmark is never retried")
+            run_directory = runs[0]
+            # Everything the run produced survives, including the partial log.
+            self.assertEqual(
+                (run_directory / "guidellm.stdout.log").read_text(encoding="utf-8"), partial_log
+            )
+            self.assertTrue((run_directory / "guidellm-benchmarks.json.gz").is_file())
+            self.assertTrue((run_directory / "environment.json").is_file())
+            self.assertTrue((run_directory / "reproduce.md").is_file())
 
 
 def _guidellm_full_pipeline_classes():

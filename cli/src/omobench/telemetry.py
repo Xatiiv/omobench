@@ -32,6 +32,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from .cli import EVIDENCE_FINALIZATION_EXIT_CODE
+
 # GuideLLM stage names, mapped to the guided page's own vocabulary. GuideLLM's
 # own accumulator.timings.status only distinguishes these four; "starting"
 # covers the moment before the first request is even sent.
@@ -600,25 +602,48 @@ def run_generative_benchmark_with_telemetry(
     # second attempt, and never a silent overwrite of anything this run
     # itself already wrote.
     #
-    # Log I/O below is therefore best-effort and deliberately swallowed. A
-    # failing write, flush, or close (a full disk, a revoked handle, an
-    # unwritable mount) cannot un-run a benchmark that has already executed,
-    # and must not escape: the caller's fallback treats an exception here as
+    # No exception may escape from here on: the caller's fallback reads one as
     # "telemetry could not start", reopens this very log with "w" -- erasing
-    # the finished run's output -- and launches a duplicate benchmark. The
-    # run's real exit status is the honest answer, and is what is returned.
+    # the finished run's output -- and launches a duplicate benchmark. Problems
+    # are therefore reported as exit codes, never raised.
     try:
-        try:
-            outcome = _run_coroutine_cancellable_by_sigterm(
-                real_entrypoint(args=scenario, progress=observer, console=console)
-            )
-        except Exception as error:  # noqa: BLE001
-            with contextlib.suppress(OSError, ValueError):
-                log_file.write(f"\nOmoBench: benchmark execution failed: {error}\n")
-            return 1
-        return 130 if outcome == "cancelled" else 0
-    finally:
-        # Explicit, suppressed close instead of `with log_file:`, whose
-        # implicit close raises straight through a `return`.
+        outcome = _run_coroutine_cancellable_by_sigterm(
+            real_entrypoint(args=scenario, progress=observer, console=console)
+        )
+    except Exception as error:  # noqa: BLE001
         with contextlib.suppress(OSError, ValueError):
-            log_file.close()
+            log_file.write(f"\nOmoBench: benchmark execution failed: {error}\n")
+        returncode = 1
+    else:
+        returncode = 130 if outcome == "cancelled" else 0
+
+    # stdout_log_path is REQUIRED evidence -- unlike the telemetry snapshot,
+    # which is an optional side channel and stays best-effort (TelemetryWriter
+    # disables itself on failure rather than raising). A bundle whose runner
+    # log was never finalized is incomplete, so this cannot be reported as a
+    # completed run.
+    #
+    # What does NOT happen here: the benchmark is not re-run, and nothing
+    # already written is reopened or truncated. The measurements, the partial
+    # log, and every other artifact stay exactly as the run left them; only
+    # the exit status changes, so the CLI, the panel, and the guided page all
+    # show an evidence-finalization failure instead of success.
+    finalization_error: Exception | None = None
+    try:
+        log_file.flush()
+    except (OSError, ValueError) as error:
+        finalization_error = error
+    try:
+        log_file.close()
+    except (OSError, ValueError) as error:
+        finalization_error = finalization_error or error
+
+    if finalization_error is not None:
+        print(
+            f"Could not finalize the required evidence log {stdout_log_path}: {finalization_error}",
+            file=sys.stderr,
+        )
+        # An already-failed or cancelled run keeps its own status: that failure
+        # is the more informative one, and the run is not "completed" either way.
+        return returncode or EVIDENCE_FINALIZATION_EXIT_CODE
+    return returncode
