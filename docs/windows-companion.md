@@ -145,6 +145,22 @@ Absence is only ever concluded from positive evidence: a process that exists
 but cannot be signalled, a probe that could not run, and a distribution that
 did not answer are all treated as "still there", never as "gone".
 
+All of that comes from one reading of the process table, which reports each
+process, its parent, and when it started. Asking about one process at a time
+cannot distinguish "that process is not there" from "the question failed" —
+both answer the same way — so the companion does not ask that way. The start
+time matters too: a process id on its own is a slot the system reuses, so
+anything left over from an earlier attempt is matched on its start time, in
+the distribution it was recorded in, before it is signalled again. A process
+id that has since been given to something else is recognised as a stranger and
+left alone.
+
+While a panel is still unresolved, **Open panel** will not start a second one
+over it. Doing so would overwrite the details the first one's recovery depends
+on and leave its processes unreachable, with the window showing a healthy new
+panel as though nothing were wrong. Stop it first; once it is confirmed gone,
+starting works normally.
+
 If the stop cannot be confirmed, it says so rather than reporting success: the
 window shows **The panel could not be confirmed stopped** and names what is
 still there, the companion keeps owning it, and **Stop** stays available to
@@ -255,8 +271,18 @@ Alongside that:
   segments, query parameters, fragments, credentials, a different scheme — is
   rejected. No value from a link ever becomes part of a command line: what
   runs comes from your saved configuration.
-- Nothing is passed through a shell. `wsl.exe` is invoked with an argument
-  list and execs the interpreter directly.
+- Nothing is passed through a shell. Every invocation uses
+  `wsl.exe --exec`, which runs the program directly through `execvpe`, so each
+  argument arrives exactly as written.
+
+  This is worth stating precisely, because the obvious form is not safe and
+  this code used it until recently. `wsl.exe -- <command>` hands the command to
+  the distribution's **login shell**, which then expands it: run
+  `wsl -- echo '$HOME'` and the shell answers with your home directory, not the
+  literal text. A checkout or interpreter path containing `$`, a backtick, a
+  glob or a semicolon would stop meaning itself. `--exec` removes the shell
+  from the chain entirely, and the test suite checks this by sending such
+  arguments through the real boundary and comparing what arrives.
 - The connection token appears only in the private startup document and in
   memory. It is redacted from the diagnostic log, and it never reaches the
   repository or the hosted website.

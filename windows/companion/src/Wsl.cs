@@ -177,7 +177,13 @@ namespace OmoBench.Companion
                 arguments.Add("--cd");
                 arguments.Add(workingDirectoryWslPath);
             }
-            arguments.Add("--");
+            // --exec, not --. With "--", wsl.exe hands the command to the
+            // distribution's login shell, which then expands it: a path
+            // containing $, a backtick, a glob or a semicolon stops meaning
+            // itself. --exec runs the program directly through execvpe, so
+            // every argument arrives exactly as written and no shell is
+            // involved at any point.
+            arguments.Add("--exec");
             arguments.AddRange(program);
             return CommandLine.Join(arguments);
         }

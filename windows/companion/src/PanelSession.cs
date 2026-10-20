@@ -88,7 +88,14 @@ namespace OmoBench.Companion
         /// this, a surviving runner would be forgotten the moment its parent
         /// disappeared.
         /// </summary>
-        private readonly List<int> _unconfirmedDescendants = new List<int>();
+        private readonly List<ProcessIdentity> _unconfirmedDescendants = new List<ProcessIdentity>();
+
+        /// <summary>
+        /// The distribution those leftovers were recorded in. A pid only means
+        /// anything inside the distribution it came from, so a retry pointed at
+        /// a different one refuses rather than signalling by number.
+        /// </summary>
+        private string _unconfirmedDistribution;
 
         public PanelState State { get; private set; }
         public string Message { get; private set; }
@@ -125,6 +132,18 @@ namespace OmoBench.Companion
 
         /// <summary>Counts panel launches, so a test can prove none happened.</summary>
         internal static int ProcessLaunchCount;
+
+        /// <summary>Test-only view of the ownership this session is holding.</summary>
+        internal string OwnedDistributionForTest
+        {
+            get { lock (_gate) { return _distribution; } }
+        }
+
+        /// <summary>Test-only view of the ownership this session is holding.</summary>
+        internal int OwnedPanelProcessIdForTest
+        {
+            get { lock (_gate) { return _panelProcessId; } }
+        }
 
         /// <summary>
         /// Adopt a panel as though this session had started it. Test-only: it
@@ -302,6 +321,22 @@ namespace OmoBench.Companion
                 {
                     return; // Already ours and alive; repeated clicks reuse it.
                 }
+            }
+
+            // A session whose fate is unresolved is not replaceable. The
+            // wsl.exe child exiting does not end the panel, so starting a
+            // second one here would overwrite the pid, token, status path and
+            // distribution that the first one's recovery depends on -- and the
+            // processes it left behind would become unreachable, with the
+            // window showing a brand new panel as though nothing were wrong.
+            if (OwnsUnconfirmedPanel)
+            {
+                Update(PanelState.StopFailed,
+                    "The previous panel has not been confirmed stopped.",
+                    "This companion still owns a panel it could not confirm had stopped, so it will "
+                    + "not start another one over it.\n\nPress Stop to try again. Once the first "
+                    + "panel is confirmed gone, Open panel will start a new one.");
+                return;
             }
 
             string invalid = configuration.Validate();
@@ -803,24 +838,125 @@ namespace OmoBench.Companion
         /// force-stopping a panel while leaving the runner beneath it alive --
         /// exactly the orphaning this code exists to prevent.
         /// </summary>
-        public static List<string> BuildProcessExistsProgram(int processId)
+        /// <summary>
+        /// One row of the process table: which process, whose child it is, and
+        /// when it started.
+        /// </summary>
+        internal sealed class ProcessRecord
         {
-            return new List<string>
-            {
-                "ps", "-o", "pid=", "--no-headers", "-p", RequireSignallablePid(processId),
-            };
+            public int Pid;
+            public int Parent;
+
+            /// <summary>
+            /// The start time exactly as the table printed it. Compared as
+            /// text, never interpreted -- all that matters is whether it is
+            /// still the same string for the same pid.
+            /// </summary>
+            public string StartedAt;
         }
 
         /// <summary>
-        /// Ask for every process in the distribution. Used only to establish
-        /// that the process listing can answer at all, because `ps` exits 1
-        /// both when nothing matched and when it rejected its own options, and
-        /// a distribution that cannot run `ps` would otherwise look exactly
-        /// like a distribution in which the panel has exited.
+        /// A process this session proved was its own, identified by pid *and*
+        /// the moment it started, so that a pid the kernel has since handed to
+        /// something else can be recognised as a stranger.
         /// </summary>
-        public static List<string> BuildAnyProcessProgram()
+        internal sealed class ProcessIdentity
         {
-            return new List<string> { "ps", "-o", "pid=", "--no-headers", "-e" };
+            public int Pid;
+            public string StartedAt;
+        }
+
+        internal static List<ProcessRecord> ParseProcessTable(string output)
+        {
+            List<ProcessRecord> rows = new List<ProcessRecord>();
+            if (string.IsNullOrEmpty(output))
+            {
+                return rows;
+            }
+            foreach (string rawLine in output.Split('\n'))
+            {
+                string line = rawLine.Trim();
+                if (line.Length == 0)
+                {
+                    continue;
+                }
+                string[] columns = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                if (columns.Length < 3)
+                {
+                    continue;
+                }
+                int pid, parent;
+                if (!int.TryParse(columns[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out pid)
+                    || !int.TryParse(columns[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out parent)
+                    || pid <= 0)
+                {
+                    continue;
+                }
+                // The start time is the remainder of the row: it contains
+                // spaces, so it is kept whole rather than split into fields.
+                rows.Add(new ProcessRecord
+                {
+                    Pid = pid,
+                    Parent = parent,
+                    StartedAt = string.Join(" ", columns, 2, columns.Length - 2),
+                });
+            }
+            return rows;
+        }
+
+        private bool TryReadProcessTable(string distribution, out List<ProcessRecord> table)
+        {
+            table = null;
+            ProcessResult result = RunInDistribution(distribution, BuildProcessTableProgram(), 10000);
+            if (result == null || result.TimedOut || result.ExitCode != 0)
+            {
+                return false;
+            }
+            List<ProcessRecord> rows = ParseProcessTable(result.StandardOutput);
+            if (rows.Count == 0)
+            {
+                // A distribution that is running always has processes, so this
+                // is a failed observation, not an empty one.
+                return false;
+            }
+            table = rows;
+            return true;
+        }
+
+        private static ProcessRecord Find(List<ProcessRecord> table, int processId)
+        {
+            foreach (ProcessRecord row in table)
+            {
+                if (row.Pid == processId)
+                {
+                    return row;
+                }
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Read the whole process table: pid, parent, and start time.
+        ///
+        /// One query answers every question this class asks -- is the panel
+        /// still there, what descends from it, and is a remembered pid still
+        /// the same process -- and it answers them from an observation that
+        /// validates itself: a running distribution always has processes, so
+        /// an empty or failed result means the question could not be asked,
+        /// never that the answer is nothing.
+        ///
+        /// Asking per-process instead cannot do that. `ps -p 1417` exits 1
+        /// both when that process is absent and when the query failed, and
+        /// `ps --ppid 1417` exits 1 both for a childless parent and for a
+        /// listing that broke -- so neither can distinguish absence from a
+        /// failed observation, whatever a separate query happens to report.
+        ///
+        /// The start time is what makes a pid an identity. On its own a pid is
+        /// only a slot the kernel reuses.
+        /// </summary>
+        public static List<string> BuildProcessTableProgram()
+        {
+            return new List<string> { "ps", "-e", "-o", "pid=,ppid=,lstart=" };
         }
 
         /// <summary>
@@ -933,23 +1069,27 @@ namespace OmoBench.Companion
 
             // It did not honour SIGTERM. Escalate, but only within the tree
             // below the process we proved is ours.
-            List<int> tree;
+            List<ProcessIdentity> tree;
             if (!TryCollectOwnedTree(distribution, panelProcessId, out tree))
             {
                 report = "The panel ignored the request to stop, and the companion could not list "
                     + "its processes to end them safely, so it stopped rather than guessing.";
                 return ShutdownOutcome.NotConfirmed;
             }
+            if (tree.Count == 0)
+            {
+                return ShutdownOutcome.Stopped;   // gone between the signal and the look
+            }
 
             Diagnostics.Write("The panel ignored SIGTERM; force-stopping its own process tree ("
                 + tree.Count.ToString(CultureInfo.InvariantCulture) + " process(es)).");
-            RunInDistribution(distribution, BuildForceKillProgram(tree), 15000);
+            RunInDistribution(distribution, BuildForceKillProgram(PidsOf(tree)), 15000);
 
             // Every process that was signalled has to be accounted for, not
             // just the parent. A runner that outlives the panel is exactly the
             // orphan this escalation exists to prevent, and it would otherwise
             // vanish from view the moment its parent died.
-            List<int> survivors = ConfirmGone(distribution, tree);
+            List<ProcessIdentity> survivors = ConfirmGone(distribution, tree);
             if (survivors.Count == 0)
             {
                 return ShutdownOutcome.Stopped;
@@ -961,43 +1101,77 @@ namespace OmoBench.Companion
         }
 
         /// <summary>
-        /// Wait, bounded, for each process to be confirmed gone. Returns the
-        /// ones that were not -- whether they are still alive or simply could
-        /// not be observed, because neither is a stop.
+        /// Wait, bounded, for each process to be confirmed gone, and return
+        /// the ones that were not.
+        ///
+        /// "Gone" includes a pid now held by a different process: the one that
+        /// was ours has ended, which is what was being waited for, and the
+        /// newcomer is nothing to do with us.
         /// </summary>
-        private List<int> ConfirmGone(string distribution, List<int> processIds)
+        private List<ProcessIdentity> ConfirmGone(string distribution, List<ProcessIdentity> processes)
         {
-            List<int> survivors = new List<int>();
-            foreach (int processId in processIds)
+            List<ProcessIdentity> survivors = new List<ProcessIdentity>();
+            foreach (ProcessIdentity process in processes)
             {
-                if (!WaitForDeparture(distribution, processId, ForcePeriodMilliseconds))
+                if (!WaitForDeparture(distribution, process.Pid, ForcePeriodMilliseconds))
                 {
-                    survivors.Add(processId);
+                    survivors.Add(process);
                 }
             }
-            return survivors;
+
+            if (survivors.Count == 0)
+            {
+                return survivors;
+            }
+
+            // A pid that is still present may no longer be the process it was.
+            List<ProcessRecord> table;
+            if (!TryReadProcessTable(distribution, out table))
+            {
+                return survivors;   // cannot tell; keep them, which keeps the retry
+            }
+            List<ProcessIdentity> stillOurs = new List<ProcessIdentity>();
+            foreach (ProcessIdentity survivor in survivors)
+            {
+                ProcessRecord row = Find(table, survivor.Pid);
+                if (row == null)
+                {
+                    continue;   // gone after all
+                }
+                if (!string.Equals(row.StartedAt, survivor.StartedAt, StringComparison.Ordinal))
+                {
+                    Diagnostics.Write("In-distribution pid "
+                        + survivor.Pid.ToString(CultureInfo.InvariantCulture)
+                        + " now belongs to a different process; the one this companion owned has ended.");
+                    continue;
+                }
+                stillOurs.Add(survivor);
+            }
+            return stillOurs;
         }
 
-        private static string Describe(string distribution, List<int> survivors, int panelProcessId)
+        private static string Describe(
+            string distribution, List<ProcessIdentity> survivors, int panelProcessId)
         {
             List<string> names = new List<string>();
-            foreach (int survivor in survivors)
+            foreach (ProcessIdentity survivor in survivors)
             {
-                names.Add(survivor.ToString(CultureInfo.InvariantCulture)
-                    + (survivor == panelProcessId ? " (the panel)" : " (started by the panel)"));
+                names.Add(survivor.Pid.ToString(CultureInfo.InvariantCulture)
+                    + (survivor.Pid == panelProcessId ? " (the panel)" : " (started by the panel)"));
             }
             return "These processes inside " + distribution
                 + " could not be confirmed stopped: " + string.Join(", ", names.ToArray()) + ".";
         }
 
-        private void RememberSurvivors(string distribution, List<int> survivors)
+        private void RememberSurvivors(string distribution, List<ProcessIdentity> survivors)
         {
             lock (_gate)
             {
                 _distribution = distribution;
-                foreach (int survivor in survivors)
+                _unconfirmedDistribution = distribution;
+                foreach (ProcessIdentity survivor in survivors)
                 {
-                    if (!_unconfirmedDescendants.Contains(survivor))
+                    if (!Contains(_unconfirmedDescendants, survivor.Pid))
                     {
                         _unconfirmedDescendants.Add(survivor);
                     }
@@ -1010,25 +1184,76 @@ namespace OmoBench.Companion
         /// confirm. These were reached by walking down from a process this
         /// session proved was its own, so they stay owned even after the panel
         /// above them has died and can no longer answer for itself.
+        ///
+        /// A remembered pid is not on its own a licence to signal. Between
+        /// attempts the process may have ended and the kernel handed its pid to
+        /// something entirely unrelated, so every one is checked against the
+        /// start time recorded when it was still provably ours, in the
+        /// distribution it was recorded in. Anything that does not match is not
+        /// signalled -- and neither is anything, if the check cannot be made.
         /// </summary>
         private bool TryFinishPreviousAttempt(string distribution, int panelProcessId, ref string report)
         {
-            List<int> outstanding;
+            List<ProcessIdentity> outstanding;
+            string recordedIn;
             lock (_gate)
             {
-                outstanding = new List<int>(_unconfirmedDescendants);
+                outstanding = new List<ProcessIdentity>(_unconfirmedDescendants);
+                recordedIn = _unconfirmedDistribution;
             }
             if (outstanding.Count == 0)
             {
                 return true;
             }
 
-            Diagnostics.Write("Retrying "
-                + outstanding.Count.ToString(CultureInfo.InvariantCulture)
-                + " process(es) a previous stop could not confirm.");
-            RunInDistribution(distribution, BuildForceKillProgram(outstanding), 15000);
+            if (!string.Equals(recordedIn, distribution, StringComparison.Ordinal))
+            {
+                report = "Processes left over from an earlier panel were recorded in "
+                    + (recordedIn ?? "another distribution")
+                    + ", so they cannot be dealt with from " + distribution + ".";
+                return false;
+            }
 
-            List<int> survivors = ConfirmGone(distribution, outstanding);
+            List<ProcessRecord> table;
+            if (!TryReadProcessTable(distribution, out table))
+            {
+                report = "The processes an earlier stop could not confirm cannot be identified "
+                    + "right now, so none of them was signalled.";
+                return false;
+            }
+
+            List<ProcessIdentity> stillOurs = new List<ProcessIdentity>();
+            foreach (ProcessIdentity remembered in outstanding)
+            {
+                ProcessRecord row = Find(table, remembered.Pid);
+                if (row == null)
+                {
+                    continue;   // the process we owned has ended
+                }
+                if (!string.Equals(row.StartedAt, remembered.StartedAt, StringComparison.Ordinal))
+                {
+                    // The pid is in use, but by something that started at a
+                    // different moment: not ours, and not to be signalled.
+                    Diagnostics.Write("Not signalling in-distribution pid "
+                        + remembered.Pid.ToString(CultureInfo.InvariantCulture)
+                        + ": it now identifies a different process.");
+                    continue;
+                }
+                stillOurs.Add(remembered);
+            }
+
+            if (stillOurs.Count == 0)
+            {
+                lock (_gate) { _unconfirmedDescendants.Clear(); }
+                return true;
+            }
+
+            Diagnostics.Write("Retrying "
+                + stillOurs.Count.ToString(CultureInfo.InvariantCulture)
+                + " process(es) a previous stop could not confirm.");
+            RunInDistribution(distribution, BuildForceKillProgram(PidsOf(stillOurs)), 15000);
+
+            List<ProcessIdentity> survivors = ConfirmGone(distribution, stillOurs);
             lock (_gate)
             {
                 _unconfirmedDescendants.Clear();
@@ -1082,77 +1307,15 @@ namespace OmoBench.Companion
                 return Liveness.Alive;
             }
 
-            List<int> listed;
-            switch (AskProcessListing(distribution, BuildProcessExistsProgram(processId), out listed))
+            List<ProcessRecord> table;
+            if (!TryReadProcessTable(distribution, out table))
             {
-                case ListingAnswer.Listed:
-                    // It is there after all -- we simply may not signal it.
-                    return listed.Contains(processId) ? Liveness.Alive : Liveness.Unknown;
-                case ListingAnswer.NothingMatched:
-                    return Liveness.Gone;
-                default:
-                    return Liveness.Unknown;
+                return Liveness.Unknown;
             }
-        }
-
-        private enum ListingAnswer
-        {
-            /// <summary>The listing answered, and these are the processes.</summary>
-            Listed,
-
-            /// <summary>The listing answered, and nothing matched.</summary>
-            NothingMatched,
-
-            /// <summary>No answer was obtained. Never read as an empty result.</summary>
-            Unusable,
-        }
-
-        /// <summary>
-        /// Run one process-listing query and say which of the three things
-        /// happened.
-        ///
-        /// The exit codes are measured, not assumed: `ps` returns 1 both when
-        /// nothing matched and when it rejected its own options, and 127 when
-        /// it could not be run at all. So 1 is ambiguous and has to be settled
-        /// by asking a question whose answer is already known, while anything
-        /// else non-zero is simply a failure.
-        /// </summary>
-        private ListingAnswer AskProcessListing(
-            string distribution, List<string> program, out List<int> processIds)
-        {
-            processIds = new List<int>();
-            ProcessResult result = RunInDistribution(distribution, program, 10000);
-            if (result == null || result.TimedOut)
-            {
-                return ListingAnswer.Unusable;
-            }
-            if (result.ExitCode == 0)
-            {
-                processIds = ParseProcessIds(result.StandardOutput);
-                return ListingAnswer.Listed;
-            }
-            if (result.ExitCode != 1)
-            {
-                return ListingAnswer.Unusable;
-            }
-            return ProcessListingAnswers(distribution)
-                ? ListingAnswer.NothingMatched
-                : ListingAnswer.Unusable;
-        }
-
-        /// <summary>
-        /// Can the process listing answer questions right now? Asking for every
-        /// process is the one query whose answer is known in advance: a running
-        /// distribution always has processes, so an empty or failed result means
-        /// the question could not be asked, not that the answer is nothing.
-        /// </summary>
-        private bool ProcessListingAnswers(string distribution)
-        {
-            ProcessResult everything = RunInDistribution(distribution, BuildAnyProcessProgram(), 10000);
-            return everything != null
-                && !everything.TimedOut
-                && everything.ExitCode == 0
-                && ParseProcessIds(everything.StandardOutput).Count > 0;
+            // Present in the table means alive -- including the case where we
+            // simply may not signal it, which is why kill(1) failing above
+            // settles nothing on its own.
+            return Find(table, processId) != null ? Liveness.Alive : Liveness.Gone;
         }
 
         /// <summary>
@@ -1161,21 +1324,29 @@ namespace OmoBench.Companion
         /// caller turns into an honest "could not confirm" rather than a
         /// broader kill.
         /// </summary>
-        private bool TryCollectOwnedTree(string distribution, int rootProcessId, out List<int> tree)
+        private bool TryCollectOwnedTree(
+            string distribution, int rootProcessId, out List<ProcessIdentity> tree)
         {
-            tree = new List<int> { rootProcessId };
+            tree = new List<ProcessIdentity>();
 
-            // Establish that the process listing works before trusting it to
-            // say "no children". The root is known to still be there -- it just
-            // ignored SIGTERM -- so ps must be able to report it.
-            ProcessResult capability = RunInDistribution(
-                distribution, BuildProcessExistsProgram(rootProcessId), 10000);
-            if (capability == null || capability.TimedOut || capability.ExitCode != 0
-                || ParseProcessIds(capability.StandardOutput).Count == 0)
+            // One observation, validated, for the whole walk. Querying parent
+            // by parent meant a failure partway could masquerade as "this one
+            // has no children", and a tree assembled from that is not a tree.
+            List<ProcessRecord> table;
+            if (!TryReadProcessTable(distribution, out table))
             {
+                Diagnostics.Write("The process table could not be read; refusing to force-stop "
+                    + "a tree that was not examined.");
                 return false;
             }
 
+            ProcessRecord root = Find(table, rootProcessId);
+            if (root == null)
+            {
+                return true;   // it went after all; an empty tree is the answer
+            }
+
+            tree.Add(new ProcessIdentity { Pid = root.Pid, StartedAt = root.StartedAt });
             List<int> frontier = new List<int> { rootProcessId };
 
             for (int depth = 0; depth < MaximumTreeDepth && frontier.Count > 0; depth++)
@@ -1183,14 +1354,9 @@ namespace OmoBench.Companion
                 List<int> next = new List<int>();
                 foreach (int parent in frontier)
                 {
-                    List<int> children;
-                    if (!TryListChildren(distribution, parent, out children))
+                    foreach (ProcessRecord row in table)
                     {
-                        return false;
-                    }
-                    foreach (int child in children)
-                    {
-                        if (child <= 1 || tree.Contains(child))
+                        if (row.Parent != parent || row.Pid <= 1 || Contains(tree, row.Pid))
                         {
                             continue;   // never init, and never loop on a cycle
                         }
@@ -1198,8 +1364,8 @@ namespace OmoBench.Companion
                         {
                             return false;   // implausible for a panel; refuse to widen
                         }
-                        tree.Add(child);
-                        next.Add(child);
+                        tree.Add(new ProcessIdentity { Pid = row.Pid, StartedAt = row.StartedAt });
+                        next.Add(row.Pid);
                     }
                 }
                 frontier = next;
@@ -1219,29 +1385,26 @@ namespace OmoBench.Companion
             return true;
         }
 
-        /// <summary>
-        /// The direct children of one process, or false if that could not be
-        /// established.
-        ///
-        /// `ps` exiting non-zero usually means "this parent has no children",
-        /// but it is also what a failed or rejected `ps` returns, and the root
-        /// probe having succeeded earlier does not make every later answer
-        /// trustworthy -- the distribution can stop answering midway. So a
-        /// non-zero exit is only read as "no children" when the listing is
-        /// shown, at that moment, to still be answering.
-        /// </summary>
-        private bool TryListChildren(string distribution, int parentProcessId, out List<int> children)
+        private static bool Contains(List<ProcessIdentity> identities, int processId)
         {
-            ListingAnswer answer = AskProcessListing(
-                distribution, BuildChildListProgram(parentProcessId), out children);
-            if (answer == ListingAnswer.Unusable)
+            foreach (ProcessIdentity identity in identities)
             {
-                Diagnostics.Write("Could not list the children of in-distribution pid "
-                    + parentProcessId.ToString(CultureInfo.InvariantCulture)
-                    + "; refusing to force-stop a tree that was not fully examined.");
-                return false;
+                if (identity.Pid == processId)
+                {
+                    return true;
+                }
             }
-            return true;
+            return false;
+        }
+
+        private static List<int> PidsOf(List<ProcessIdentity> identities)
+        {
+            List<int> pids = new List<int>();
+            foreach (ProcessIdentity identity in identities)
+            {
+                pids.Add(identity.Pid);
+            }
+            return pids;
         }
 
         internal static List<int> ParseProcessIds(string output)
@@ -1418,6 +1581,7 @@ namespace OmoBench.Companion
                 _origin = null;
                 _panelProcessId = 0;
                 _unconfirmedDescendants.Clear();
+                _unconfirmedDistribution = null;
             }
 
             if (!string.IsNullOrEmpty(statusFile))

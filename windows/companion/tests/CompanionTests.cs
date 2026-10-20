@@ -37,7 +37,9 @@ namespace OmoBench.Companion.Tests
             ShutdownTests();
             ShutdownOutcomeTests();
             ShutdownRobustnessTests();
+            RecoveryCorrectnessTests();
             ActivityCheckTests();
+            ArgumentDeliveryTests();
             RegistrationTests();
 
             Console.WriteLine();
@@ -606,7 +608,7 @@ namespace OmoBench.Companion.Tests
             Check("the distribution is selected explicitly", arguments.Contains("--distribution Ubuntu"));
             Check("the working directory is the checkout, quoted",
                 arguments.Contains("--cd \"/mnt/c/Users/Sam Smith/Code/omobench\""));
-            Check("the program follows -- so wsl.exe stops parsing options", arguments.Contains(" -- "));
+            Check("the program is executed directly, with no shell to expand it", arguments.Contains(" --exec "));
             Check("the interpreter path with spaces is quoted",
                 arguments.Contains("\"/home/sam/.venvs/omobench runner/bin/python\""));
             Check("no shell is involved", !arguments.Contains("bash") && !arguments.Contains("cmd.exe")
@@ -638,7 +640,7 @@ namespace OmoBench.Companion.Tests
 
             string arguments = Wsl.BuildRunArguments("Ubuntu", null, PanelSession.BuildShutdownProgram(4242));
             Check("the signal is scoped to the configured distribution",
-                arguments.Contains("--distribution Ubuntu") && arguments.Contains(" -- kill -TERM 4242"));
+                arguments.Contains("--distribution Ubuntu") && arguments.Contains(" --exec kill -TERM 4242"));
             Check("no global WSL shutdown is ever issued",
                 !arguments.Contains("--shutdown") && !arguments.Contains("--terminate"));
 
@@ -647,15 +649,28 @@ namespace OmoBench.Companion.Tests
             Check("liveness is checked with a signal that does nothing",
                 probe.Count == 3 && probe[0] == "kill" && probe[1] == "-0" && probe[2] == "4242");
 
-            List<string> exists = PanelSession.BuildProcessExistsProgram(4242);
-            Check("the process listing can be asked about one known process",
-                exists[0] == "ps" && exists.Contains("-p") && exists[exists.Count - 1] == "4242");
+            // One query answers liveness, parentage and identity, and it takes
+            // no process id -- so there is no per-process query whose failure
+            // could be mistaken for an answer about that process.
+            List<string> table = PanelSession.BuildProcessTableProgram();
+            Check("the process table is read in one query, for every process",
+                table[0] == "ps" && table.Contains("-e"));
+            Check("it carries parentage and start time, not just pids",
+                table.Contains("pid=,ppid=,lstart="));
+            Check("reading the table needs no process id to be trusted first",
+                !table.Contains("-p") && !table.Contains("--ppid"));
 
-            List<string> children = PanelSession.BuildChildListProgram(4242);
-            Check("children are listed by asking ps for one parent's children",
-                children[0] == "ps" && children.Contains("--ppid") && children[children.Count - 1] == "4242");
-            Check("the process listing asks for pids only, with no shell",
-                children.Contains("-o") && children.Contains("pid="));
+            List<PanelSession.ProcessRecord> parsed = PanelSession.ParseProcessTable(
+                "  1417     1 Mon Oct 20 13:28:57 2026\n"
+                + "  2000  1417 Mon Oct 20 13:29:01 2026\n"
+                + "\n"
+                + "  bogus row\n");
+            Check("the table parses pid, parent and start time", parsed.Count == 2);
+            Check("parentage is read", parsed[1].Pid == 2000 && parsed[1].Parent == 1417);
+            Check("the start time is kept whole, spaces and all",
+                parsed[0].StartedAt == "Mon Oct 20 13:28:57 2026");
+            Check("unparseable rows are dropped, not guessed at",
+                parsed[0].Pid == 1417 && parsed.Count == 2);
 
             List<string> force = PanelSession.BuildForceKillProgram(new[] { 4242, 4243 });
             Check("a forced stop names every process explicitly",
@@ -666,15 +681,15 @@ namespace OmoBench.Companion.Tests
 
             foreach (int refused in new[] { 0, 1, -1, -4242 })
             {
-                bool probeRejected = false, listRejected = false, killRejected = false;
+                bool probeRejected = false, termRejected = false, killRejected = false;
                 try { PanelSession.BuildAliveProbeProgram(refused); }
                 catch (ArgumentOutOfRangeException) { probeRejected = true; }
-                try { PanelSession.BuildChildListProgram(refused); }
-                catch (ArgumentOutOfRangeException) { listRejected = true; }
+                try { PanelSession.BuildShutdownProgram(refused); }
+                catch (ArgumentOutOfRangeException) { termRejected = true; }
                 try { PanelSession.BuildForceKillProgram(new[] { refused }); }
                 catch (ArgumentOutOfRangeException) { killRejected = true; }
                 Check("a pid of " + refused + " is refused everywhere, not just by SIGTERM",
-                    probeRejected && listRejected && killRejected);
+                    probeRejected && termRejected && killRejected);
             }
 
             bool emptyRejected = false;
@@ -736,6 +751,27 @@ namespace OmoBench.Companion.Tests
             public bool Responsive = true;
 
             /// <summary>
+            /// Makes a query about one specific process or parent fail with
+            /// exit 1 while the general listing keeps working. That is the
+            /// shape a reader cannot tell from "nothing matched", and the one
+            /// the 127-returning ChildListFails knob does not produce.
+            /// </summary>
+            public bool TargetedQueriesLie;
+
+            /// <summary>
+            /// When each process started, as the process table reports it.
+            /// Identity is the pid together with this: a pid on its own is
+            /// reused by the kernel and stops meaning the same process.
+            /// </summary>
+            public readonly Dictionary<int, string> StartedAt = new Dictionary<int, string>();
+
+            /// <summary>Retire a process and let an unrelated one take its pid.</summary>
+            public void ReusePid(int processId)
+            {
+                StartedAt[processId] = "Tue Oct 21 09:00:00 2026";
+            }
+
+            /// <summary>
             /// A panel that honours SIGTERM also stops the runner it started,
             /// which is why the graceful path does not need to enumerate.
             /// </summary>
@@ -752,9 +788,29 @@ namespace OmoBench.Companion.Tests
             {
                 Living.Add(UnrelatedPid);
                 Living.AddRange(living);
+                foreach (int pid in Living) { StartedAt[pid] = "Mon Oct 20 13:28:57 2026"; }
             }
 
             public bool IsAlive(int processId) { return Living.Contains(processId); }
+
+            private string StartOf(int processId)
+            {
+                string started;
+                return StartedAt.TryGetValue(processId, out started)
+                    ? started : "Mon Oct 20 13:28:57 2026";
+            }
+
+            private int ParentOf(int processId)
+            {
+                foreach (KeyValuePair<int, int[]> entry in Children)
+                {
+                    foreach (int child in entry.Value)
+                    {
+                        if (child == processId && Living.Contains(entry.Key)) { return entry.Key; }
+                    }
+                }
+                return 1;   // reparented to init once its parent has gone
+            }
 
             public ProcessResult Run(string arguments, int timeoutMilliseconds)
             {
@@ -768,7 +824,7 @@ namespace OmoBench.Companion.Tests
                 int last;
                 int.TryParse(parts[parts.Length - 1], out last);
 
-                if (arguments.Contains(" -- kill -0 "))
+                if (arguments.Contains(" kill -0 "))
                 {
                     if (!SignalCommandWorks) { return Exit(127, "", "kill: command not found"); }
                     if (NotSignallable.Contains(last))
@@ -782,7 +838,7 @@ namespace OmoBench.Companion.Tests
                         : Exit(1, "", "kill: (" + last + ") - No such process");
                 }
 
-                if (arguments.Contains(" -- kill -TERM "))
+                if (arguments.Contains(" kill -TERM "))
                 {
                     if (!SignalCommandWorks) { return Exit(127, "", "kill: command not found"); }
                     if (!Living.Contains(last)) { return Exit(1); }
@@ -794,7 +850,7 @@ namespace OmoBench.Companion.Tests
                     return Exit(0);
                 }
 
-                if (arguments.Contains(" -- kill -KILL "))
+                if (arguments.Contains(" kill -KILL "))
                 {
                     if (!SignalCommandWorks) { return Exit(127, "", "kill: command not found"); }
                     bool afterFlag = false;
@@ -810,7 +866,7 @@ namespace OmoBench.Companion.Tests
                     return Exit(0);
                 }
 
-                if (arguments.Contains(" -- ps "))
+                if (arguments.Contains(" ps "))
                 {
                     if (!ProcessListingWorks)
                     {
@@ -818,9 +874,24 @@ namespace OmoBench.Companion.Tests
                         // "nothing matched" by exit code alone.
                         return Exit(1, "", "error: unknown gnu long option");
                     }
+
+                    // The whole table: pid, parent, and when each started.
+                    if (arguments.Contains("pid=,ppid=,lstart="))
+                    {
+                        StringBuilder table = new StringBuilder();
+                        foreach (int pid in Living)
+                        {
+                            table.Append("  ").Append(pid).Append("  ")
+                                .Append(ParentOf(pid)).Append(" ")
+                                .Append(StartOf(pid)).Append("\n");
+                        }
+                        return Exit(0, table.ToString());
+                    }
+
                     if (arguments.Contains(" --ppid "))
                     {
                         if (ChildListFails.Contains(last)) { return Exit(127, "", "ps: cannot answer"); }
+                        if (TargetedQueriesLie) { return Exit(1); }
                         int[] children;
                         if (!Children.TryGetValue(last, out children)) { return Exit(1); }
                         List<int> alive = new List<int>();
@@ -832,11 +903,12 @@ namespace OmoBench.Companion.Tests
                     }
                     if (arguments.Contains(" -p "))
                     {
+                        if (TargetedQueriesLie) { return Exit(1); }
                         return Living.Contains(last) ? Exit(0, last + "\n") : Exit(1);
                     }
                     if (arguments.EndsWith(" -e", StringComparison.Ordinal))
                     {
-                        return Exit(0, Lines(Living));
+                        return Exit(0, Lines(Living));   // the plain "is ps working" listing
                     }
                 }
                 return Exit(127);
@@ -901,8 +973,8 @@ namespace OmoBench.Companion.Tests
                     "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t", out report);
                 Check("a panel that honours SIGTERM is confirmed stopped",
                     graceful == ShutdownOutcome.Stopped && report == null);
-                Check("it was asked, not killed", polite.Ran(" -- kill -TERM 1417") && !polite.Ran("kill -KILL"));
-                Check("its departure was actually verified", polite.Ran(" -- kill -0 1417"));
+                Check("it was asked, not killed", polite.Ran(" --exec kill -TERM 1417") && !polite.Ran("kill -KILL"));
+                Check("its departure was actually verified", polite.Ran(" --exec kill -0 1417"));
 
                 // 2. An unresponsive panel: escalation stays inside the tree
                 //    rooted at the process proved to be ours.
@@ -915,7 +987,7 @@ namespace OmoBench.Companion.Tests
                     "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t", out report);
                 Check("an unresponsive panel is escalated to and confirmed stopped",
                     escalated == ShutdownOutcome.Stopped);
-                Check("SIGTERM was tried before SIGKILL", stubborn.Ran(" -- kill -TERM 1417"));
+                Check("SIGTERM was tried before SIGKILL", stubborn.Ran(" --exec kill -TERM 1417"));
                 Check("the panel and its own descendants are force-stopped together",
                     stubborn.Ran("kill -KILL 1417 2000 2001"));
                 Check("an unrelated process is never named: " + stubborn.All,
@@ -1055,7 +1127,7 @@ namespace OmoBench.Companion.Tests
                 Check("a process that exists but cannot be signalled is not reported stopped",
                     permissionDenied == ShutdownOutcome.NotConfirmed);
                 Check("the process table was consulted, not just the signal",
-                    denied.Ran(" -- ps -o pid= --no-headers -p 1417"));
+                    denied.Ran("pid=,ppid=,lstart="));
 
                 // 2. The liveness question could not be asked at all.
                 FakeDistribution mute = new FakeDistribution(PanelPid)
@@ -1096,21 +1168,27 @@ namespace OmoBench.Companion.Tests
                 Check("the deepest descendant is still alive, having never been named",
                     deep.IsAlive(2004));
 
-                // 5. The capability probe succeeds, then a child listing fails.
-                //    "ps works" is not "every later ps answer is trustworthy".
+                // 5. A per-parent child listing that fails partway can no
+                //    longer influence anything, because the tree comes from one
+                //    validated reading of the whole table rather than a query
+                //    per parent. The grandchild is found and stopped regardless.
                 FakeDistribution flaky = new FakeDistribution(PanelPid, 2000, 2001);
                 flaky.IgnoresTerm.Add(PanelPid);
                 flaky.Children[PanelPid] = new[] { 2000 };
                 flaky.Children[2000] = new[] { 2001 };
                 flaky.ChildListFails.Add(2000);
+                flaky.TargetedQueriesLie = true;
                 PanelSession.WslRunner = flaky.Run;
                 ShutdownOutcome partial = new PanelSession().ShutdownLinuxSide(
                     "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t", out report);
-                Check("a child listing that fails mid-walk is refused, not read as childless",
-                    partial == ShutdownOutcome.NotConfirmed);
-                Check("no partial tree was force-stopped", !flaky.Ran("kill -KILL"));
-                Check("the grandchild behind the failed listing is still alive",
-                    flaky.IsAlive(2001));
+                Check("a failing per-parent listing no longer decides anything",
+                    partial == ShutdownOutcome.Stopped);
+                Check("the whole tree was found from the table and stopped",
+                    flaky.Ran("kill -KILL 1417 2000 2001"));
+                Check("the grandchild was not left behind",
+                    !flaky.IsAlive(2001));
+                Check("no per-parent child query was relied on",
+                    !flaky.Ran("--ppid"));
 
                 // 6. The parent dies but a known child survives the force-stop.
                 FakeDistribution orphaning = new FakeDistribution(PanelPid, 2000);
@@ -1171,7 +1249,7 @@ namespace OmoBench.Companion.Tests
                 Check("Stop stays available even though the wrapper is gone",
                     wrapperGone.OwnsUnconfirmedPanel);
                 Check("the panel was actually signalled, not just inspected",
-                    survivingPanel.Ran(" -- kill -TERM 1417"));
+                    survivingPanel.Ran(" --exec kill -TERM 1417"));
 
                 // And once it does go, the same session confirms and tidies up.
                 survivingPanel.IgnoresTerm.Clear();
@@ -1202,6 +1280,182 @@ namespace OmoBench.Companion.Tests
                 PanelSession.ForcePeriodMilliseconds = savedForce;
                 PanelSession.LivenessPollMilliseconds = savedPoll;
             }
+        }
+
+        /// <summary>
+        /// Three ways the recovery path could still reach a wrong answer: a
+        /// targeted query that fails while the general listing works, a
+        /// remembered pid that no longer means the same process, and a new
+        /// launch quietly replacing a session whose fate is still unresolved.
+        /// </summary>
+        private static void RecoveryCorrectnessTests()
+        {
+            Section("Recovery: validated observation, identity, and unresolved sessions");
+
+            Func<string, int, ProcessResult> savedRunner = PanelSession.WslRunner;
+            Func<string, string, bool> savedProbe = PanelSession.OwnershipProbe;
+            int savedGrace = PanelSession.GracePeriodMilliseconds;
+            int savedForce = PanelSession.ForcePeriodMilliseconds;
+            int savedPoll = PanelSession.LivenessPollMilliseconds;
+
+            try
+            {
+                PanelSession.GracePeriodMilliseconds = 20;
+                PanelSession.ForcePeriodMilliseconds = 20;
+                PanelSession.LivenessPollMilliseconds = 1;
+
+                const int PanelPid = 1417;
+                const int ChildPid = 2000;
+                const int UnrelatedPid = FakeDistribution.UnrelatedPid;
+                string report;
+
+                // -- 1. A targeted query failing is not an answer --------------
+
+                // Liveness: the panel is alive, but `ps -p` fails with exit 1
+                // while `ps -e` works. A reader that settles exit 1 by asking
+                // the general listing concludes the panel is gone.
+                FakeDistribution lyingAboutPanel = new FakeDistribution(PanelPid)
+                {
+                    TargetedQueriesLie = true,
+                };
+                lyingAboutPanel.NotSignallable.Add(PanelPid);   // force the listing path
+                PanelSession.WslRunner = lyingAboutPanel.Run;
+                PanelSession.OwnershipProbe = (origin, token) => false;
+                ShutdownOutcome lyingLiveness = new PanelSession().ShutdownLinuxSide(
+                    "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t", out report);
+                Check("a failed targeted liveness query is not read as absence",
+                    lyingLiveness == ShutdownOutcome.NotConfirmed);
+                Check("the panel that was never confirmed gone is still alive",
+                    lyingAboutPanel.IsAlive(PanelPid));
+
+                // Child enumeration: same failure shape, with a real child.
+                FakeDistribution lyingAboutChildren = new FakeDistribution(PanelPid, ChildPid)
+                {
+                    TargetedQueriesLie = true,
+                };
+                lyingAboutChildren.IgnoresTerm.Add(PanelPid);
+                lyingAboutChildren.Children[PanelPid] = new[] { ChildPid };
+                PanelSession.WslRunner = lyingAboutChildren.Run;
+                PanelSession.OwnershipProbe = (origin, token) => true;
+                ShutdownOutcome lyingChildren = new PanelSession().ShutdownLinuxSide(
+                    "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t", out report);
+                Check("a failed child query does not make a child-bearing panel childless",
+                    lyingChildren == ShutdownOutcome.Stopped || !lyingAboutChildren.IsAlive(ChildPid));
+                Check("the child was not left running while the parent was stopped",
+                    !lyingAboutChildren.IsAlive(ChildPid));
+
+                // -- 2. A remembered pid is not an identity --------------------
+
+                // The child outlives the first force-stop, so it is remembered.
+                FakeDistribution reuse = new FakeDistribution(PanelPid, ChildPid);
+                reuse.IgnoresTerm.Add(PanelPid);
+                reuse.IgnoresKill.Add(ChildPid);
+                reuse.Children[PanelPid] = new[] { ChildPid };
+                PanelSession.WslRunner = reuse.Run;
+                PanelSession reuseSession = new PanelSession();
+                ShutdownOutcome firstPass = reuseSession.ShutdownLinuxSide(
+                    "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t", out report);
+                Check("the surviving child is remembered for a retry",
+                    firstPass == ShutdownOutcome.NotConfirmed);
+
+                // Between attempts the real child exits and something unrelated
+                // is given its pid. The retry must not shoot the newcomer.
+                reuse.IgnoresKill.Clear();
+                reuse.ReusePid(ChildPid);
+                ShutdownOutcome afterReuse = reuseSession.ShutdownLinuxSide(
+                    "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t", out report);
+                Check("the process now holding the reused pid survives the retry",
+                    reuse.IsAlive(ChildPid));
+                Check("and the retry does not claim to have stopped it",
+                    afterReuse == ShutdownOutcome.Stopped || afterReuse == ShutdownOutcome.NotConfirmed);
+                Check("no SIGKILL was aimed at the reused pid after it changed hands",
+                    CountOccurrences(reuse.All, "kill -KILL " + ChildPid) <= 1);
+
+                // -- 3. An unresolved session is not replaceable ---------------
+
+                string statusFile = Path.Combine(
+                    Path.GetTempPath(), "omobench-unresolved-" + Guid.NewGuid().ToString("N") + ".json");
+                File.WriteAllText(statusFile, "{}");
+                Process exited = Process.Start(new ProcessStartInfo
+                {
+                    FileName = "cmd.exe",
+                    Arguments = "/c exit 0",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                });
+                exited.WaitForExit();
+
+                FakeDistribution unresolved = new FakeDistribution(PanelPid);
+                unresolved.IgnoresTerm.Add(PanelPid);
+                unresolved.IgnoresKill.Add(PanelPid);
+                PanelSession.WslRunner = unresolved.Run;
+
+                PanelSession stranded = new PanelSession();
+                stranded.AdoptForTest(exited, statusFile, "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t");
+                ShutdownOutcome strandedOutcome = stranded.Stop();
+                Check("the stop is unresolved to begin with",
+                    strandedOutcome == ShutdownOutcome.NotConfirmed && stranded.OwnsUnconfirmedPanel);
+
+                // Open panel now, with Setup pointing somewhere else entirely.
+                int launchesBefore = PanelSession.ProcessLaunchCount;
+                Configuration elsewhere = new Configuration
+                {
+                    Distribution = "AnotherDistro",
+                    CheckoutWindowsPath = Path.GetTempPath().TrimEnd('\\'),
+                    PythonWslPath = "/home/sam/.venvs/other/bin/python",
+                    Port = 9100,
+                };
+                stranded.Start(elsewhere);
+
+                Check("no second panel is launched over an unresolved one",
+                    PanelSession.ProcessLaunchCount == launchesBefore);
+                Check("the original ownership is intact, not overwritten by the new Setup",
+                    stranded.OwnsUnconfirmedPanel && stranded.OwnedDistributionForTest == "Ubuntu"
+                    && stranded.OwnedPanelProcessIdForTest == PanelPid);
+                Check("the original status document is still the one being tracked",
+                    File.Exists(statusFile));
+                Check("and the recovery control is still usable",
+                    stranded.OwnsUnconfirmedPanel);
+
+                // Once the original is finally confirmed gone, starting works.
+                unresolved.IgnoresTerm.Clear();
+                unresolved.IgnoresKill.Clear();
+                Check("the original can still be stopped afterwards",
+                    stranded.Stop() == ShutdownOutcome.Stopped);
+                Check("and ownership is then released for a fresh start",
+                    !stranded.OwnsUnconfirmedPanel);
+                try { File.Delete(statusFile); } catch (Exception) { }
+
+                foreach (FakeDistribution distribution in new[]
+                    { lyingAboutPanel, lyingAboutChildren, reuse, unresolved })
+                {
+                    Check("the unrelated process survived",
+                        distribution.IsAlive(UnrelatedPid)
+                        && !distribution.All.Contains(UnrelatedPid.ToString()));
+                    Check("the distribution itself was never shut down",
+                        !distribution.All.Contains("--shutdown")
+                        && !distribution.All.Contains("--terminate"));
+                }
+            }
+            finally
+            {
+                PanelSession.WslRunner = savedRunner;
+                PanelSession.OwnershipProbe = savedProbe;
+                PanelSession.GracePeriodMilliseconds = savedGrace;
+                PanelSession.ForcePeriodMilliseconds = savedForce;
+                PanelSession.LivenessPollMilliseconds = savedPoll;
+            }
+        }
+
+        private static int CountOccurrences(string haystack, string needle)
+        {
+            int count = 0, index = 0;
+            while ((index = haystack.IndexOf(needle, index, StringComparison.Ordinal)) >= 0)
+            {
+                count++;
+                index += needle.Length;
+            }
+            return count;
         }
 
         // -- "is a benchmark running?" is a three-way answer --------------------
@@ -1239,6 +1493,84 @@ namespace OmoBench.Companion.Tests
             PanelActivity unknown = new PanelSession().CheckActivity(out description);
             Check("a session with no panel reports Unknown, not Idle",
                 unknown == PanelActivity.Unknown && !string.IsNullOrEmpty(description));
+        }
+
+        /// <summary>
+        /// What arguments actually arrive inside the distribution.
+        ///
+        /// This is the one thing no amount of string-checking on the Windows
+        /// side can establish, so it is measured: each argument is sent
+        /// through the real boundary and printed back by the receiving
+        /// program, one per line, and compared with what was sent.
+        ///
+        /// It runs `printf` and nothing else -- no panel, no benchmark, no
+        /// checkout -- and skips entirely when WSL is not available.
+        /// </summary>
+        private static void ArgumentDeliveryTests()
+        {
+            Section("Windows -> WSL argument delivery (real boundary)");
+
+            if (!Wsl.IsAvailable)
+            {
+                Console.WriteLine("  skipped: wsl.exe is not available on this machine");
+                return;
+            }
+            List<WslDistribution> distributions = Wsl.ListDistributions();
+            string distribution = null;
+            foreach (WslDistribution candidate in distributions)
+            {
+                if (candidate.Version == 2) { distribution = candidate.Name; break; }
+            }
+            if (distribution == null)
+            {
+                Console.WriteLine("  skipped: no WSL2 distribution to test against");
+                return;
+            }
+
+            // Every one of these is mangled, expanded or split by a shell.
+            string[] awkward =
+            {
+                "plain",
+                "with spaces",
+                "$HOME",
+                "`whoami`",
+                "$(whoami)",
+                "a;b",
+                "a&b",
+                "a|b",
+                "*",
+                "quote\"inside",
+                "single'quote",
+                "back\\slash",
+                "new\tline",
+                "/mnt/c/Users/Sam Smith/Code/omo$bench/cli",
+            };
+
+            List<string> program = new List<string> { "/usr/bin/printf", "%s\\n" };
+            program.AddRange(awkward);
+            string arguments = Wsl.BuildRunArguments(distribution, null, program);
+
+            Check("the invocation executes directly, with no shell in the chain",
+                arguments.Contains(" --exec ") && !arguments.Contains(" -- "));
+
+            ProcessResult result = Wsl.Run(Wsl.ExecutablePath, arguments, 30000);
+            if (result.TimedOut)
+            {
+                Check("printf answered", false);
+                return;
+            }
+
+            string[] received = (result.StandardOutput ?? "").Replace("\r", "").Split('\n');
+            int matched = 0;
+            for (int index = 0; index < awkward.Length; index++)
+            {
+                string expected = awkward[index];
+                bool ok = index < received.Length && received[index] == expected;
+                if (ok) { matched++; }
+                Check("arrives unchanged: " + Show(expected), ok);
+            }
+            Check("every argument survived the boundary intact",
+                matched == awkward.Length);
         }
 
         // -- protocol registration ---------------------------------------------
