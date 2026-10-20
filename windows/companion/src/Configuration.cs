@@ -50,6 +50,20 @@ namespace OmoBench.Companion
         }
 
         /// <summary>
+        /// Redirects the runtime directory for tests, so a test can exercise
+        /// privacy enforcement -- including its failure -- against a throwaway
+        /// folder instead of the directory the real companion depends on.
+        /// Null in normal use.
+        /// </summary>
+        internal static string RuntimeDirectoryOverride = null;
+
+        /// <summary>
+        /// Applies the protected access list. Replaceable so a test can inject
+        /// a failure; production never reassigns it.
+        /// </summary>
+        internal static Action<string> AccessControlApplier = ApplyProtectedAccessControl;
+
+        /// <summary>
         /// Where the panel's status document is written. Under the per-user
         /// local app data folder, not the checkout and not a shared temp
         /// directory, because that document carries the connection token.
@@ -58,6 +72,10 @@ namespace OmoBench.Companion
         {
             get
             {
+                if (!string.IsNullOrEmpty(RuntimeDirectoryOverride))
+                {
+                    return RuntimeDirectoryOverride;
+                }
                 return Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                     "OmoBench", "companion");
@@ -65,8 +83,29 @@ namespace OmoBench.Companion
         }
 
         /// <summary>
+        /// Create the runtime directory, without touching its access list.
+        ///
+        /// Best effort and deliberately silent: the diagnostic log lives in
+        /// this directory, so this is called from <see cref="Diagnostics"/>
+        /// itself and must never log, never enforce, and never throw. Privacy
+        /// enforcement is <see cref="TryEnsureRuntimeDirectory"/>'s job, and a
+        /// failure there is reported to the person rather than written here.
+        /// </summary>
+        internal static void EnsureRuntimeDirectoryExists()
+        {
+            try
+            {
+                Directory.CreateDirectory(RuntimeDirectoryPath);
+            }
+            catch (Exception)
+            {
+                // The caller is a logger. It has nowhere to report this to.
+            }
+        }
+
+        /// <summary>
         /// Create the runtime directory and make it readable by this user
-        /// alone, returning its path.
+        /// alone. Returns false, with a reason, if that cannot be established.
         ///
         /// Neither of the obvious protections can be relied on here. The panel
         /// writes the status document from inside WSL, through /mnt/c, and the
@@ -80,45 +119,65 @@ namespace OmoBench.Companion
         /// So the access list is set explicitly instead: inheritance is
         /// disabled, and only this user (plus SYSTEM, which can read anything
         /// regardless) is granted access. Files created inside inherit that.
+        ///
+        /// This reports rather than logs, and never calls the logger: the log
+        /// file is inside the directory this is trying to secure, so a logging
+        /// failure path here would re-enter directory creation indefinitely.
+        /// A caller that cannot establish privacy must not publish a token
+        /// document -- see <see cref="PanelSession.Start"/>.
         /// </summary>
-        public static string EnsureRuntimeDirectory()
+        public static bool TryEnsureRuntimeDirectory(out string failure)
         {
+            failure = null;
             string path = RuntimeDirectoryPath;
-            Directory.CreateDirectory(path);
             try
             {
-                DirectoryInfo directory = new DirectoryInfo(path);
-                DirectorySecurity security = directory.GetAccessControl();
-
-                // Stop inheriting, and drop whatever was inherited or added.
-                security.SetAccessRuleProtection(true, false);
-                foreach (FileSystemAccessRule rule in
-                    security.GetAccessRules(true, false, typeof(SecurityIdentifier)))
-                {
-                    security.RemoveAccessRuleSpecific(rule);
-                }
-
-                SecurityIdentifier user = WindowsIdentity.GetCurrent().User;
-                security.AddAccessRule(new FileSystemAccessRule(
-                    user, FileSystemRights.FullControl,
-                    InheritanceFlags.ObjectInherit | InheritanceFlags.ContainerInherit,
-                    PropagationFlags.None, AccessControlType.Allow));
-
-                SecurityIdentifier system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
-                security.AddAccessRule(new FileSystemAccessRule(
-                    system, FileSystemRights.FullControl,
-                    InheritanceFlags.ObjectInherit | InheritanceFlags.ContainerInherit,
-                    PropagationFlags.None, AccessControlType.Allow));
-
-                directory.SetAccessControl(security);
+                Directory.CreateDirectory(path);
             }
             catch (Exception error)
             {
-                // Never block a launch on this; say so instead, so the gap is
-                // visible rather than silent.
-                Diagnostics.Write("Could not restrict access to " + path + ": " + error.Message);
+                failure = "Could not create " + path + ": " + error.Message;
+                return false;
             }
-            return path;
+
+            try
+            {
+                AccessControlApplier(path);
+                return true;
+            }
+            catch (Exception error)
+            {
+                failure = "Could not restrict access to " + path + ": " + error.Message;
+                return false;
+            }
+        }
+
+        private static void ApplyProtectedAccessControl(string path)
+        {
+            DirectoryInfo directory = new DirectoryInfo(path);
+            DirectorySecurity security = directory.GetAccessControl();
+
+            // Stop inheriting, and drop whatever was inherited or added.
+            security.SetAccessRuleProtection(true, false);
+            foreach (FileSystemAccessRule rule in
+                security.GetAccessRules(true, false, typeof(SecurityIdentifier)))
+            {
+                security.RemoveAccessRuleSpecific(rule);
+            }
+
+            SecurityIdentifier user = WindowsIdentity.GetCurrent().User;
+            security.AddAccessRule(new FileSystemAccessRule(
+                user, FileSystemRights.FullControl,
+                InheritanceFlags.ObjectInherit | InheritanceFlags.ContainerInherit,
+                PropagationFlags.None, AccessControlType.Allow));
+
+            SecurityIdentifier system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+            security.AddAccessRule(new FileSystemAccessRule(
+                system, FileSystemRights.FullControl,
+                InheritanceFlags.ObjectInherit | InheritanceFlags.ContainerInherit,
+                PropagationFlags.None, AccessControlType.Allow));
+
+            directory.SetAccessControl(security);
         }
 
         /// <summary>

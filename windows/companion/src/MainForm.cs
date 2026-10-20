@@ -151,6 +151,7 @@ namespace OmoBench.Companion
                     _indicator.BackColor = Color.SeaGreen;
                     break;
                 case PanelState.Failed:
+                case PanelState.StopFailed:
                     _indicator.BackColor = Color.IndianRed;
                     break;
                 default:
@@ -174,7 +175,10 @@ namespace OmoBench.Companion
 
         private void OpenPanel()
         {
-            if (_session.IsReadyAndAlive)
+            // Also covers the case where a stop could not be confirmed: the
+            // panel is still there and still reachable, so the button that
+            // reaches it keeps working.
+            if (_session.IsReadyAndAlive || (_session.IsRunning && _session.HasUrl))
             {
                 _session.OpenInBrowser();
                 return;
@@ -182,28 +186,57 @@ namespace OmoBench.Companion
             Activate(true);
         }
 
-        private void StopPanel()
+        private enum StopAttempt
+        {
+            Stopped,
+            NothingToStop,
+
+            /// <summary>The person chose not to stop after the warning.</summary>
+            Declined,
+
+            /// <summary>Stop ran but the panel could not be confirmed gone.</summary>
+            NotConfirmed,
+        }
+
+        private StopAttempt StopPanel()
         {
             if (!_session.IsRunning)
             {
-                return;
+                return StopAttempt.NothingToStop;
             }
 
             string activity;
-            if (_session.TryGetActiveRun(out activity))
+            PanelActivity state = _session.CheckActivity(out activity);
+            if (state != PanelActivity.Idle)
             {
-                DialogResult choice = MessageBox.Show(this,
-                    activity + "\n\nStopping the panel now cancels it. Partial evidence is kept on disk, "
-                    + "but the run will not complete and cannot be submitted.\n\nStop anyway?",
-                    "A benchmark is running", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
-                    MessageBoxDefaultButton.Button2);
+                // Active and Unknown both get a warning. An unanswered panel is
+                // precisely the case where a benchmark is most likely still
+                // running, so it is never treated as "nothing is running".
+                bool confirmed = state == PanelActivity.Active;
+                string question = confirmed
+                    ? activity + "\n\nStopping the panel now cancels it. Partial evidence is kept on disk, "
+                        + "but the run will not complete and cannot be submitted.\n\nStop anyway?"
+                    : activity + "\n\nStopping now would cancel a benchmark if one is running, and partial "
+                        + "evidence would be kept on disk without the run completing.\n\nStop anyway?";
+                DialogResult choice = MessageBox.Show(this, question,
+                    confirmed ? "A benchmark is running" : "Cannot tell whether a benchmark is running",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
                 if (choice != DialogResult.Yes)
                 {
-                    return;
+                    return StopAttempt.Declined;
                 }
             }
 
-            _session.Stop();
+            ShutdownOutcome outcome = _session.Stop();
+            if (outcome == ShutdownOutcome.NotConfirmed)
+            {
+                MessageBox.Show(this,
+                    "The panel could not be confirmed stopped.\n\n"
+                    + (_session.Detail ?? string.Empty),
+                    "OmoBench companion", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return StopAttempt.NotConfirmed;
+            }
+            return StopAttempt.Stopped;
         }
 
         private void OpenSetup()
@@ -232,28 +265,52 @@ namespace OmoBench.Companion
             }
         }
 
+        /// <summary>
+        /// Closing while this companion owns a running panel is never allowed
+        /// to simply exit.
+        ///
+        /// Leaving it would strand the panel with nothing able to stop it: the
+        /// next launch clears the status document it depends on and then meets
+        /// the panel's own one-panel-per-checkout lock, so the only way back
+        /// would be a terminal -- the exact thing this companion exists to
+        /// avoid. So either the panel is stopped, or the companion stays open
+        /// and keeps managing it.
+        /// </summary>
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             if (_session.IsRunning)
             {
                 DialogResult choice = MessageBox.Show(this,
                     "The OmoBench panel this companion started is still running.\n\n"
-                    + "Stop it and close?  (No leaves it running; closing this window would then leave it unmanaged.)",
+                    + "Yes — stop the panel, then close the companion.\n"
+                    + "No — keep the panel running; the companion stays open, minimised, so it can still "
+                    + "stop it later.\n"
+                    + "Cancel — go back.",
                     "OmoBench companion", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+
                 if (choice == DialogResult.Cancel)
                 {
                     e.Cancel = true;
                     return;
                 }
-                if (choice == DialogResult.Yes)
+
+                if (choice == DialogResult.No)
                 {
-                    StopPanel();
-                    if (_session.IsRunning)
-                    {
-                        // The user declined the active-run confirmation.
-                        e.Cancel = true;
-                        return;
-                    }
+                    Diagnostics.Write(
+                        "Closing was declined: keeping the running panel under management, window minimised.");
+                    e.Cancel = true;
+                    WindowState = FormWindowState.Minimized;
+                    return;
+                }
+
+                StopAttempt attempt = StopPanel();
+                if (attempt == StopAttempt.Declined || attempt == StopAttempt.NotConfirmed)
+                {
+                    // Either the person backed out at the benchmark warning, or
+                    // the panel is still there. Keep the window, and with it the
+                    // ability to retry.
+                    e.Cancel = true;
+                    return;
                 }
             }
             base.OnFormClosing(e);

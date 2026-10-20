@@ -18,7 +18,7 @@ stay explicit actions inside the guided page.
 
 ## What it is, and why it is built this way
 
-A single ~57 KB native Windows executable (WinForms), compiled from the C#
+A single ~70 KB native Windows executable (WinForms), compiled from the C#
 sources in [`windows/companion/src`](../../windows/companion/src) with the C#
 compiler that ships inside Windows itself (the in-box .NET Framework 4.x
 `csc.exe`).
@@ -114,7 +114,7 @@ owns: one companion per user session, one panel, no duplicates.
 | --- | --- |
 | Configuration | `%APPDATA%\OmoBench\companion.config` (plain text; no token) |
 | Diagnostic log | `%LOCALAPPDATA%\OmoBench\companion\companion.log` (tokens redacted) |
-| Panel startup document | `%LOCALAPPDATA%\OmoBench\companion\panel-<id>.json` — contains the connection token; see [how its privacy is enforced](#how-the-token-document-is-protected). Deleted when the panel stops, and any left by an unclean exit are deleted at the next start |
+| Panel startup document | `%LOCALAPPDATA%\OmoBench\companion\panel-<id>.json` — contains the connection token; see [how its privacy is enforced](#how-the-token-document-is-protected). Deleted once the panel is confirmed stopped, and any left by an unclean exit are deleted at the next start |
 | Protocol registration | `HKEY_CURRENT_USER\Software\Classes\omobench` (per user; no administrator rights) |
 | The panel itself | Inside WSL, in your checkout, exactly as `omobench ui` has always run |
 
@@ -123,15 +123,41 @@ locations or to startup.
 
 ## Stopping
 
-**Stop** shuts down only the panel this companion started. If a benchmark or
-submission step is active, it says so and asks for confirmation first, because
-stopping cancels it — partial evidence stays on disk but the run cannot
-complete. A panel you started yourself in a terminal is never stopped and
-never adopted: the companion only ever signals its own child process, and
-never runs `wsl --shutdown`.
+**Stop** shuts down only the panel this companion started, and tells you
+what actually happened.
 
-Closing the companion window while it owns a running panel asks what you want
-to do first.
+The order matters. The panel is asked to stop first (SIGTERM, the way Ctrl+C
+would), because that is what makes it cancel an active benchmark and reap the
+runner it started. Only once the panel process is confirmed gone inside the
+distribution is the `wsl.exe` child ended. Doing that the other way round is
+what used to leave the runner orphaned.
+
+If the panel ignores the request, the companion escalates — but only to the
+process tree below the panel it has proved is its own, bounded in depth and
+count, and only after establishing that the process listing it relies on
+actually works. A panel you started yourself in a terminal is never stopped and
+never adopted, no unrelated process is ever signalled, and `wsl --shutdown` is
+never run.
+
+If the stop cannot be confirmed, it says so rather than reporting success: the
+window shows **The panel could not be confirmed stopped**, the companion keeps
+owning the panel, and **Stop** stays available to retry.
+
+Before stopping, the companion asks the panel whether anything is in flight.
+If a benchmark or submission step is active, it says so and asks for
+confirmation, because stopping cancels it — partial evidence stays on disk but
+the run cannot complete. **If the panel cannot be asked, that is reported as
+unknown, not as "nothing is running"**, and you get the same confirmation
+prompt: an unreachable panel is precisely the case where a benchmark is most
+likely still going.
+
+Closing the window while the companion owns a running panel never just exits.
+You get three choices: stop the panel and close, keep the panel running and
+leave the companion open (minimised) so it can still stop it later, or go back.
+Closing while leaving the panel unmanaged is not offered, because the panel
+would then be unreachable — the next launch clears the startup document it
+depends on and then meets the one-panel-per-checkout lock, leaving a terminal
+as the only way out.
 
 ## Uninstalling
 
@@ -157,6 +183,9 @@ writes its outcome to the diagnostic log and reports it as an exit code
 | "That interpreter imports OmoBench from a different checkout" | The environment has OmoBench installed from somewhere else. Install it from the checkout you selected, or select the matching interpreter. |
 | "The pinned GuideLLM runner is not installed" | The panel would open but benchmarks could not run. Install the runner extra into that environment. |
 | "The panel did not report itself ready" | A slow first start (cold Python imports) or a failure inside WSL. The diagnostic log has the panel's own output, with tokens redacted. |
+| "The panel could not be confirmed stopped" | The panel did not go when asked, and the companion would not widen its aim to force it. It still owns the panel: press **Stop** again. The log says which step could not be confirmed. |
+| "its connection token could not be kept private" | The access list on `%LOCALAPPDATA%\OmoBench\companion` could not be set, so nothing was started. Check whether that folder is owned by another account or held by a policy, and see [how the token document is protected](#how-the-token-document-is-protected). |
+| "Cannot tell whether a benchmark is running" | The panel did not answer the question before stopping. Treat it as "probably yes" — that is why the prompt defaults to not stopping. |
 
 ## How the token document is protected
 
@@ -184,11 +213,23 @@ So the companion sets the access list on
 this user and SYSTEM only. The status document inherits that. Applied on
 every start, so an existing folder is corrected rather than trusted.
 
+**If that cannot be established, the panel does not start.** The companion
+shows what went wrong and why, and launches nothing: writing a live connection
+token into a folder other accounts can read is a worse outcome than not
+launching. That failure is reported in the window rather than only written to
+the log, because the log lives in the very folder whose permissions are in
+question.
+
 Alongside that:
 
-- The document is refused unless it carries the schema this companion knows
-  and a `127.0.0.1` URL, so a stale or edited file cannot send the browser —
-  and the token — anywhere else.
+- The document is parsed as JSON and then checked for internal consistency,
+  rather than having its fields picked out of the text. It is refused unless it
+  carries the schema this companion knows, a `127.0.0.1` URL, a bare loopback
+  origin on the port it reports, a usable process id, and a URL that is
+  precisely that origin and that token — so a stale, truncated or edited file
+  cannot send the browser, or an authenticated request, anywhere else.
+- Authenticated requests to the panel do not follow redirects, so a request
+  carrying the token cannot be bounced to another address.
 - Before asking the panel to shut down, the companion checks the panel
   answers on its port with *this session's* token. A stale document naming
   some other process cannot get that process stopped.

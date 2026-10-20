@@ -26,12 +26,16 @@ namespace OmoBench.Companion.Tests
             WslPathTests();
             ConfigurationTests();
             StatusDocumentTests();
+            StatusDocumentStrictnessTests();
             RedactionTests();
             RuntimeDirectoryPrivacyTests();
+            RuntimeDirectoryFailureTests();
             DistributionParsingTests();
             EnvironmentCheckTests();
             PanelProgramTests();
             ShutdownTests();
+            ShutdownOutcomeTests();
+            ActivityCheckTests();
             RegistrationTests();
 
             Console.WriteLine();
@@ -233,6 +237,111 @@ namespace OmoBench.Companion.Tests
                 !PanelStatus.IsLoopbackHttpUrl("http://127.0.0.1.evil.test/"));
         }
 
+        // -- the document decides where a token goes, so it is read strictly ---
+
+        /// <summary>Build a ready document, so each test can vary one field.</summary>
+        private static string ReadyDocument(
+            string url, string origin, string port, string token, string pid)
+        {
+            return "{\"schema\": 1, \"state\": \"ready\", \"url\": \"" + url + "\", "
+                + "\"origin\": \"" + origin + "\", \"port\": " + port + ", "
+                + "\"token\": \"" + token + "\", \"pid\": " + pid + "}";
+        }
+
+        private static void StatusDocumentStrictnessTests()
+        {
+            Section("Panel status document: malformed and inconsistent input");
+
+            string error;
+
+            // Malformed input must fail as a parse failure, not be mined for
+            // whatever fields happen to be findable in it.
+            foreach (string malformed in new[]
+            {
+                "{\"schema\": 1, \"state\": \"ready\"",       // truncated
+                "[{\"schema\": 1, \"state\": \"ready\"}]",    // an array, not an object
+                "\"just a string\"",
+                "42",
+                "not json at all",
+                "{\"schema\": \"1\", \"state\": \"ready\"}",  // schema as text
+                "{\"state\": \"ready\"}",                     // no schema at all
+                "{\"schema\": 1, \"state\": \"ready\", \"token\": 12345}",   // token not text
+                "{\"schema\": 1, \"state\": \"ready\", \"port\": \"8765\"}", // port as text
+            })
+            {
+                PanelStatus refused = PanelStatus.Parse(malformed, out error);
+                Check("refuses " + Show(malformed), refused == null && !string.IsNullOrEmpty(error));
+            }
+
+            // Each of the following carries a plausible-looking loopback URL,
+            // so a reader that validated the URL alone would accept them. The
+            // fields have to agree with each other.
+            PanelStatus portMismatch = PanelStatus.Parse(
+                ReadyDocument("http://127.0.0.1:8765/#token=t", "http://127.0.0.1:9999", "8765", "t", "42"),
+                out error);
+            Check("an origin whose port contradicts the reported port is refused",
+                portMismatch == null && (error ?? "").Contains("origin"));
+
+            PanelStatus originElsewhere = PanelStatus.Parse(
+                ReadyDocument("http://127.0.0.1:8765/#token=t", "http://evil.test:8765", "8765", "t", "42"),
+                out error);
+            Check("an off-host origin is refused even when the url is loopback",
+                originElsewhere == null);
+
+            PanelStatus originWithPath = PanelStatus.Parse(
+                ReadyDocument("http://127.0.0.1:8765/#token=t", "http://127.0.0.1:8765/api", "8765", "t", "42"),
+                out error);
+            Check("an origin carrying a path is refused", originWithPath == null);
+
+            PanelStatus tokenMismatch = PanelStatus.Parse(
+                ReadyDocument("http://127.0.0.1:8765/#token=somethingelse", "http://127.0.0.1:8765", "8765", "t", "42"),
+                out error);
+            Check("a url whose token is not the reported token is refused",
+                tokenMismatch == null && (error ?? "").Contains("same session"));
+
+            foreach (string pid in new[] { "0", "1", "-5" })
+            {
+                PanelStatus badPid = PanelStatus.Parse(
+                    ReadyDocument("http://127.0.0.1:8765/#token=t", "http://127.0.0.1:8765", "8765", "t", pid),
+                    out error);
+                Check("a ready document with pid " + pid + " is refused, because that pid gets signalled",
+                    badPid == null);
+            }
+
+            PanelStatus noPid = PanelStatus.Parse(
+                "{\"schema\": 1, \"state\": \"ready\", \"url\": \"http://127.0.0.1:8765/#token=t\", "
+                + "\"origin\": \"http://127.0.0.1:8765\", \"port\": 8765, \"token\": \"t\"}", out error);
+            Check("a ready document with no pid at all is refused", noPid == null);
+
+            foreach (string port in new[] { "0", "70000" })
+            {
+                PanelStatus badPort = PanelStatus.Parse(
+                    ReadyDocument("http://127.0.0.1:" + port + "/#token=t",
+                        "http://127.0.0.1:" + port, port, "t", "42"), out error);
+                Check("a ready document with port " + port + " is refused", badPort == null);
+            }
+
+            // A consistent document still parses, so none of the above is
+            // strictness that refuses the real thing.
+            PanelStatus good = PanelStatus.Parse(
+                ReadyDocument("http://127.0.0.1:8766/#token=abc", "http://127.0.0.1:8766", "8766", "abc", "4242"),
+                out error);
+            Check("a consistent ready document is still accepted",
+                good != null && good.IsReady && good.Port == 8766 && good.PanelProcessId == 4242);
+
+            Check("origin check accepts the matching loopback origin",
+                PanelStatus.IsLoopbackOrigin("http://127.0.0.1:8765", 8765));
+            Check("origin check rejects a mismatched port",
+                !PanelStatus.IsLoopbackOrigin("http://127.0.0.1:8765", 8766));
+            Check("origin check rejects credentials",
+                !PanelStatus.IsLoopbackOrigin("http://user:pw@127.0.0.1:8765", 8765));
+            Check("origin check rejects a look-alike host",
+                !PanelStatus.IsLoopbackOrigin("http://127.0.0.1.evil.test:8765", 8765));
+            Check("origin check rejects https", !PanelStatus.IsLoopbackOrigin("https://127.0.0.1:8765", 8765));
+            Check("origin check rejects a fragment",
+                !PanelStatus.IsLoopbackOrigin("http://127.0.0.1:8765/#token=t", 8765));
+        }
+
         // -- tokens must not reach logs ---------------------------------------
 
         private static void RedactionTests()
@@ -269,7 +378,10 @@ namespace OmoBench.Companion.Tests
             // The panel writes the status document from inside WSL through
             // /mnt/c, where DrvFs discards the 0600 mode it asks for, so the
             // directory's own access list is what actually protects the token.
-            string path = Configuration.EnsureRuntimeDirectory();
+            string failure;
+            bool enforced = Configuration.TryEnsureRuntimeDirectory(out failure);
+            string path = Configuration.RuntimeDirectoryPath;
+            Check("privacy is enforced on the real runtime directory", enforced && failure == null);
             Check("the runtime directory exists", Directory.Exists(path));
             Check("it is under this user's local app data, not the checkout",
                 path.IndexOf(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -289,6 +401,92 @@ namespace OmoBench.Companion.Tests
             Check("this user can use it", mentionsMe);
             Check("nobody else is granted access (inheritance is switched off): "
                 + string.Join(", ", identities), mentionsOnlyExpected);
+        }
+
+        /// <summary>
+        /// What happens when the access list simply cannot be set.
+        ///
+        /// This used to be unsurvivable rather than merely unfortunate:
+        /// enforcement reported its failure through the diagnostic log, the log
+        /// lives inside the directory being secured, and writing to it ran
+        /// enforcement again -- so a persistent permission failure recursed
+        /// until the stack ran out, taking the process with it. The failure is
+        /// injected here against a throwaway directory; the real runtime
+        /// directory's permissions are never touched.
+        /// </summary>
+        private static void RuntimeDirectoryFailureTests()
+        {
+            Section("Runtime directory privacy failure");
+
+            string sandbox = Path.Combine(
+                Path.GetTempPath(), "omobench-companion-test-" + Guid.NewGuid().ToString("N"));
+            string savedOverride = Configuration.RuntimeDirectoryOverride;
+            Action<string> savedApplier = Configuration.AccessControlApplier;
+            Func<string, int, ProcessResult> savedRunner = PanelSession.WslRunner;
+
+            try
+            {
+                int applierCalls = 0;
+                Configuration.RuntimeDirectoryOverride = sandbox;
+                Configuration.AccessControlApplier = path =>
+                {
+                    applierCalls++;
+                    throw new UnauthorizedAccessException("injected permission failure");
+                };
+
+                Diagnostics.WriteCount = 0;
+                string failure;
+                bool enforced = Configuration.TryEnsureRuntimeDirectory(out failure);
+                Check("a permission failure is reported rather than swallowed",
+                    !enforced && (failure ?? "").Contains("injected permission failure"));
+                Check("enforcement is attempted once, and then gives up",
+                    applierCalls == 1);
+                Check("enforcement does not log, so it cannot log its own failure",
+                    Diagnostics.WriteCount == 0);
+
+                // The recursion proof: logging must not re-enter enforcement,
+                // and one call must produce exactly one write.
+                applierCalls = 0;
+                Diagnostics.WriteCount = 0;
+                Diagnostics.Write("a message written while enforcement is failing");
+                Check("logging never triggers access-list enforcement", applierCalls == 0);
+                Check("one log call writes exactly once, with no recursion",
+                    Diagnostics.WriteCount == 1);
+
+                // And the consequence that matters: nothing is launched and no
+                // token document is published when privacy cannot be set.
+                PanelSession.WslRunner = (arguments, timeout) =>
+                {
+                    throw new InvalidOperationException("no WSL command should run in this test");
+                };
+                int launchesBefore = PanelSession.ProcessLaunchCount;
+                PanelSession session = new PanelSession();
+                Configuration configuration = new Configuration
+                {
+                    Distribution = "Ubuntu",
+                    CheckoutWindowsPath = Path.GetTempPath().TrimEnd('\\'),
+                    PythonWslPath = "/home/sam/.venvs/omobench-runner/bin/python",
+                    Port = 8765,
+                };
+                session.Start(configuration);
+
+                Check("the panel is not started when its token cannot be kept private",
+                    session.State == PanelState.Failed && !session.IsRunning);
+                Check("no backend process was launched",
+                    PanelSession.ProcessLaunchCount == launchesBefore);
+                Check("the failure explains itself in terms a person can act on",
+                    (session.Message ?? "").IndexOf("private", StringComparison.OrdinalIgnoreCase) >= 0);
+                Check("no status document was published",
+                    !Directory.Exists(sandbox)
+                    || Directory.GetFiles(sandbox, "panel-*.json").Length == 0);
+            }
+            finally
+            {
+                Configuration.RuntimeDirectoryOverride = savedOverride;
+                Configuration.AccessControlApplier = savedApplier;
+                PanelSession.WslRunner = savedRunner;
+                try { Directory.Delete(sandbox, true); } catch (Exception) { }
+            }
         }
 
         // -- WSL discovery -----------------------------------------------------
@@ -442,6 +640,51 @@ namespace OmoBench.Companion.Tests
             Check("no global WSL shutdown is ever issued",
                 !arguments.Contains("--shutdown") && !arguments.Contains("--terminate"));
 
+            // Confirming a stop, and escalating to one, use the same pid rules.
+            List<string> probe = PanelSession.BuildAliveProbeProgram(4242);
+            Check("liveness is checked with a signal that does nothing",
+                probe.Count == 3 && probe[0] == "kill" && probe[1] == "-0" && probe[2] == "4242");
+
+            List<string> exists = PanelSession.BuildProcessExistsProgram(4242);
+            Check("the process listing can be asked about one known process",
+                exists[0] == "ps" && exists.Contains("-p") && exists[exists.Count - 1] == "4242");
+
+            List<string> children = PanelSession.BuildChildListProgram(4242);
+            Check("children are listed by asking ps for one parent's children",
+                children[0] == "ps" && children.Contains("--ppid") && children[children.Count - 1] == "4242");
+            Check("the process listing asks for pids only, with no shell",
+                children.Contains("-o") && children.Contains("pid="));
+
+            List<string> force = PanelSession.BuildForceKillProgram(new[] { 4242, 4243 });
+            Check("a forced stop names every process explicitly",
+                force.Count == 4 && force[0] == "kill" && force[1] == "-KILL"
+                && force[2] == "4242" && force[3] == "4243");
+            Check("a forced stop never takes a name, a pattern, or a process group",
+                !force.Contains("-f") && !force.Contains("pkill") && !force.Contains("-1"));
+
+            foreach (int refused in new[] { 0, 1, -1, -4242 })
+            {
+                bool probeRejected = false, listRejected = false, killRejected = false;
+                try { PanelSession.BuildAliveProbeProgram(refused); }
+                catch (ArgumentOutOfRangeException) { probeRejected = true; }
+                try { PanelSession.BuildChildListProgram(refused); }
+                catch (ArgumentOutOfRangeException) { listRejected = true; }
+                try { PanelSession.BuildForceKillProgram(new[] { refused }); }
+                catch (ArgumentOutOfRangeException) { killRejected = true; }
+                Check("a pid of " + refused + " is refused everywhere, not just by SIGTERM",
+                    probeRejected && listRejected && killRejected);
+            }
+
+            bool emptyRejected = false;
+            try { PanelSession.BuildForceKillProgram(new int[0]); }
+            catch (ArgumentException) { emptyRejected = true; }
+            Check("a forced stop with no targets is refused rather than run bare", emptyRejected);
+
+            Check("process ids are parsed from ps output, ignoring noise",
+                PanelSession.ParseProcessIds(" 2000 \n2001\n\n").Count == 2);
+            Check("init is never parsed out of ps output",
+                PanelSession.ParseProcessIds("1\n0\n").Count == 0);
+
             // The pid only ever comes from a status document that parsed as
             // ready; a failure document carries none.
             string error;
@@ -456,6 +699,260 @@ namespace OmoBench.Companion.Tests
                 "\"origin\": \"http://127.0.0.1:8765\", \"port\": 8765, \"token\": \"t\", \"pid\": 1417}", out error);
             Check("a ready document carries the panel's in-WSL pid",
                 ready != null && ready.PanelProcessId == 1417);
+        }
+
+        /// <summary>
+        /// A stand-in for one distribution, so the decisions taken while
+        /// stopping a panel can be tested exactly -- including the ones that
+        /// only happen when the panel refuses to go -- without starting WSL,
+        /// a panel, or a benchmark. It records every command line it is given,
+        /// so a test can assert on what was *not* run as well as what was.
+        /// </summary>
+        private sealed class FakeDistribution
+        {
+            public readonly List<string> Commands = new List<string>();
+            public readonly Dictionary<int, int[]> Children = new Dictionary<int, int[]>();
+            public bool PanelAlive = true;
+            public bool HonoursTerm = true;
+            public bool ProcessListingWorks = true;
+            public bool SurvivesForceKill;
+
+            public ProcessResult Run(string arguments, int timeoutMilliseconds)
+            {
+                Commands.Add(arguments);
+
+                if (arguments.Contains(" -- kill -0 "))
+                {
+                    return new ProcessResult { ExitCode = PanelAlive ? 0 : 1 };
+                }
+                if (arguments.Contains(" -- kill -TERM "))
+                {
+                    if (HonoursTerm) { PanelAlive = false; }
+                    return new ProcessResult { ExitCode = 0 };
+                }
+                if (arguments.Contains(" -- kill -KILL "))
+                {
+                    if (!SurvivesForceKill) { PanelAlive = false; }
+                    return new ProcessResult { ExitCode = 0 };
+                }
+                if (arguments.Contains(" -- ps "))
+                {
+                    if (!ProcessListingWorks)
+                    {
+                        // Indistinguishable by exit code from "that parent has
+                        // no children", which is the point of the capability
+                        // probe this is here to exercise.
+                        return new ProcessResult { ExitCode = 1, StandardError = "ps: not found" };
+                    }
+                    string[] parts = arguments.Split(' ');
+                    int subject = int.Parse(parts[parts.Length - 1]);
+
+                    // "does this process exist" rather than "list its children"
+                    if (arguments.Contains(" -p "))
+                    {
+                        return PanelAlive
+                            ? new ProcessResult { ExitCode = 0, StandardOutput = subject.ToString() + "\n" }
+                            : new ProcessResult { ExitCode = 1 };
+                    }
+
+                    int parent = subject;
+                    int[] children;
+                    if (!Children.TryGetValue(parent, out children))
+                    {
+                        return new ProcessResult { ExitCode = 1 };   // no children
+                    }
+                    return new ProcessResult
+                    {
+                        ExitCode = 0,
+                        StandardOutput = string.Join("\n", Array.ConvertAll(children, c => c.ToString())),
+                    };
+                }
+                return new ProcessResult { ExitCode = 127 };
+            }
+
+            public bool Ran(string fragment)
+            {
+                return Commands.Exists(c => c.Contains(fragment));
+            }
+
+            public string All { get { return string.Join(" || ", Commands.ToArray()); } }
+        }
+
+        private static void ShutdownOutcomeTests()
+        {
+            Section("Panel shutdown outcomes");
+
+            Func<string, int, ProcessResult> savedRunner = PanelSession.WslRunner;
+            Func<string, string, bool> savedProbe = PanelSession.OwnershipProbe;
+            int savedGrace = PanelSession.GracePeriodMilliseconds;
+            int savedForce = PanelSession.ForcePeriodMilliseconds;
+            int savedPoll = PanelSession.LivenessPollMilliseconds;
+
+            try
+            {
+                PanelSession.GracePeriodMilliseconds = 20;
+                PanelSession.ForcePeriodMilliseconds = 20;
+                PanelSession.LivenessPollMilliseconds = 1;
+
+                const int PanelPid = 1417;
+                const int UnrelatedPid = 9999;     // must never be named
+                string report;
+
+                // 1. The ordinary case: the panel honours SIGTERM.
+                FakeDistribution polite = new FakeDistribution();
+                PanelSession.WslRunner = polite.Run;
+                PanelSession.OwnershipProbe = (origin, token) => true;
+                ShutdownOutcome graceful = new PanelSession().ShutdownLinuxSide(
+                    "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t", out report);
+                Check("a panel that honours SIGTERM is confirmed stopped",
+                    graceful == ShutdownOutcome.Stopped && report == null);
+                Check("it was asked, not killed", polite.Ran(" -- kill -TERM 1417") && !polite.Ran("kill -KILL"));
+                Check("its departure was actually verified", polite.Ran(" -- kill -0 1417"));
+
+                // 2. An unresponsive panel: escalation stays inside the tree
+                //    rooted at the process proved to be ours.
+                FakeDistribution stubborn = new FakeDistribution { HonoursTerm = false };
+                stubborn.Children[PanelPid] = new[] { 2000 };
+                stubborn.Children[2000] = new[] { 2001 };
+                PanelSession.WslRunner = stubborn.Run;
+                ShutdownOutcome escalated = new PanelSession().ShutdownLinuxSide(
+                    "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t", out report);
+                Check("an unresponsive panel is escalated to and confirmed stopped",
+                    escalated == ShutdownOutcome.Stopped);
+                Check("SIGTERM was tried before SIGKILL", stubborn.Ran(" -- kill -TERM 1417"));
+                Check("the panel and its own descendants are force-stopped together",
+                    stubborn.Ran("kill -KILL 1417 2000 2001"));
+                Check("an unrelated process is never named: " + stubborn.All,
+                    !stubborn.All.Contains(UnrelatedPid.ToString()));
+
+                // 3. Force-stop that does not work is reported honestly.
+                FakeDistribution immortal = new FakeDistribution
+                {
+                    HonoursTerm = false,
+                    SurvivesForceKill = true,
+                };
+                immortal.Children[PanelPid] = new int[0];
+                PanelSession.WslRunner = immortal.Run;
+                ShutdownOutcome unconfirmed = new PanelSession().ShutdownLinuxSide(
+                    "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t", out report);
+                Check("a panel that survives everything is not reported as stopped",
+                    unconfirmed == ShutdownOutcome.NotConfirmed);
+                Check("the report says what is still there",
+                    (report ?? "").Contains("still present"));
+
+                // 4. If the process list cannot be read, nothing is killed on
+                //    a guess.
+                FakeDistribution blind = new FakeDistribution
+                {
+                    HonoursTerm = false,
+                    ProcessListingWorks = false,
+                };
+                PanelSession.WslRunner = blind.Run;
+                ShutdownOutcome cannotEnumerate = new PanelSession().ShutdownLinuxSide(
+                    "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t", out report);
+                Check("an unlistable process tree is reported, not guessed at",
+                    cannotEnumerate == ShutdownOutcome.NotConfirmed);
+                Check("nothing was force-stopped without knowing what it is",
+                    !blind.Ran("kill -KILL"));
+
+                // 5. Ownership unproven, panel alive: strictly hands off.
+                FakeDistribution unproven = new FakeDistribution();
+                PanelSession.WslRunner = unproven.Run;
+                PanelSession.OwnershipProbe = (origin, token) => false;
+                ShutdownOutcome handsOff = new PanelSession().ShutdownLinuxSide(
+                    "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t", out report);
+                Check("a panel that cannot be proved ours is left alone",
+                    handsOff == ShutdownOutcome.NotConfirmed);
+                Check("no signal was sent to it",
+                    !unproven.Ran("kill -TERM") && !unproven.Ran("kill -KILL"));
+                Check("and the report says why", (report ?? "").Contains("did not confirm"));
+
+                // 6. Ownership unproven because it already exited: that is a
+                //    stop, and it is confirmed by asking.
+                FakeDistribution departed = new FakeDistribution { PanelAlive = false };
+                PanelSession.WslRunner = departed.Run;
+                ShutdownOutcome alreadyGone = new PanelSession().ShutdownLinuxSide(
+                    "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t", out report);
+                Check("a panel that has already exited counts as stopped",
+                    alreadyGone == ShutdownOutcome.Stopped);
+
+                // 7. Retry: the same session can be told to stop again, and the
+                //    second attempt succeeds once the panel responds.
+                FakeDistribution retried = new FakeDistribution { HonoursTerm = false };
+                retried.Children[PanelPid] = new int[0];
+                retried.SurvivesForceKill = true;
+                PanelSession.WslRunner = retried.Run;
+                PanelSession.OwnershipProbe = (origin, token) => true;
+                PanelSession session = new PanelSession();
+                ShutdownOutcome first = session.ShutdownLinuxSide(
+                    "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t", out report);
+                retried.HonoursTerm = true;
+                retried.SurvivesForceKill = false;
+                ShutdownOutcome second = session.ShutdownLinuxSide(
+                    "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t", out report);
+                Check("a failed stop can be retried on the same session",
+                    first == ShutdownOutcome.NotConfirmed && second == ShutdownOutcome.Stopped);
+
+                // 8. Across every one of those scenarios, the distribution
+                //    itself is never touched.
+                foreach (FakeDistribution distribution in new[]
+                    { polite, stubborn, immortal, blind, unproven, departed, retried })
+                {
+                    Check("no global WSL shutdown or terminate was ever issued",
+                        !distribution.All.Contains("--shutdown") && !distribution.All.Contains("--terminate"));
+                }
+
+                // A missing pid is a refusal, not a broader signal.
+                ShutdownOutcome noPid = new PanelSession().ShutdownLinuxSide(
+                    "Ubuntu", 0, "http://127.0.0.1:8765", "t", out report);
+                Check("without an in-distribution pid, nothing is stopped",
+                    noPid == ShutdownOutcome.NotConfirmed);
+            }
+            finally
+            {
+                PanelSession.WslRunner = savedRunner;
+                PanelSession.OwnershipProbe = savedProbe;
+                PanelSession.GracePeriodMilliseconds = savedGrace;
+                PanelSession.ForcePeriodMilliseconds = savedForce;
+                PanelSession.LivenessPollMilliseconds = savedPoll;
+            }
+        }
+
+        // -- "is a benchmark running?" is a three-way answer --------------------
+
+        private static void ActivityCheckTests()
+        {
+            Section("Active-run detection");
+
+            bool active;
+            Check("a running job is found in the listing",
+                PanelSession.TryFindActiveStatus(
+                    "[{\"id\": \"job-1\", \"status\": \"running\"}]", out active) && active);
+            Check("a submission step counts as active",
+                PanelSession.TryFindActiveStatus(
+                    "[{\"id\": \"job-1\", \"status\": \"submitting\"}]", out active) && active);
+            Check("a nested job object is still found",
+                PanelSession.TryFindActiveStatus(
+                    "{\"runs\": [{\"status\": \"packaging\"}]}", out active) && active);
+            Check("a finished job is not active",
+                PanelSession.TryFindActiveStatus(
+                    "[{\"id\": \"job-1\", \"status\": \"completed\"}]", out active) && !active);
+            Check("an empty listing is not active",
+                PanelSession.TryFindActiveStatus("[]", out active) && !active);
+
+            // Unreadable is not the same as idle: the caller turns a false
+            // return into Unknown, which still warns before stopping.
+            Check("an unreadable answer is not reported as idle",
+                !PanelSession.TryFindActiveStatus("{\"runs\": [", out active));
+            Check("a non-JSON answer is not reported as idle",
+                !PanelSession.TryFindActiveStatus("<html>login</html>", out active));
+
+            // With no connection details there is nothing to ask, and that is
+            // Unknown rather than "nothing is running".
+            string description;
+            PanelActivity unknown = new PanelSession().CheckActivity(out description);
+            Check("a session with no panel reports Unknown, not Idle",
+                unknown == PanelActivity.Unknown && !string.IsNullOrEmpty(description));
         }
 
         // -- protocol registration ---------------------------------------------

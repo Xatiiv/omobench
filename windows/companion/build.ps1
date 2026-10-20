@@ -9,7 +9,7 @@
     Why that compiler rather than the .NET SDK: every supported Windows 10/11
     install already has the .NET Framework runtime, so the result runs with no
     SDK on the build machine, no NuGet restore, no network access, and nothing
-    for a user to install before double-clicking it. The output is ~50 KB.
+    for a user to install before double-clicking it. The output is ~70 KB.
     A later stage that needs signing, an installer or self-contained .NET can
     revisit this; the source is ordinary C# and does not depend on the choice.
 
@@ -47,7 +47,11 @@ $references = @(
     '/reference:System.dll',
     '/reference:System.Core.dll',
     '/reference:System.Drawing.dll',
-    '/reference:System.Windows.Forms.dll'
+    '/reference:System.Windows.Forms.dll',
+    # JavaScriptSerializer, for parsing the panel's startup document and API
+    # answers. Part of the in-box .NET Framework, so this adds no dependency
+    # to install: it ships in the same place as the compiler above.
+    '/reference:System.Web.Extensions.dll'
 )
 
 $exePath = Join-Path $OutputDirectory 'OmoBenchCompanion.exe'

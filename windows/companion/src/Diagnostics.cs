@@ -48,13 +48,32 @@ namespace OmoBench.Companion
             return redacted;
         }
 
+        /// <summary>
+        /// Guards against a logger that ends up logging its own failure. The
+        /// log lives in the runtime directory, so anything this method calls
+        /// could in principle fail and try to report that here; a nested write
+        /// is dropped rather than allowed to recurse.
+        /// </summary>
+        [ThreadStatic]
+        private static bool _writing;
+
         public static void Write(string message)
         {
+            if (_writing)
+            {
+                return;
+            }
+            _writing = true;
+            WriteCount++;
             try
             {
                 lock (Gate)
                 {
-                    Configuration.EnsureRuntimeDirectory();
+                    // Create the directory only. Enforcing its access list is
+                    // Configuration.TryEnsureRuntimeDirectory's job, reported
+                    // to the person: doing it here would mean a permission
+                    // failure logged a failure that failed the same way.
+                    Configuration.EnsureRuntimeDirectoryExists();
                     string path = LogPath;
                     if (File.Exists(path) && new FileInfo(path).Length > MaximumBytes)
                     {
@@ -69,6 +88,13 @@ namespace OmoBench.Companion
             {
                 // Diagnostics must never be the reason a launch fails.
             }
+            finally
+            {
+                _writing = false;
+            }
         }
+
+        /// <summary>Counts writes, so a test can prove logging stays finite.</summary>
+        internal static int WriteCount;
     }
 }
