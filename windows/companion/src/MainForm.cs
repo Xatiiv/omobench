@@ -170,7 +170,12 @@ namespace OmoBench.Companion
             // flight disables it, so the window is never left with no way to
             // open the panel at all.
             _open.Enabled = _session.State != PanelState.Starting;
-            _stop.Enabled = _session.IsRunning;
+
+            // Also enabled when the wsl.exe child has gone but the panel inside
+            // the distribution has not been confirmed stopped: that is exactly
+            // when a retry is needed, and keying this to the wrapper alone
+            // would take the only control away at the worst moment.
+            _stop.Enabled = _session.IsRunning || _session.OwnsUnconfirmedPanel;
         }
 
         private void OpenPanel()
@@ -200,7 +205,7 @@ namespace OmoBench.Companion
 
         private StopAttempt StopPanel()
         {
-            if (!_session.IsRunning)
+            if (!_session.IsRunning && !_session.OwnsUnconfirmedPanel)
             {
                 return StopAttempt.NothingToStop;
             }
@@ -278,7 +283,7 @@ namespace OmoBench.Companion
         /// </summary>
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            if (_session.IsRunning)
+            if (_session.IsRunning || _session.OwnsUnconfirmedPanel)
             {
                 DialogResult choice = MessageBox.Show(this,
                     "The OmoBench panel this companion started is still running.\n\n"

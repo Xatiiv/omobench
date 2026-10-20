@@ -80,6 +80,16 @@ namespace OmoBench.Companion
         private string _distribution;
         private int _panelProcessId;
 
+        /// <summary>
+        /// Descendants of the panel that a previous stop attempt force-stopped
+        /// but could not confirm gone. They were reached by walking down from a
+        /// process this session proved was its own, so they stay owned, and a
+        /// retry deals with them even once the panel itself has died -- without
+        /// this, a surviving runner would be forgotten the moment its parent
+        /// disappeared.
+        /// </summary>
+        private readonly List<int> _unconfirmedDescendants = new List<int>();
+
         public PanelState State { get; private set; }
         public string Message { get; private set; }
         public string Detail { get; private set; }
@@ -117,6 +127,29 @@ namespace OmoBench.Companion
         internal static int ProcessLaunchCount;
 
         /// <summary>
+        /// Adopt a panel as though this session had started it. Test-only: it
+        /// exists so the public <see cref="Stop"/> path -- ownership, retry
+        /// controls and status-document handling -- can be exercised without
+        /// launching WSL or a real panel. Production never calls it.
+        /// </summary>
+        internal void AdoptForTest(
+            Process process, string statusFileWindowsPath, string distribution,
+            int panelProcessId, string origin, string token)
+        {
+            lock (_gate)
+            {
+                _process = process;
+                _statusFileWindowsPath = statusFileWindowsPath;
+                _distribution = distribution;
+                _panelProcessId = panelProcessId;
+                _origin = origin;
+                _token = token;
+                _url = origin + "/#token=" + token;
+            }
+            State = PanelState.Ready;
+        }
+
+        /// <summary>
         /// Bounds on the process tree this is willing to signal: a panel and
         /// its runner are a handful of processes, so anything beyond this is a
         /// sign the enumeration is wrong, and it stops rather than widening.
@@ -152,6 +185,24 @@ namespace OmoBench.Companion
             get { return State == PanelState.Ready && IsRunning && HasUrl; }
         }
 
+        /// <summary>
+        /// True while this session still holds something it has not confirmed
+        /// stopped -- including the case where the wsl.exe child has exited but
+        /// the panel, or a descendant of it, may still be alive inside the
+        /// distribution. Stop has to stay available in that case, so the window
+        /// asks about this as well as <see cref="IsRunning"/>.
+        /// </summary>
+        public bool OwnsUnconfirmedPanel
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _panelProcessId > 1 || _unconfirmedDescendants.Count > 0;
+                }
+            }
+        }
+
         public event Action Changed;
 
         private void Update(PanelState state, string message, string detail = null)
@@ -170,6 +221,10 @@ namespace OmoBench.Companion
 
         private static bool HasExited(Process process)
         {
+            if (process == null)
+            {
+                return true;
+            }
             try
             {
                 return process.HasExited;
@@ -757,6 +812,18 @@ namespace OmoBench.Companion
         }
 
         /// <summary>
+        /// Ask for every process in the distribution. Used only to establish
+        /// that the process listing can answer at all, because `ps` exits 1
+        /// both when nothing matched and when it rejected its own options, and
+        /// a distribution that cannot run `ps` would otherwise look exactly
+        /// like a distribution in which the panel has exited.
+        /// </summary>
+        public static List<string> BuildAnyProcessProgram()
+        {
+            return new List<string> { "ps", "-o", "pid=", "--no-headers", "-e" };
+        }
+
+        /// <summary>
         /// Force-stop an explicit list of process ids. Every id must have been
         /// reached by walking down from the proven-ours panel process; this
         /// never takes a pattern, a name, or a process group.
@@ -824,6 +891,12 @@ namespace OmoBench.Companion
                 return ShutdownOutcome.NotConfirmed;
             }
 
+            // Anything a previous attempt left behind is still ours to finish.
+            if (!TryFinishPreviousAttempt(distribution, panelProcessId, ref report))
+            {
+                return ShutdownOutcome.NotConfirmed;
+            }
+
             // Ownership proof. A stale or tampered status document cannot aim
             // this at some other process, because an unrelated process will not
             // answer on that port with this session's token.
@@ -838,10 +911,14 @@ namespace OmoBench.Companion
                 {
                     return ShutdownOutcome.Stopped;
                 }
-                report = "The panel did not confirm it is the one this companion started, "
-                    + "so no signal was sent to it.";
+                report = liveness == Liveness.Alive
+                    ? "The panel did not confirm it is the one this companion started, "
+                        + "so no signal was sent to it."
+                    : "Whether the panel is still running inside " + distribution
+                        + " could not be determined, so no signal was sent to it.";
                 Diagnostics.Write("Ownership unproven for in-distribution pid "
-                    + panelProcessId.ToString(CultureInfo.InvariantCulture) + "; leaving it alone.");
+                    + panelProcessId.ToString(CultureInfo.InvariantCulture)
+                    + " (" + liveness + "); leaving it alone.");
                 return ShutdownOutcome.NotConfirmed;
             }
 
@@ -868,14 +945,101 @@ namespace OmoBench.Companion
                 + tree.Count.ToString(CultureInfo.InvariantCulture) + " process(es)).");
             RunInDistribution(distribution, BuildForceKillProgram(tree), 15000);
 
-            if (WaitForDeparture(distribution, panelProcessId, ForcePeriodMilliseconds))
+            // Every process that was signalled has to be accounted for, not
+            // just the parent. A runner that outlives the panel is exactly the
+            // orphan this escalation exists to prevent, and it would otherwise
+            // vanish from view the moment its parent died.
+            List<int> survivors = ConfirmGone(distribution, tree);
+            if (survivors.Count == 0)
             {
                 return ShutdownOutcome.Stopped;
             }
 
-            report = "The panel process is still present inside " + distribution
-                + " after being asked and then forced to stop.";
+            RememberSurvivors(distribution, survivors);
+            report = Describe(distribution, survivors, panelProcessId);
             return ShutdownOutcome.NotConfirmed;
+        }
+
+        /// <summary>
+        /// Wait, bounded, for each process to be confirmed gone. Returns the
+        /// ones that were not -- whether they are still alive or simply could
+        /// not be observed, because neither is a stop.
+        /// </summary>
+        private List<int> ConfirmGone(string distribution, List<int> processIds)
+        {
+            List<int> survivors = new List<int>();
+            foreach (int processId in processIds)
+            {
+                if (!WaitForDeparture(distribution, processId, ForcePeriodMilliseconds))
+                {
+                    survivors.Add(processId);
+                }
+            }
+            return survivors;
+        }
+
+        private static string Describe(string distribution, List<int> survivors, int panelProcessId)
+        {
+            List<string> names = new List<string>();
+            foreach (int survivor in survivors)
+            {
+                names.Add(survivor.ToString(CultureInfo.InvariantCulture)
+                    + (survivor == panelProcessId ? " (the panel)" : " (started by the panel)"));
+            }
+            return "These processes inside " + distribution
+                + " could not be confirmed stopped: " + string.Join(", ", names.ToArray()) + ".";
+        }
+
+        private void RememberSurvivors(string distribution, List<int> survivors)
+        {
+            lock (_gate)
+            {
+                _distribution = distribution;
+                foreach (int survivor in survivors)
+                {
+                    if (!_unconfirmedDescendants.Contains(survivor))
+                    {
+                        _unconfirmedDescendants.Add(survivor);
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Deal with anything a previous attempt force-stopped but could not
+        /// confirm. These were reached by walking down from a process this
+        /// session proved was its own, so they stay owned even after the panel
+        /// above them has died and can no longer answer for itself.
+        /// </summary>
+        private bool TryFinishPreviousAttempt(string distribution, int panelProcessId, ref string report)
+        {
+            List<int> outstanding;
+            lock (_gate)
+            {
+                outstanding = new List<int>(_unconfirmedDescendants);
+            }
+            if (outstanding.Count == 0)
+            {
+                return true;
+            }
+
+            Diagnostics.Write("Retrying "
+                + outstanding.Count.ToString(CultureInfo.InvariantCulture)
+                + " process(es) a previous stop could not confirm.");
+            RunInDistribution(distribution, BuildForceKillProgram(outstanding), 15000);
+
+            List<int> survivors = ConfirmGone(distribution, outstanding);
+            lock (_gate)
+            {
+                _unconfirmedDescendants.Clear();
+                _unconfirmedDescendants.AddRange(survivors);
+            }
+            if (survivors.Count == 0)
+            {
+                return true;
+            }
+            report = Describe(distribution, survivors, panelProcessId);
+            return false;
         }
 
         private bool WaitForDeparture(string distribution, int processId, int timeoutMilliseconds)
@@ -895,16 +1059,100 @@ namespace OmoBench.Companion
             }
         }
 
+        /// <summary>
+        /// Is this process still there?
+        ///
+        /// `kill -0` succeeding proves it is, but `kill -0` *failing* proves
+        /// nothing: the same exit code covers "no such process", "operation not
+        /// permitted" on a process that is very much alive, and `kill` being
+        /// unavailable. So a failure is referred to the process table, which
+        /// can tell those apart -- and even that is only believed once the
+        /// listing has shown it can answer, since `ps` also exits 1 when it
+        /// rejects its own options or the distribution cannot run it.
+        ///
+        /// Absence is therefore only ever returned on positive evidence.
+        /// Everything else is Unknown, and Unknown is never a stop.
+        /// </summary>
         private Liveness CheckLiveness(string distribution, int processId)
         {
-            ProcessResult result = RunInDistribution(distribution, BuildAliveProbeProgram(processId), 10000);
+            ProcessResult signalled = RunInDistribution(
+                distribution, BuildAliveProbeProgram(processId), 10000);
+            if (signalled != null && !signalled.TimedOut && signalled.ExitCode == 0)
+            {
+                return Liveness.Alive;
+            }
+
+            List<int> listed;
+            switch (AskProcessListing(distribution, BuildProcessExistsProgram(processId), out listed))
+            {
+                case ListingAnswer.Listed:
+                    // It is there after all -- we simply may not signal it.
+                    return listed.Contains(processId) ? Liveness.Alive : Liveness.Unknown;
+                case ListingAnswer.NothingMatched:
+                    return Liveness.Gone;
+                default:
+                    return Liveness.Unknown;
+            }
+        }
+
+        private enum ListingAnswer
+        {
+            /// <summary>The listing answered, and these are the processes.</summary>
+            Listed,
+
+            /// <summary>The listing answered, and nothing matched.</summary>
+            NothingMatched,
+
+            /// <summary>No answer was obtained. Never read as an empty result.</summary>
+            Unusable,
+        }
+
+        /// <summary>
+        /// Run one process-listing query and say which of the three things
+        /// happened.
+        ///
+        /// The exit codes are measured, not assumed: `ps` returns 1 both when
+        /// nothing matched and when it rejected its own options, and 127 when
+        /// it could not be run at all. So 1 is ambiguous and has to be settled
+        /// by asking a question whose answer is already known, while anything
+        /// else non-zero is simply a failure.
+        /// </summary>
+        private ListingAnswer AskProcessListing(
+            string distribution, List<string> program, out List<int> processIds)
+        {
+            processIds = new List<int>();
+            ProcessResult result = RunInDistribution(distribution, program, 10000);
             if (result == null || result.TimedOut)
             {
-                return Liveness.Unknown;
+                return ListingAnswer.Unusable;
             }
-            // `kill -0` exits 0 when the process exists and can be signalled,
-            // and non-zero when it does not exist.
-            return result.ExitCode == 0 ? Liveness.Alive : Liveness.Gone;
+            if (result.ExitCode == 0)
+            {
+                processIds = ParseProcessIds(result.StandardOutput);
+                return ListingAnswer.Listed;
+            }
+            if (result.ExitCode != 1)
+            {
+                return ListingAnswer.Unusable;
+            }
+            return ProcessListingAnswers(distribution)
+                ? ListingAnswer.NothingMatched
+                : ListingAnswer.Unusable;
+        }
+
+        /// <summary>
+        /// Can the process listing answer questions right now? Asking for every
+        /// process is the one query whose answer is known in advance: a running
+        /// distribution always has processes, so an empty or failed result means
+        /// the question could not be asked, not that the answer is nothing.
+        /// </summary>
+        private bool ProcessListingAnswers(string distribution)
+        {
+            ProcessResult everything = RunInDistribution(distribution, BuildAnyProcessProgram(), 10000);
+            return everything != null
+                && !everything.TimedOut
+                && everything.ExitCode == 0
+                && ParseProcessIds(everything.StandardOutput).Count > 0;
         }
 
         /// <summary>
@@ -935,18 +1183,12 @@ namespace OmoBench.Companion
                 List<int> next = new List<int>();
                 foreach (int parent in frontier)
                 {
-                    ProcessResult result = RunInDistribution(distribution, BuildChildListProgram(parent), 10000);
-                    if (result == null || result.TimedOut)
+                    List<int> children;
+                    if (!TryListChildren(distribution, parent, out children))
                     {
                         return false;
                     }
-                    if (result.ExitCode != 0)
-                    {
-                        // `ps` exits non-zero when a parent simply has no
-                        // children, which is the common case and not an error.
-                        continue;
-                    }
-                    foreach (int child in ParseProcessIds(result.StandardOutput))
+                    foreach (int child in children)
                     {
                         if (child <= 1 || tree.Contains(child))
                         {
@@ -961,6 +1203,43 @@ namespace OmoBench.Companion
                     }
                 }
                 frontier = next;
+            }
+
+            // Running out of depth with processes still unexamined means the
+            // tree is bigger than this walk can account for. Reporting success
+            // here would force-stop a parent while leaving the descendants
+            // below the cut-off running -- the orphaning this exists to avoid.
+            if (frontier.Count > 0)
+            {
+                Diagnostics.Write("The panel's process tree is deeper than "
+                    + MaximumTreeDepth.ToString(CultureInfo.InvariantCulture)
+                    + " levels; refusing to force-stop a tree that was not fully examined.");
+                return false;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// The direct children of one process, or false if that could not be
+        /// established.
+        ///
+        /// `ps` exiting non-zero usually means "this parent has no children",
+        /// but it is also what a failed or rejected `ps` returns, and the root
+        /// probe having succeeded earlier does not make every later answer
+        /// trustworthy -- the distribution can stop answering midway. So a
+        /// non-zero exit is only read as "no children" when the listing is
+        /// shown, at that moment, to still be answering.
+        /// </summary>
+        private bool TryListChildren(string distribution, int parentProcessId, out List<int> children)
+        {
+            ListingAnswer answer = AskProcessListing(
+                distribution, BuildChildListProgram(parentProcessId), out children);
+            if (answer == ListingAnswer.Unusable)
+            {
+                Diagnostics.Write("Could not list the children of in-distribution pid "
+                    + parentProcessId.ToString(CultureInfo.InvariantCulture)
+                    + "; refusing to force-stop a tree that was not fully examined.");
+                return false;
             }
             return true;
         }
@@ -1027,71 +1306,80 @@ namespace OmoBench.Companion
                 token = _token;
             }
 
-            if (process == null)
+            if (process == null && panelProcessId <= 1)
             {
                 ReleaseOwnership(statusFile);
                 return ShutdownOutcome.NothingToStop;
             }
 
-            if (!HasExited(process))
+            // The Linux side decides, whether or not the Windows wrapper is
+            // still around. wsl.exe exiting says nothing about the processes
+            // inside the distribution -- that assumption is what left a runner
+            // alive while the window reported a clean stop.
+            if (panelProcessId > 1)
             {
                 Diagnostics.Write("Stopping the panel this companion started (wsl.exe pid "
-                    + TryDescribe(process) + ").");
+                    + TryDescribe(process) + ", in-distribution pid "
+                    + panelProcessId.ToString(CultureInfo.InvariantCulture) + ").");
 
-                if (panelProcessId > 1)
+                string report;
+                ShutdownOutcome linux = ShutdownLinuxSide(
+                    distribution, panelProcessId, origin, token, out report);
+                if (linux != ShutdownOutcome.Stopped)
                 {
-                    string report;
-                    ShutdownOutcome linux = ShutdownLinuxSide(
-                        distribution, panelProcessId, origin, token, out report);
-                    if (linux != ShutdownOutcome.Stopped)
-                    {
-                        _lastShutdownReport = report;
-                        Diagnostics.Write("Shutdown was not confirmed: " + report);
-                        // Ownership deliberately retained, status document
-                        // deliberately left in place: the panel it describes is
-                        // still there, and deleting it would strand the pid and
-                        // token a retry needs.
-                        return ShutdownOutcome.NotConfirmed;
-                    }
+                    _lastShutdownReport = report;
+                    Diagnostics.Write("Shutdown was not confirmed: " + report);
+                    // Ownership deliberately retained, status document
+                    // deliberately left in place: the panel it describes is
+                    // still there, and deleting it would strand the pid and
+                    // token a retry needs.
+                    return ShutdownOutcome.NotConfirmed;
                 }
-                else
-                {
-                    // The panel never reported itself ready, so it never served
-                    // a request and no benchmark can have been started through
-                    // it. There is no in-distribution pid to signal, and ending
-                    // the wsl.exe child cannot orphan a runner that was never
-                    // started.
-                    Diagnostics.Write("The panel never reported ready; ending the wsl.exe child directly.");
-                }
+            }
+            else if (process != null && !HasExited(process))
+            {
+                // The panel never reported itself ready, so it never served
+                // a request and no benchmark can have been started through
+                // it. There is no in-distribution pid to signal, and ending
+                // the wsl.exe child cannot orphan a runner that was never
+                // started.
+                Diagnostics.Write("The panel never reported ready; ending the wsl.exe child directly.");
             }
 
             // The Linux side is confirmed gone, or never came up. Now the child
-            // process this companion started may be ended.
-            try
+            // process this companion started may be ended -- if there still is
+            // one; the wrapper may have exited long before this point.
+            if (process != null)
             {
+                try
+                {
+                    if (!HasExited(process))
+                    {
+                        process.WaitForExit(2000);
+                    }
+                    if (!HasExited(process))
+                    {
+                        process.Kill();
+                        process.WaitForExit(15000);
+                    }
+                }
+                catch (Exception error)
+                {
+                    Diagnostics.Write("Ending the wsl.exe child reported: " + Diagnostics.Redact(error.Message));
+                }
+
                 if (!HasExited(process))
                 {
-                    process.WaitForExit(2000);
-                }
-                if (!HasExited(process))
-                {
-                    process.Kill();
-                    process.WaitForExit(15000);
+                    _lastShutdownReport = "The wsl.exe process this companion started is still running.";
+                    Diagnostics.Write(_lastShutdownReport);
+                    return ShutdownOutcome.NotConfirmed;
                 }
             }
-            catch (Exception error)
-            {
-                Diagnostics.Write("Ending the wsl.exe child reported: " + Diagnostics.Redact(error.Message));
-            }
 
-            if (!HasExited(process))
+            if (process != null)
             {
-                _lastShutdownReport = "The wsl.exe process this companion started is still running.";
-                Diagnostics.Write(_lastShutdownReport);
-                return ShutdownOutcome.NotConfirmed;
+                try { process.Dispose(); } catch (Exception) { }
             }
-
-            try { process.Dispose(); } catch (Exception) { }
             _lastShutdownReport = null;
             ReleaseOwnership(statusFile);
             return ShutdownOutcome.Stopped;
@@ -1099,6 +1387,10 @@ namespace OmoBench.Companion
 
         private static string TryDescribe(Process process)
         {
+            if (process == null)
+            {
+                return "already gone";
+            }
             try
             {
                 return process.Id.ToString(CultureInfo.InvariantCulture);
@@ -1125,6 +1417,7 @@ namespace OmoBench.Companion
                 _token = null;
                 _origin = null;
                 _panelProcessId = 0;
+                _unconfirmedDescendants.Clear();
             }
 
             if (!string.IsNullOrEmpty(statusFile))

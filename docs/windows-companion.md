@@ -139,9 +139,18 @@ actually works. A panel you started yourself in a terminal is never stopped and
 never adopted, no unrelated process is ever signalled, and `wsl --shutdown` is
 never run.
 
+Escalation then confirms every process it signalled, not just the panel, so a
+runner that outlives its parent is noticed rather than silently left behind.
+Absence is only ever concluded from positive evidence: a process that exists
+but cannot be signalled, a probe that could not run, and a distribution that
+did not answer are all treated as "still there", never as "gone".
+
 If the stop cannot be confirmed, it says so rather than reporting success: the
-window shows **The panel could not be confirmed stopped**, the companion keeps
-owning the panel, and **Stop** stays available to retry.
+window shows **The panel could not be confirmed stopped** and names what is
+still there, the companion keeps owning it, and **Stop** stays available to
+retry — including when the `wsl.exe` process has itself exited, since that says
+nothing about what is still running inside the distribution. A retry also
+finishes off any process a previous attempt left unaccounted for.
 
 Before stopping, the companion asks the panel whether anything is in flight.
 If a benchmark or submission step is active, it says so and asks for

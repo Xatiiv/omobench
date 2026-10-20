@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Text;
 
@@ -35,6 +36,7 @@ namespace OmoBench.Companion.Tests
             PanelProgramTests();
             ShutdownTests();
             ShutdownOutcomeTests();
+            ShutdownRobustnessTests();
             ActivityCheckTests();
             RegistrationTests();
 
@@ -712,62 +714,155 @@ namespace OmoBench.Companion.Tests
         {
             public readonly List<string> Commands = new List<string>();
             public readonly Dictionary<int, int[]> Children = new Dictionary<int, int[]>();
-            public bool PanelAlive = true;
-            public bool HonoursTerm = true;
+
+            /// <summary>
+            /// Which processes exist, tracked individually: a single "is the
+            /// panel alive" flag cannot express a parent that died while its
+            /// runner survived, which is one of the cases that matters most.
+            /// </summary>
+            public readonly List<int> Living = new List<int>();
+
+            public readonly List<int> IgnoresTerm = new List<int>();
+            public readonly List<int> IgnoresKill = new List<int>();
+
+            /// <summary>Alive, but `kill -0` answers EPERM instead of success.</summary>
+            public readonly List<int> NotSignallable = new List<int>();
+
+            /// <summary>Parents whose child listing cannot be answered.</summary>
+            public readonly List<int> ChildListFails = new List<int>();
+
             public bool ProcessListingWorks = true;
-            public bool SurvivesForceKill;
+            public bool SignalCommandWorks = true;
+            public bool Responsive = true;
+
+            /// <summary>
+            /// A panel that honours SIGTERM also stops the runner it started,
+            /// which is why the graceful path does not need to enumerate.
+            /// </summary>
+            public bool TermReapsDescendants = true;
+
+            /// <summary>
+            /// Every scenario keeps one unrelated process alive. It stands in
+            /// for the rest of the distribution, so `ps -e` has something to
+            /// report, and it must still be there at the end of every test.
+            /// </summary>
+            public const int UnrelatedPid = 9999;
+
+            public FakeDistribution(params int[] living)
+            {
+                Living.Add(UnrelatedPid);
+                Living.AddRange(living);
+            }
+
+            public bool IsAlive(int processId) { return Living.Contains(processId); }
 
             public ProcessResult Run(string arguments, int timeoutMilliseconds)
             {
                 Commands.Add(arguments);
+                if (!Responsive)
+                {
+                    return new ProcessResult { ExitCode = -1, TimedOut = true };
+                }
+
+                string[] parts = arguments.Split(' ');
+                int last;
+                int.TryParse(parts[parts.Length - 1], out last);
 
                 if (arguments.Contains(" -- kill -0 "))
                 {
-                    return new ProcessResult { ExitCode = PanelAlive ? 0 : 1 };
+                    if (!SignalCommandWorks) { return Exit(127, "", "kill: command not found"); }
+                    if (NotSignallable.Contains(last))
+                    {
+                        // The real kill(1) reports this with the same exit code
+                        // as "no such process": the conflation under test.
+                        return Exit(1, "", "kill: (" + last + ") - Operation not permitted");
+                    }
+                    return Living.Contains(last)
+                        ? Exit(0)
+                        : Exit(1, "", "kill: (" + last + ") - No such process");
                 }
+
                 if (arguments.Contains(" -- kill -TERM "))
                 {
-                    if (HonoursTerm) { PanelAlive = false; }
-                    return new ProcessResult { ExitCode = 0 };
+                    if (!SignalCommandWorks) { return Exit(127, "", "kill: command not found"); }
+                    if (!Living.Contains(last)) { return Exit(1); }
+                    if (!IgnoresTerm.Contains(last))
+                    {
+                        Living.Remove(last);
+                        if (TermReapsDescendants) { Reap(last); }
+                    }
+                    return Exit(0);
                 }
+
                 if (arguments.Contains(" -- kill -KILL "))
                 {
-                    if (!SurvivesForceKill) { PanelAlive = false; }
-                    return new ProcessResult { ExitCode = 0 };
+                    if (!SignalCommandWorks) { return Exit(127, "", "kill: command not found"); }
+                    bool afterFlag = false;
+                    foreach (string part in parts)
+                    {
+                        if (part == "-KILL") { afterFlag = true; continue; }
+                        int target;
+                        if (afterFlag && int.TryParse(part, out target) && !IgnoresKill.Contains(target))
+                        {
+                            Living.Remove(target);
+                        }
+                    }
+                    return Exit(0);
                 }
+
                 if (arguments.Contains(" -- ps "))
                 {
                     if (!ProcessListingWorks)
                     {
-                        // Indistinguishable by exit code from "that parent has
-                        // no children", which is the point of the capability
-                        // probe this is here to exercise.
-                        return new ProcessResult { ExitCode = 1, StandardError = "ps: not found" };
+                        // A ps usage error exits 1 too -- indistinguishable from
+                        // "nothing matched" by exit code alone.
+                        return Exit(1, "", "error: unknown gnu long option");
                     }
-                    string[] parts = arguments.Split(' ');
-                    int subject = int.Parse(parts[parts.Length - 1]);
-
-                    // "does this process exist" rather than "list its children"
+                    if (arguments.Contains(" --ppid "))
+                    {
+                        if (ChildListFails.Contains(last)) { return Exit(127, "", "ps: cannot answer"); }
+                        int[] children;
+                        if (!Children.TryGetValue(last, out children)) { return Exit(1); }
+                        List<int> alive = new List<int>();
+                        foreach (int child in children)
+                        {
+                            if (Living.Contains(child)) { alive.Add(child); }
+                        }
+                        return alive.Count == 0 ? Exit(1) : Exit(0, Lines(alive));
+                    }
                     if (arguments.Contains(" -p "))
                     {
-                        return PanelAlive
-                            ? new ProcessResult { ExitCode = 0, StandardOutput = subject.ToString() + "\n" }
-                            : new ProcessResult { ExitCode = 1 };
+                        return Living.Contains(last) ? Exit(0, last + "\n") : Exit(1);
                     }
-
-                    int parent = subject;
-                    int[] children;
-                    if (!Children.TryGetValue(parent, out children))
+                    if (arguments.EndsWith(" -e", StringComparison.Ordinal))
                     {
-                        return new ProcessResult { ExitCode = 1 };   // no children
+                        return Exit(0, Lines(Living));
                     }
-                    return new ProcessResult
-                    {
-                        ExitCode = 0,
-                        StandardOutput = string.Join("\n", Array.ConvertAll(children, c => c.ToString())),
-                    };
                 }
-                return new ProcessResult { ExitCode = 127 };
+                return Exit(127);
+            }
+
+            private void Reap(int processId)
+            {
+                int[] children;
+                if (!Children.TryGetValue(processId, out children)) { return; }
+                foreach (int child in children)
+                {
+                    Living.Remove(child);
+                    Reap(child);
+                }
+            }
+
+            private static string Lines(List<int> values)
+            {
+                StringBuilder builder = new StringBuilder();
+                foreach (int value in values) { builder.Append("   ").Append(value).Append("\n"); }
+                return builder.ToString();
+            }
+
+            private static ProcessResult Exit(int code, string output = "", string error = "")
+            {
+                return new ProcessResult { ExitCode = code, StandardOutput = output, StandardError = error };
             }
 
             public bool Ran(string fragment)
@@ -795,11 +890,11 @@ namespace OmoBench.Companion.Tests
                 PanelSession.LivenessPollMilliseconds = 1;
 
                 const int PanelPid = 1417;
-                const int UnrelatedPid = 9999;     // must never be named
+                const int UnrelatedPid = FakeDistribution.UnrelatedPid;
                 string report;
 
                 // 1. The ordinary case: the panel honours SIGTERM.
-                FakeDistribution polite = new FakeDistribution();
+                FakeDistribution polite = new FakeDistribution(PanelPid);
                 PanelSession.WslRunner = polite.Run;
                 PanelSession.OwnershipProbe = (origin, token) => true;
                 ShutdownOutcome graceful = new PanelSession().ShutdownLinuxSide(
@@ -811,7 +906,8 @@ namespace OmoBench.Companion.Tests
 
                 // 2. An unresponsive panel: escalation stays inside the tree
                 //    rooted at the process proved to be ours.
-                FakeDistribution stubborn = new FakeDistribution { HonoursTerm = false };
+                FakeDistribution stubborn = new FakeDistribution(PanelPid, 2000, 2001);
+                stubborn.IgnoresTerm.Add(PanelPid);
                 stubborn.Children[PanelPid] = new[] { 2000 };
                 stubborn.Children[2000] = new[] { 2001 };
                 PanelSession.WslRunner = stubborn.Run;
@@ -826,27 +922,23 @@ namespace OmoBench.Companion.Tests
                     !stubborn.All.Contains(UnrelatedPid.ToString()));
 
                 // 3. Force-stop that does not work is reported honestly.
-                FakeDistribution immortal = new FakeDistribution
-                {
-                    HonoursTerm = false,
-                    SurvivesForceKill = true,
-                };
+                FakeDistribution immortal = new FakeDistribution(PanelPid);
+                immortal.IgnoresTerm.Add(PanelPid);
+                immortal.IgnoresKill.Add(PanelPid);
                 immortal.Children[PanelPid] = new int[0];
                 PanelSession.WslRunner = immortal.Run;
                 ShutdownOutcome unconfirmed = new PanelSession().ShutdownLinuxSide(
                     "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t", out report);
                 Check("a panel that survives everything is not reported as stopped",
                     unconfirmed == ShutdownOutcome.NotConfirmed);
-                Check("the report says what is still there",
-                    (report ?? "").Contains("still present"));
+                Check("the report names what is still there",
+                    (report ?? "").Contains("could not be confirmed stopped")
+                    && (report ?? "").Contains("1417 (the panel)"));
 
                 // 4. If the process list cannot be read, nothing is killed on
                 //    a guess.
-                FakeDistribution blind = new FakeDistribution
-                {
-                    HonoursTerm = false,
-                    ProcessListingWorks = false,
-                };
+                FakeDistribution blind = new FakeDistribution(PanelPid) { ProcessListingWorks = false };
+                blind.IgnoresTerm.Add(PanelPid);
                 PanelSession.WslRunner = blind.Run;
                 ShutdownOutcome cannotEnumerate = new PanelSession().ShutdownLinuxSide(
                     "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t", out report);
@@ -856,7 +948,7 @@ namespace OmoBench.Companion.Tests
                     !blind.Ran("kill -KILL"));
 
                 // 5. Ownership unproven, panel alive: strictly hands off.
-                FakeDistribution unproven = new FakeDistribution();
+                FakeDistribution unproven = new FakeDistribution(PanelPid);
                 PanelSession.WslRunner = unproven.Run;
                 PanelSession.OwnershipProbe = (origin, token) => false;
                 ShutdownOutcome handsOff = new PanelSession().ShutdownLinuxSide(
@@ -869,7 +961,7 @@ namespace OmoBench.Companion.Tests
 
                 // 6. Ownership unproven because it already exited: that is a
                 //    stop, and it is confirmed by asking.
-                FakeDistribution departed = new FakeDistribution { PanelAlive = false };
+                FakeDistribution departed = new FakeDistribution();   // the panel pid is not alive
                 PanelSession.WslRunner = departed.Run;
                 ShutdownOutcome alreadyGone = new PanelSession().ShutdownLinuxSide(
                     "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t", out report);
@@ -878,16 +970,17 @@ namespace OmoBench.Companion.Tests
 
                 // 7. Retry: the same session can be told to stop again, and the
                 //    second attempt succeeds once the panel responds.
-                FakeDistribution retried = new FakeDistribution { HonoursTerm = false };
+                FakeDistribution retried = new FakeDistribution(PanelPid);
+                retried.IgnoresTerm.Add(PanelPid);
+                retried.IgnoresKill.Add(PanelPid);
                 retried.Children[PanelPid] = new int[0];
-                retried.SurvivesForceKill = true;
                 PanelSession.WslRunner = retried.Run;
                 PanelSession.OwnershipProbe = (origin, token) => true;
                 PanelSession session = new PanelSession();
                 ShutdownOutcome first = session.ShutdownLinuxSide(
                     "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t", out report);
-                retried.HonoursTerm = true;
-                retried.SurvivesForceKill = false;
+                retried.IgnoresTerm.Clear();
+                retried.IgnoresKill.Clear();
                 ShutdownOutcome second = session.ShutdownLinuxSide(
                     "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t", out report);
                 Check("a failed stop can be retried on the same session",
@@ -900,6 +993,8 @@ namespace OmoBench.Companion.Tests
                 {
                     Check("no global WSL shutdown or terminate was ever issued",
                         !distribution.All.Contains("--shutdown") && !distribution.All.Contains("--terminate"));
+                    Check("the unrelated process survived",
+                        distribution.IsAlive(UnrelatedPid));
                 }
 
                 // A missing pid is a refusal, not a broader signal.
@@ -907,6 +1002,197 @@ namespace OmoBench.Companion.Tests
                     "Ubuntu", 0, "http://127.0.0.1:8765", "t", out report);
                 Check("without an in-distribution pid, nothing is stopped",
                     noPid == ShutdownOutcome.NotConfirmed);
+            }
+            finally
+            {
+                PanelSession.WslRunner = savedRunner;
+                PanelSession.OwnershipProbe = savedProbe;
+                PanelSession.GracePeriodMilliseconds = savedGrace;
+                PanelSession.ForcePeriodMilliseconds = savedForce;
+                PanelSession.LivenessPollMilliseconds = savedPoll;
+            }
+        }
+
+        /// <summary>
+        /// The difference between "confirmed gone" and "could not tell", and
+        /// between a fully walked process tree and a partly walked one.
+        ///
+        /// Every case here was a wrong answer before the fix: a process that
+        /// exists but cannot be signalled, a probe that could not run at all,
+        /// a tree deeper than the walk, a child listing that failed after the
+        /// capability probe succeeded, and a parent that died while its child
+        /// lived on. Each produced "stopped".
+        /// </summary>
+        private static void ShutdownRobustnessTests()
+        {
+            Section("Shutdown: confirmed absence vs failed observation");
+
+            Func<string, int, ProcessResult> savedRunner = PanelSession.WslRunner;
+            Func<string, string, bool> savedProbe = PanelSession.OwnershipProbe;
+            int savedGrace = PanelSession.GracePeriodMilliseconds;
+            int savedForce = PanelSession.ForcePeriodMilliseconds;
+            int savedPoll = PanelSession.LivenessPollMilliseconds;
+
+            try
+            {
+                PanelSession.GracePeriodMilliseconds = 20;
+                PanelSession.ForcePeriodMilliseconds = 20;
+                PanelSession.LivenessPollMilliseconds = 1;
+
+                const int PanelPid = 1417;
+                const int UnrelatedPid = FakeDistribution.UnrelatedPid;
+                string report;
+
+                // 1. Alive, but not signallable by us. The real kill(1) reports
+                //    EPERM with the same exit code as ESRCH, so an exit code
+                //    alone must never be read as "the process is gone".
+                FakeDistribution denied = new FakeDistribution(PanelPid);
+                denied.NotSignallable.Add(PanelPid);
+                PanelSession.WslRunner = denied.Run;
+                PanelSession.OwnershipProbe = (origin, token) => false;
+                ShutdownOutcome permissionDenied = new PanelSession().ShutdownLinuxSide(
+                    "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t", out report);
+                Check("a process that exists but cannot be signalled is not reported stopped",
+                    permissionDenied == ShutdownOutcome.NotConfirmed);
+                Check("the process table was consulted, not just the signal",
+                    denied.Ran(" -- ps -o pid= --no-headers -p 1417"));
+
+                // 2. The liveness question could not be asked at all.
+                FakeDistribution mute = new FakeDistribution(PanelPid)
+                {
+                    SignalCommandWorks = false,
+                    ProcessListingWorks = false,
+                };
+                PanelSession.WslRunner = mute.Run;
+                ShutdownOutcome unanswerable = new PanelSession().ShutdownLinuxSide(
+                    "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t", out report);
+                Check("an unanswerable liveness check is not reported stopped",
+                    unanswerable == ShutdownOutcome.NotConfirmed);
+
+                // 3. Everything times out: still not a stop.
+                FakeDistribution frozen = new FakeDistribution(PanelPid) { Responsive = false };
+                PanelSession.WslRunner = frozen.Run;
+                ShutdownOutcome timedOut = new PanelSession().ShutdownLinuxSide(
+                    "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t", out report);
+                Check("a timed-out distribution is not reported stopped",
+                    timedOut == ShutdownOutcome.NotConfirmed);
+
+                // 4. A tree deeper than the walk must not be reported complete.
+                PanelSession.OwnershipProbe = (origin, token) => true;
+                FakeDistribution deep = new FakeDistribution(PanelPid, 2000, 2001, 2002, 2003, 2004);
+                deep.IgnoresTerm.Add(PanelPid);
+                deep.Children[PanelPid] = new[] { 2000 };
+                deep.Children[2000] = new[] { 2001 };
+                deep.Children[2001] = new[] { 2002 };
+                deep.Children[2002] = new[] { 2003 };
+                deep.Children[2003] = new[] { 2004 };
+                PanelSession.WslRunner = deep.Run;
+                ShutdownOutcome tooDeep = new PanelSession().ShutdownLinuxSide(
+                    "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t", out report);
+                Check("a tree deeper than the walk is refused, not half-killed",
+                    tooDeep == ShutdownOutcome.NotConfirmed);
+                Check("nothing was force-stopped from an incomplete tree",
+                    !deep.Ran("kill -KILL"));
+                Check("the deepest descendant is still alive, having never been named",
+                    deep.IsAlive(2004));
+
+                // 5. The capability probe succeeds, then a child listing fails.
+                //    "ps works" is not "every later ps answer is trustworthy".
+                FakeDistribution flaky = new FakeDistribution(PanelPid, 2000, 2001);
+                flaky.IgnoresTerm.Add(PanelPid);
+                flaky.Children[PanelPid] = new[] { 2000 };
+                flaky.Children[2000] = new[] { 2001 };
+                flaky.ChildListFails.Add(2000);
+                PanelSession.WslRunner = flaky.Run;
+                ShutdownOutcome partial = new PanelSession().ShutdownLinuxSide(
+                    "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t", out report);
+                Check("a child listing that fails mid-walk is refused, not read as childless",
+                    partial == ShutdownOutcome.NotConfirmed);
+                Check("no partial tree was force-stopped", !flaky.Ran("kill -KILL"));
+                Check("the grandchild behind the failed listing is still alive",
+                    flaky.IsAlive(2001));
+
+                // 6. The parent dies but a known child survives the force-stop.
+                FakeDistribution orphaning = new FakeDistribution(PanelPid, 2000);
+                orphaning.IgnoresTerm.Add(PanelPid);
+                orphaning.IgnoresKill.Add(2000);
+                orphaning.Children[PanelPid] = new[] { 2000 };
+                PanelSession.WslRunner = orphaning.Run;
+                PanelSession survivorSession = new PanelSession();
+                ShutdownOutcome childLived = survivorSession.ShutdownLinuxSide(
+                    "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t", out report);
+                Check("a surviving child means the stop is not confirmed",
+                    childLived == ShutdownOutcome.NotConfirmed);
+                Check("the parent did go", !orphaning.IsAlive(PanelPid));
+                Check("the surviving child is named in the report: " + report,
+                    (report ?? "").Contains("2000"));
+
+                // ...and the retry still knows about it, even though the panel
+                // it descended from is now gone and cannot prove ownership.
+                orphaning.IgnoresKill.Clear();
+                ShutdownOutcome retryAfterOrphan = survivorSession.ShutdownLinuxSide(
+                    "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t", out report);
+                Check("a retry finishes the descendant the first attempt could not",
+                    retryAfterOrphan == ShutdownOutcome.Stopped && !orphaning.IsAlive(2000));
+
+                // 7. The public path: the Windows wrapper has exited, but the
+                //    panel is still alive inside the distribution. Stop must not
+                //    call that stopped, must keep the status document, and must
+                //    leave a usable retry control.
+                string statusFile = Path.Combine(
+                    Path.GetTempPath(), "omobench-status-test-" + Guid.NewGuid().ToString("N") + ".json");
+                File.WriteAllText(statusFile, "{}");
+                Process exited = Process.Start(new ProcessStartInfo
+                {
+                    FileName = "cmd.exe",
+                    Arguments = "/c exit 0",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                });
+                exited.WaitForExit();
+
+                FakeDistribution survivingPanel = new FakeDistribution(PanelPid);
+                survivingPanel.IgnoresTerm.Add(PanelPid);
+                survivingPanel.IgnoresKill.Add(PanelPid);
+                survivingPanel.Children[PanelPid] = new int[0];
+                PanelSession.WslRunner = survivingPanel.Run;
+
+                PanelSession wrapperGone = new PanelSession();
+                wrapperGone.AdoptForTest(exited, statusFile, "Ubuntu", PanelPid, "http://127.0.0.1:8765", "t");
+                Check("the wrapper really has exited", !wrapperGone.IsRunning);
+
+                ShutdownOutcome wrapperOutcome = wrapperGone.Stop();
+                Check("an exited wsl.exe is not taken as proof the panel stopped",
+                    wrapperOutcome == ShutdownOutcome.NotConfirmed);
+                Check("the window says so rather than claiming a stop",
+                    wrapperGone.State == PanelState.StopFailed);
+                Check("the status document is kept, because the panel it describes is still there",
+                    File.Exists(statusFile));
+                Check("Stop stays available even though the wrapper is gone",
+                    wrapperGone.OwnsUnconfirmedPanel);
+                Check("the panel was actually signalled, not just inspected",
+                    survivingPanel.Ran(" -- kill -TERM 1417"));
+
+                // And once it does go, the same session confirms and tidies up.
+                survivingPanel.IgnoresTerm.Clear();
+                survivingPanel.IgnoresKill.Clear();
+                ShutdownOutcome eventually = wrapperGone.Stop();
+                Check("a later Stop on the same session confirms the panel gone",
+                    eventually == ShutdownOutcome.Stopped && wrapperGone.State == PanelState.Stopped);
+                Check("only then is the token document removed", !File.Exists(statusFile));
+                Check("and ownership is released", !wrapperGone.OwnsUnconfirmedPanel);
+                try { File.Delete(statusFile); } catch (Exception) { }
+
+                foreach (FakeDistribution distribution in new[]
+                    { denied, mute, frozen, deep, flaky, orphaning, survivingPanel })
+                {
+                    Check("the unrelated process survived, and was never named",
+                        distribution.IsAlive(UnrelatedPid)
+                        && !distribution.All.Contains(UnrelatedPid.ToString()));
+                    Check("the distribution itself was never shut down",
+                        !distribution.All.Contains("--shutdown")
+                        && !distribution.All.Contains("--terminate"));
+                }
             }
             finally
             {
