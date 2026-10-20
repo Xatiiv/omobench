@@ -16,6 +16,12 @@ machine. It does not install models, start the model server, or switch its
 execution device. The hosted website links to these launch instructions; it
 does not remotely execute programs on visitors' computers.
 
+On Windows, the [companion](windows-companion.md) can start this same panel
+for you from the website's **Open OmoBench** button: one graphical setup, then
+no terminal, no WSL activation, and no connection token to copy. It only opens
+the panel — everything below works exactly as it does when you run
+`omobench ui` yourself.
+
 ## First-time setup
 
 1. Open a terminal in your existing OmoBench checkout. Use Linux, macOS, or WSL2
