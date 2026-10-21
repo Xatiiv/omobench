@@ -25,8 +25,10 @@ first-class, publishable OmoBench results, provided the model is in the
   [CPU demo walkthrough](docs/local-demo.md) for that workflow.
 - **On Windows, prefer not to use a terminal?** The
   [Windows installer](docs/windows-installer.md) installs OmoBench, finds or
-  prepares a benchmark environment, and opens the panel — no commands, no
-  repository to clone, no Python paths to find. Afterwards the panel opens from
+  prepares a benchmark environment, and opens the panel — no repository to
+  clone and no Python paths to find. Installing WSL2, or a missing
+  `python3-venv`, still needs one command from you; the installer detects those
+  and tells you which. Afterwards the panel opens from
   the Start menu or an `omobench://open` link. If you already have a checkout,
   the [companion](docs/windows-companion.md) finds it and uses it as-is.
 - **Use terminal commands directly:** [CLI workflow](docs/quickstart.md#run-directly-from-the-cli).

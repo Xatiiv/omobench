@@ -26,6 +26,7 @@ namespace OmoBench.Installer.Tests
             SupportDetectionTests();
             ManagedEnvironmentCommandTests();
             ManagedEnvironmentStageTests();
+            ReviewRegressionTests();
             BuildIdentityTests();
 
             Console.WriteLine();
@@ -427,6 +428,174 @@ namespace OmoBench.Installer.Tests
                 ManagedEnvironment.Validator = savedValidator;
                 ManagedEnvironment.SourceRootOverride = savedSourceRoot;
                 try { Directory.Delete(sandbox, true); } catch (Exception) { }
+            }
+        }
+
+        // -- review findings: upgrade safety, redirection, ownership ------------
+
+        private static void ReviewRegressionTests()
+        {
+            Section("Review findings");
+
+            // 1. Upgrade coordination never terminates anything.
+            Check("with no installed companion running, closing trivially succeeds",
+                Installation.TryCloseInstalledCompanions(0));
+            Check("only companions running from the install location are considered",
+                Installation.RunningInstalledCompanions().Count == 0);
+
+            // 2. Uninstall removes what it owns, through paths that no shell
+            //    ever sees -- including names a shell would have mangled.
+            string savedRoot = InstallPaths.RootOverride;
+            string awkward = Path.Combine(Path.GetTempPath(),
+                "omo & bench %PATH% test " + Guid.NewGuid().ToString("N"));
+            try
+            {
+                InstallPaths.RootOverride = awkward;
+                Directory.CreateDirectory(InstallPaths.ProgramDirectory);
+                string planted = Path.Combine(InstallPaths.ProgramDirectory, "payload & data %TEMP%.txt");
+                File.WriteAllText(planted, "x");
+                Check("a path containing & and % is still inside the program directory",
+                    InstallPaths.IsInsideProgramDirectory(planted));
+
+                InstallOutcome removal = Installation.Uninstall();
+                Check("uninstall reports success", removal.Ok);
+                Check("and the awkward file is gone", !File.Exists(planted));
+                Check("the summary does not claim data was removed",
+                    removal.Describe().Contains("were not touched"));
+            }
+            finally
+            {
+                InstallPaths.RootOverride = savedRoot;
+                try { Directory.Delete(awkward, true); } catch (Exception) { }
+            }
+
+            // 3. Every managed destination is redirectable.
+            string savedSource = ManagedEnvironment.SourceRootOverride;
+            string savedEnvironment = ManagedEnvironment.EnvironmentRootOverride;
+            string savedArchive = ManagedEnvironment.ArchiveDirectoryOverride;
+            try
+            {
+                ManagedEnvironment.EnvironmentRootOverride = "/tmp/omobench-test-env";
+                ManagedEnvironment.ArchiveDirectoryOverride = "/tmp/omobench-test-dl";
+                Check("the Linux environment can be redirected",
+                    ManagedEnvironment.EnvironmentDirectory("/home/sam")
+                        == "/tmp/omobench-test-env/managed-env");
+                Check("so can the interpreter path inside it",
+                    ManagedEnvironment.EnvironmentInterpreter("/home/sam")
+                        == "/tmp/omobench-test-env/managed-env/bin/python");
+                Check("and the downloaded archive",
+                    ManagedEnvironment.ArchivePath("/home/sam")
+                        == "/tmp/omobench-test-dl/omobench-source.tar.gz");
+
+                ManagedEnvironment.EnvironmentRootOverride = null;
+                ManagedEnvironment.ArchiveDirectoryOverride = null;
+                Check("without redirection the environment is under the Linux home",
+                    ManagedEnvironment.EnvironmentDirectory("/home/sam")
+                        == "/home/sam/.local/share/omobench/managed-env");
+                Check("and the archive no longer lands in a fixed home-directory dotfile",
+                    ManagedEnvironment.ArchivePath("/home/sam")
+                        == "/home/sam/.local/share/omobench/omobench-source.tar.gz");
+            }
+            finally
+            {
+                ManagedEnvironment.SourceRootOverride = savedSource;
+                ManagedEnvironment.EnvironmentRootOverride = savedEnvironment;
+                ManagedEnvironment.ArchiveDirectoryOverride = savedArchive;
+            }
+
+            // 4. Ownership: never write over somebody else's directory.
+            string sandbox = Path.Combine(Path.GetTempPath(),
+                "omobench-ownership-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                string fresh = Path.Combine(sandbox, "fresh");
+                Check("a directory that does not exist yet is claimed",
+                    ManagedEnvironment.ClaimDirectory(fresh) == null);
+                Check("and is marked as ours",
+                    File.Exists(Path.Combine(fresh, ManagedEnvironment.OwnershipMarkerName)));
+                Check("claiming it again is fine",
+                    ManagedEnvironment.ClaimDirectory(fresh) == null);
+
+                string empty = Path.Combine(sandbox, "empty");
+                Directory.CreateDirectory(empty);
+                Check("an empty directory is claimed", ManagedEnvironment.ClaimDirectory(empty) == null);
+
+                string occupied = Path.Combine(sandbox, "someone-elses-work");
+                Directory.CreateDirectory(occupied);
+                File.WriteAllText(Path.Combine(occupied, "thesis.txt"), "do not delete");
+                string refusal = ManagedEnvironment.ClaimDirectory(occupied);
+                Check("a directory with somebody's files in it is refused", refusal != null);
+                Check("the refusal names the folder and says what to do",
+                    refusal != null && refusal.Contains(occupied) && refusal.Contains("will not be written over"));
+                Check("and their file is untouched",
+                    File.Exists(Path.Combine(occupied, "thesis.txt")));
+            }
+            finally
+            {
+                try { Directory.Delete(sandbox, true); } catch (Exception) { }
+            }
+
+            // 5. Configuration can be written somewhere harmless in a test.
+            string savedConfigPath = Configuration.FilePathOverride;
+            string configSandbox = Path.Combine(Path.GetTempPath(),
+                "omobench-config-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                string target = Path.Combine(configSandbox, "companion.config");
+                Configuration.FilePathOverride = target;
+                Check("the configuration destination is redirectable",
+                    Configuration.FilePath == target);
+                new Configuration
+                {
+                    Distribution = "Ubuntu",
+                    CheckoutWindowsPath = @"C:\somewhere\omobench",
+                    PythonWslPath = "/home/sam/.venvs/x/bin/python",
+                    Port = 9123,
+                }.Save();
+                Check("saving writes to the redirected location", File.Exists(target));
+                Configuration reloaded = Configuration.Load();
+                Check("a custom port survives a save and load", reloaded.Port == 9123);
+            }
+            finally
+            {
+                Configuration.FilePathOverride = savedConfigPath;
+                try { Directory.Delete(configSandbox, true); } catch (Exception) { }
+            }
+
+            // 6. Cancellation arriving during final validation must not be
+            //    reported as success.
+            Func<string, int, DiscoveryCancel, ProcessResult> runner = ManagedEnvironment.WslRunner;
+            Func<Configuration, EnvironmentCheckResult> validator = ManagedEnvironment.Validator;
+            string sourceRoot = ManagedEnvironment.SourceRootOverride;
+            string lateSandbox = Path.Combine(Path.GetTempPath(),
+                "omobench-late-cancel-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                ManagedEnvironment.SourceRootOverride = lateSandbox;
+                FakeWsl fake = new FakeWsl();
+                ManagedEnvironment.WslRunner = fake.Run;
+                DiscoveryCancel cancel = new DiscoveryCancel();
+                // The check passes, but the person cancelled while it ran.
+                ManagedEnvironment.Validator = configuration =>
+                {
+                    cancel.Cancel();
+                    return new EnvironmentCheckResult { Ok = true, Summary = "ok" };
+                };
+                PreparationResult late = ManagedEnvironment.Prepare(
+                    "Ubuntu",
+                    new BuildInfo { Version = "0.1.0", Revision = "b81e907dec8398778cce46c225d4abb0695b1f80" },
+                    cancel, null);
+                Check("a cancellation during validation is not reported as ready",
+                    !late.Ok && late.Cancelled);
+                Check("and no configuration is handed back to be saved",
+                    late.Configuration == null);
+            }
+            finally
+            {
+                ManagedEnvironment.WslRunner = runner;
+                ManagedEnvironment.Validator = validator;
+                ManagedEnvironment.SourceRootOverride = sourceRoot;
+                try { Directory.Delete(lateSandbox, true); } catch (Exception) { }
             }
         }
 

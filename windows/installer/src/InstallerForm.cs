@@ -1,5 +1,6 @@
 using System;
 using System.Drawing;
+using System.Globalization;
 using System.Threading;
 using System.Windows.Forms;
 using OmoBench.Companion;
@@ -33,6 +34,15 @@ namespace OmoBench.Installer
         private Step _step = Step.Welcome;
         private DiscoveryCancel _cancel;
         private bool _working;
+
+        /// <summary>The background check or preparation currently running.</summary>
+        private Thread _worker;
+
+        /// <summary>
+        /// Incremented whenever a new check starts. A result carrying an older
+        /// number describes a question that has since been replaced.
+        /// </summary>
+        private int _generation;
         private Configuration _configuration = new Configuration();
         private SystemReport _system;
 
@@ -148,13 +158,14 @@ namespace OmoBench.Installer
             _close.Enabled = false;
             Application.DoEvents();
 
-            System.Collections.Generic.List<System.Diagnostics.Process> running =
-                Installation.RunningCompanions();
-            if (running.Count > 0)
+            if (Installation.RunningInstalledCompanions().Count > 0)
             {
                 DialogResult choice = MessageBox.Show(this,
-                    "The OmoBench companion is running, and its program file cannot be replaced while "
-                    + "it is open.\n\nClose it and continue?",
+                    "The installed OmoBench companion is running, and its program file cannot be "
+                    + "replaced while it is open.\n\n"
+                    + "It will be asked to close. If a benchmark is running it will ask you first — "
+                    + "answer that question however you like; this update will wait, and will stop if "
+                    + "you decide to keep it open.\n\nAsk it to close now?",
                     "Install OmoBench", MessageBoxButtons.OKCancel, MessageBoxIcon.Information);
                 if (choice != DialogResult.OK)
                 {
@@ -162,11 +173,31 @@ namespace OmoBench.Installer
                     ShowWelcome();
                     return;
                 }
-                foreach (System.Diagnostics.Process process in running)
+
+                _subheading.Text = "Waiting for the OmoBench companion to close…";
+                Application.DoEvents();
+
+                // Only a request. If the companion declines -- because the
+                // person said No, or because it is protecting a running
+                // benchmark -- that is an answer, and the update is postponed
+                // rather than forced through.
+                if (!Installation.TryCloseInstalledCompanions(60000))
                 {
-                    try { process.CloseMainWindow(); process.WaitForExit(5000); } catch (Exception) { }
-                    try { if (!process.HasExited) { process.Kill(); process.WaitForExit(5000); } }
-                    catch (Exception) { }
+                    _heading.Text = "Update postponed";
+                    _subheading.Text = "The OmoBench companion is still running.";
+                    _detail.Text =
+                        "Nothing has been changed.\r\n\r\n"
+                        + "The companion was asked to close and is still open. That usually means "
+                        + "either a benchmark is running and it asked you whether to stop it, or you "
+                        + "chose to keep it open.\r\n\r\n"
+                        + "Its panel and any benchmark it is running have been left alone. Close the "
+                        + "companion yourself when you are ready — or let the benchmark finish — and "
+                        + "then run this installer again.";
+                    _primary.Text = "Try again";
+                    _primary.Enabled = true;
+                    _close.Enabled = true;
+                    _step = Step.Welcome;
+                    return;
                 }
             }
 
@@ -190,20 +221,130 @@ namespace OmoBench.Installer
 
         // -- getting a working environment -------------------------------------
 
+        /// <summary>The answer a background environment check produces.</summary>
+        private sealed class EnvironmentAnswer
+        {
+            public SystemReport System;
+            public DiscoveryReport Discovery;
+            public Configuration Existing;      // a saved setup that still works
+            public bool Cancelled;
+        }
+
+        /// <summary>
+        /// Work out where this machine stands, off the UI thread.
+        ///
+        /// Reading the registry, listing distributions and probing interpreters
+        /// take seconds on a warm machine and a minute on a cold one. Doing
+        /// that on the UI thread froze the window for the whole of it, which
+        /// also meant the Cancel button could not be pressed during the one
+        /// operation it exists for.
+        /// </summary>
         private void ShowEnvironment(bool recheck)
         {
             _step = Step.Environment;
             _heading.Text = "Setting up the benchmark environment";
+            _primary.Visible = true;
             _primary.Enabled = false;
             _secondary.Visible = true;
-            _secondary.Text = "Check again";
+            _secondary.Text = "Stop";
             _secondary.Enabled = true;
             _close.Text = "Close";
             _subheading.Text = "Looking at what this machine already has…";
             _detail.Text = "";
-            Application.DoEvents();
 
-            _system = SystemCheck.Inspect();
+            _working = true;
+            _generation++;
+            int generation = _generation;
+            _cancel = new DiscoveryCancel();
+            DiscoveryCancel cancel = _cancel;
+            Configuration current = _configuration;
+
+            _worker = new Thread(() =>
+            {
+                EnvironmentAnswer answer = InspectEnvironment(current, cancel);
+                Post(() => ApplyEnvironment(generation, answer));
+            });
+            _worker.IsBackground = true;
+            _worker.Start();
+        }
+
+        /// <summary>
+        /// Runs on a background thread. Order matters: a configuration that is
+        /// already saved and still works is the answer, and searching for
+        /// something else would only risk replacing a deliberate choice -- a
+        /// hand-picked interpreter, or a port chosen to avoid a clash -- with
+        /// whatever happened to be found first.
+        /// </summary>
+        private static EnvironmentAnswer InspectEnvironment(Configuration current, DiscoveryCancel cancel)
+        {
+            EnvironmentAnswer answer = new EnvironmentAnswer();
+
+            Configuration saved;
+            try { saved = Configuration.Load(); }
+            catch (Exception) { saved = new Configuration(); }
+
+            if (saved.IsComplete && saved.Validate() == null)
+            {
+                EnvironmentCheckResult check = null;
+                try { check = EnvironmentCheck.Run(saved); }
+                catch (Exception) { }
+                if (cancel != null && cancel.IsCancelled) { answer.Cancelled = true; return answer; }
+                if (check != null && check.Ok)
+                {
+                    answer.Existing = saved;
+                    return answer;
+                }
+            }
+
+            answer.System = SystemCheck.Inspect();
+            if (cancel != null && cancel.IsCancelled) { answer.Cancelled = true; return answer; }
+            if (answer.System.Level != SupportLevel.Ready)
+            {
+                return answer;
+            }
+
+            answer.Discovery = Discovery.Run(
+                current, InstallPaths.CompanionPath, new DiscoveryLimits(), cancel, null);
+            if (cancel != null && cancel.IsCancelled) { answer.Cancelled = true; }
+            return answer;
+        }
+
+        private void ApplyEnvironment(int generation, EnvironmentAnswer answer)
+        {
+            _working = false;
+            if (generation != _generation)
+            {
+                return;     // a newer check replaced this one
+            }
+
+            _secondary.Text = "Check again";
+            _secondary.Enabled = true;
+            _close.Enabled = true;
+
+            if (answer.Cancelled)
+            {
+                _heading.Text = "Check stopped";
+                _subheading.Text = "Nothing was changed.";
+                _detail.Text = "Press \"Check again\" when you are ready.";
+                _primary.Visible = false;
+                return;
+            }
+
+            // A saved setup that still works, kept exactly as it is.
+            if (answer.Existing != null)
+            {
+                _configuration = answer.Existing;
+                ShowFinished("OmoBench is ready.",
+                    "Your existing settings were checked and still work:\r\n"
+                    + "    Distribution: " + answer.Existing.Distribution + "\r\n"
+                    + "    Checkout:     " + answer.Existing.CheckoutWindowsPath + "\r\n"
+                    + "    Interpreter:  " + answer.Existing.PythonWslPath + "\r\n"
+                    + "    Panel port:   " + answer.Existing.Port.ToString(CultureInfo.InvariantCulture)
+                    + "\r\n\r\nThey were left unchanged, and nothing was downloaded.");
+                return;
+            }
+
+            _system = answer.System;
 
             if (_system.Level == SupportLevel.Unsupported)
             {
@@ -224,25 +365,27 @@ namespace OmoBench.Installer
                 return;
             }
 
-            // WSL2 is present. Reuse an existing installation if there is one.
-            _subheading.Text = "Looking for an OmoBench installation you already have…";
-            Application.DoEvents();
-
-            _cancel = new DiscoveryCancel();
-            DiscoveryReport found = Discovery.Run(
-                _configuration, InstallPaths.CompanionPath, new DiscoveryLimits(), _cancel, null);
+            DiscoveryReport found = answer.Discovery ?? new DiscoveryReport();
 
             if (found.Ready.Count > 0)
             {
                 InstallationCandidate best = found.Ready[0];
+                // Keep a port the person already chose; only fall back to the
+                // default when there is no saved configuration to respect.
+                int port = _configuration != null && _configuration.Port >= 1
+                    && _configuration.Port <= 65535
+                    ? _configuration.Port : Configuration.DefaultPort;
                 _configuration = new Configuration
                 {
                     Distribution = best.Distribution,
                     CheckoutWindowsPath = best.CheckoutWindowsPath,
                     PythonWslPath = best.PythonWslPath,
-                    Port = Configuration.DefaultPort,
+                    Port = port,
                 };
-                SaveConfiguration();
+                if (!SaveConfiguration())
+                {
+                    return;
+                }
                 ShowFinished("OmoBench is ready.",
                     "Using the installation already on this machine:\r\n"
                     + "    Distribution: " + best.Distribution + "\r\n"
@@ -297,14 +440,19 @@ namespace OmoBench.Installer
             BuildInfo build = _build;
             DiscoveryCancel cancel = _cancel;
 
-            Thread worker = new Thread(() =>
+            _generation++;
+            int generation = _generation;
+            _worker = new Thread(() =>
             {
                 PreparationResult result = ManagedEnvironment.Prepare(
                     distribution, build, cancel, snapshot => Post(() => RenderStages(snapshot)));
-                Post(() => FinishPreparation(result));
+                Post(() =>
+                {
+                    if (generation == _generation) { FinishPreparation(result); }
+                });
             });
-            worker.IsBackground = true;
-            worker.Start();
+            _worker.IsBackground = true;
+            _worker.Start();
         }
 
         private void RenderStages(PreparationResult result)
@@ -347,7 +495,10 @@ namespace OmoBench.Installer
             }
 
             _configuration = result.Configuration;
-            SaveConfiguration();
+            if (!SaveConfiguration())
+            {
+                return;
+            }
             ShowFinished("OmoBench is ready.", _detail.Text + "\r\n" + (result.Detail ?? ""));
         }
 
@@ -356,18 +507,32 @@ namespace OmoBench.Installer
         /// real environment check has passed, so the companion never starts
         /// life pointed at something that was never verified.
         /// </summary>
-        private void SaveConfiguration()
+        private bool SaveConfiguration()
         {
             try
             {
                 _configuration.Save();
+                return true;
             }
             catch (Exception error)
             {
-                MessageBox.Show(this,
-                    "OmoBench is set up, but its settings could not be saved:\n\n" + error.Message
-                    + "\n\nYou can set them from the companion's Setup window.",
-                    "Install OmoBench", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                // Without saved settings the companion opens to its Setup
+                // window, so this is not a working installation and must not
+                // be announced as one.
+                _heading.Text = "Settings could not be saved";
+                _subheading.Text = "OmoBench is installed, but it does not yet know how to start.";
+                _detail.Text =
+                    "The environment checked out, but its settings could not be written to\r\n    "
+                    + Configuration.FilePath + "\r\n\r\n"
+                    + error.Message + "\r\n\r\n"
+                    + "Open the OmoBench companion and use its Setup window to enter them, or fix "
+                    + "whatever is preventing the file from being written and press \"Check again\".";
+                _primary.Visible = false;
+                _secondary.Visible = true;
+                _secondary.Text = "Check again";
+                _secondary.Enabled = true;
+                _close.Enabled = true;
+                return false;
             }
         }
 
@@ -412,12 +577,21 @@ namespace OmoBench.Installer
             catch (Exception) { }
         }
 
+        /// <summary>
+        /// Closing while work is in flight waits for that work to stop.
+        ///
+        /// Returning from here ends the process, and the background thread
+        /// would go with it -- mid-download, mid-pip, or between creating a
+        /// directory and recording that it owns it. Waiting lets the
+        /// cancellation reach its next checkpoint, so what is left behind is a
+        /// state the preparation chose rather than wherever it was cut off.
+        /// </summary>
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             if (_working)
             {
                 DialogResult choice = MessageBox.Show(this,
-                    "Setup is still preparing the environment.\n\nStop it and close?",
+                    "Setup is still working.\n\nStop it and close?",
                     "Install OmoBench", MessageBoxButtons.YesNo, MessageBoxIcon.Question,
                     MessageBoxDefaultButton.Button2);
                 if (choice != DialogResult.Yes)
@@ -425,7 +599,33 @@ namespace OmoBench.Installer
                     e.Cancel = true;
                     return;
                 }
+
                 CancelWork();
+                _heading.Text = "Stopping…";
+                _subheading.Text = "Waiting for the current step to stop cleanly.";
+                Application.DoEvents();
+
+                Thread worker = _worker;
+                if (worker != null && worker.IsAlive)
+                {
+                    // Bounded: a step that will not stop must not hold the
+                    // window open indefinitely either.
+                    if (!worker.Join(TimeSpan.FromSeconds(45)))
+                    {
+                        DialogResult force = MessageBox.Show(this,
+                            "The current step has not stopped yet.\n\n"
+                            + "Closing now may leave a partly prepared environment in the OmoBench "
+                            + "managed folders. Nothing of yours is affected.\n\nClose anyway?",
+                            "Install OmoBench", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
+                            MessageBoxDefaultButton.Button2);
+                        if (force != DialogResult.Yes)
+                        {
+                            e.Cancel = true;
+                            return;
+                        }
+                    }
+                }
+                _working = false;
             }
             base.OnFormClosing(e);
         }

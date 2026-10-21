@@ -25,9 +25,11 @@
     Source revision to stamp in. Defaults to the current git HEAD.
 
 .PARAMETER SigningIdentity
-    The subject name of the certificate the output was signed with. Only pass
-    this when the output really was signed; it is reported to the person as a
-    verified publisher.
+    Not supported in this milestone, and rejected if supplied. This script
+    neither signs nor verifies the executable, so it has no basis for claiming
+    a publisher; stamping one in would assert exactly the thing a person
+    cannot check for themselves. Sign the output as a separate step and
+    publish the checksum of the signed file.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File windows\installer\build.ps1 -Test
@@ -54,31 +56,66 @@ if (-not $Version) {
     $Version = (Get-Content $versionFile -Raw).Trim()
 }
 
-if (-not $Revision) {
-    try { $Revision = (& git -C $repository rev-parse HEAD 2>$null).Trim() } catch { $Revision = '' }
+# Signing is not supported in this milestone. The switch exists so the
+# intent is visible, but accepting it would stamp "signed" into a build that
+# was never signed or verified -- a claim the operating system immediately
+# contradicts, and the one piece of provenance a person cannot check for
+# themselves. Refuse rather than lie.
+if ($SigningIdentity) {
+    throw ("-SigningIdentity is not supported: this build process neither signs nor verifies the " +
+        "executable, so it cannot honestly claim a publisher. Sign the output separately and " +
+        "publish the resulting checksum.")
 }
+$signed = $false
+
+# What the revision is, and whether it describes this binary.
+#
+# `git rev-parse HEAD` answers "which commit is checked out", not "does the
+# working tree match it". A build from a modified tree would otherwise claim a
+# revision it does not contain -- and its managed environment would then
+# download that revision's source, which is not the source embedded here.
+#
+# A git query that fails tells us nothing, so it must never be read as "clean".
+$sourceClean = $false
+$gitAnswered = $false
+$headRevision = ''
+try {
+    $headRevision = (& git -C $repository rev-parse HEAD 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -eq 0 -and $headRevision) {
+        $pending = (& git -C $repository status --porcelain 2>$null | Out-String)
+        if ($LASTEXITCODE -eq 0) {
+            $gitAnswered = $true
+            $sourceClean = [string]::IsNullOrWhiteSpace($pending)
+        }
+    }
+} catch {
+    $gitAnswered = $false
+}
+
+if ($Revision) {
+    # An explicitly supplied revision is a claim about this source tree, so it
+    # is checked rather than trusted. CI passes the commit it checked out; a
+    # mismatch there means the workflow is building something else.
+    if ($gitAnswered -and $Revision -ne $headRevision) {
+        throw ("-Revision $Revision does not match the checked-out commit $headRevision. " +
+            "The installer would claim a revision it was not built from.")
+    }
+    if (-not $gitAnswered) {
+        Write-Warning ("Git could not confirm the checked-out commit, so the supplied revision " +
+            "$Revision cannot be verified. This build is marked as not source-clean.")
+    }
+} else {
+    $Revision = $headRevision
+}
+
 if (-not $Revision) {
     Write-Warning "No git revision available; the installer will not be able to fetch pinned sources."
 }
-
-# Is the stamped revision actually what is being compiled? `git rev-parse HEAD`
-# answers "which commit is checked out", not "does the working tree match it".
-# A build from a modified tree would otherwise claim a revision it does not
-# contain -- and its managed environment would then fetch that revision's
-# source, which is not the source embedded here.
-$sourceClean = $true
-if ($Revision) {
-    try {
-        $pending = & git -C $repository status --porcelain 2>$null
-        $sourceClean = [string]::IsNullOrWhiteSpace(($pending | Out-String))
-    } catch {
-        $sourceClean = $false
-    }
-}
 if (-not $sourceClean) {
-    Write-Warning ("The working tree has uncommitted changes. This build is marked as not matching " +
-        "revision $Revision; its managed environment would download that revision's source, which is " +
-        "not what is embedded here. Commit before producing a build for anyone else.")
+    Write-Warning ("This build is marked as not matching revision $Revision" +
+        $(if ($gitAnswered) { ' (the working tree has uncommitted changes)' } else { ' (git could not be queried)' }) +
+        ". Its managed environment would download that revision's source, which is not necessarily " +
+        "what is embedded here. Commit, and build from a clean tree, before producing a build for anyone else.")
 }
 
 $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
@@ -97,7 +134,6 @@ $companionExe = Join-Path $companionOutput 'OmoBenchCompanion.exe'
 if (-not (Test-Path $companionExe)) { throw "The companion build produced no executable." }
 
 # 2. Stamp the identity in. Generated, never committed.
-$signed = [bool]$SigningIdentity
 $stamp = @"
 // Generated by windows/installer/build.ps1. Do not commit.
 namespace OmoBench.Installer

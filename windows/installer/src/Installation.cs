@@ -96,22 +96,81 @@ namespace OmoBench.Installer
         }
 
         /// <summary>
-        /// Processes that would keep the program files locked. Returned rather
-        /// than killed: closing someone's running panel without asking is not
-        /// the installer's decision to make.
+        /// Companions running *from this installation*, which are the only
+        /// ones whose program file this installer is about to replace.
+        ///
+        /// Matched by executable path rather than process name: a developer
+        /// build running from a checkout is a different program that happens
+        /// to share a name, and it is none of the installer's business.
+        ///
+        /// Returned rather than terminated. A running companion may own a
+        /// panel with a benchmark in flight, and it already asks about that
+        /// properly when told to close; killing it would bypass that question
+        /// and orphan the work it was told to protect.
         /// </summary>
-        public static List<Process> RunningCompanions()
+        public static List<Process> RunningInstalledCompanions()
         {
             List<Process> running = new List<Process>();
-            try
+            string installed;
+            try { installed = Path.GetFullPath(InstallPaths.CompanionPath); }
+            catch (Exception) { return running; }
+
+            Process[] candidates;
+            try { candidates = Process.GetProcessesByName("OmoBenchCompanion"); }
+            catch (Exception) { return running; }
+
+            foreach (Process process in candidates)
             {
-                foreach (Process process in Process.GetProcessesByName("OmoBenchCompanion"))
+                string path = null;
+                try { path = process.MainModule == null ? null : process.MainModule.FileName; }
+                catch (Exception)
+                {
+                    // A process we cannot inspect is not one we can attribute
+                    // to this installation, so it is left alone.
+                    continue;
+                }
+                if (path != null && string.Equals(
+                        Path.GetFullPath(path), installed, StringComparison.OrdinalIgnoreCase))
                 {
                     running.Add(process);
                 }
             }
-            catch (Exception) { }
             return running;
+        }
+
+        /// <summary>
+        /// Ask the installed companion to close itself, and report whether it
+        /// did.
+        ///
+        /// This only ever sends a close request. The companion decides what to
+        /// do with it -- including asking the person about a running benchmark,
+        /// and declining -- and a decline is an answer to be respected, not an
+        /// obstacle to work around.
+        /// </summary>
+        public static bool TryCloseInstalledCompanions(int waitMilliseconds)
+        {
+            List<Process> running = RunningInstalledCompanions();
+            if (running.Count == 0)
+            {
+                return true;
+            }
+
+            foreach (Process process in running)
+            {
+                try { process.CloseMainWindow(); }
+                catch (Exception) { }
+            }
+
+            DateTime deadline = DateTime.UtcNow.AddMilliseconds(waitMilliseconds);
+            while (DateTime.UtcNow < deadline)
+            {
+                if (RunningInstalledCompanions().Count == 0)
+                {
+                    return true;
+                }
+                System.Threading.Thread.Sleep(250);
+            }
+            return RunningInstalledCompanions().Count == 0;
         }
 
         /// <summary>
@@ -379,34 +438,63 @@ namespace OmoBench.Installer
             }
         }
 
+        private const int MoveFileDelayUntilReboot = 0x4;
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true,
+            CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        private static extern bool MoveFileEx(string existingFileName, string newFileName, int flags);
+
         /// <summary>
-        /// A running executable cannot delete itself, so a short-lived cmd.exe
-        /// waits for this process to exit and then removes the directory. It
-        /// is given a fixed command with one quoted path and nothing derived
-        /// from user input.
+        /// A running executable cannot delete its own file, so the last two
+        /// items are handed to Windows to remove at the next restart.
+        ///
+        /// This used to spawn cmd.exe with the directory path in the command
+        /// line. Even quoted, that path then went through a shell: it comes
+        /// from the user's profile, so a name containing an ampersand would
+        /// have been read as a command separator and a percent sign as a
+        /// variable reference -- turning a cleanup into something else
+        /// entirely. MoveFileEx takes the path as an argument, not as text to
+        /// be parsed, so no character in it can mean anything.
         /// </summary>
         private static void ScheduleSelfDeletion(string self, InstallOutcome outcome)
         {
+            string directory = InstallPaths.ProgramDirectory;
+            bool scheduledFile = false, scheduledDirectory = false;
+
             try
             {
-                string directory = InstallPaths.ProgramDirectory;
-                ProcessStartInfo start = new ProcessStartInfo
-                {
-                    FileName = Path.Combine(
-                        Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"),
-                    Arguments = "/c ping 127.0.0.1 -n 3 >nul & rd /s /q "
-                        + CommandLine.Quote(directory),
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                };
-                Process.Start(start);
-                outcome.Step("Removing " + directory + " as the uninstaller exits");
+                scheduledFile = MoveFileEx(self, null, MoveFileDelayUntilReboot);
             }
-            catch (Exception error)
+            catch (Exception) { }
+
+            try
             {
-                outcome.Warn("The program folder could not be scheduled for removal: " + error.Message
-                    + " You can delete " + InstallPaths.ProgramDirectory + " by hand.");
+                // An empty directory can be scheduled the same way; it is only
+                // removed if nothing remains inside it at restart.
+                scheduledDirectory = MoveFileEx(directory, null, MoveFileDelayUntilReboot);
             }
+            catch (Exception) { }
+
+            if (scheduledFile && scheduledDirectory)
+            {
+                outcome.Step("The uninstaller is still running, so " + directory
+                    + " will be removed when you next restart Windows.");
+                return;
+            }
+
+            // Say what actually happened rather than implying success.
+            //
+            // Delaying a delete until restart is recorded in a machine-wide
+            // registry value, so it needs administrator rights -- which this
+            // per-user uninstaller deliberately never asks for. The usual
+            // outcome is therefore that everything is removed except the
+            // uninstaller's own file, which cannot delete itself while it is
+            // running. That is a leftover of one file, and it is said plainly
+            // rather than glossed over.
+            outcome.Warn("OmoBench has been removed, but its own uninstaller file is still in\r\n    "
+                + directory + "\r\nWindows does not let a running program delete itself, and removing "
+                + "it at restart would need administrator rights this uninstaller does not ask for. "
+                + "Nothing there is used any more -- you can delete that folder whenever you like.");
         }
     }
 }

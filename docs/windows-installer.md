@@ -1,8 +1,20 @@
 # Installing OmoBench on Windows
 
 This is the download-and-run path: you get an installer, open it, answer a
-couple of questions, and end up at the OmoBench benchmark panel. No commands,
-no repository to clone, no Python paths to find.
+couple of questions, and end up at the OmoBench benchmark panel — with no
+repository to clone and no Python paths to find.
+
+Two prerequisites can still need a command from you, and the installer says so
+rather than pretending otherwise:
+
+- **WSL2 is not installed.** Installing it needs an administrator command and a
+  restart — see [below](#if-wsl-is-missing).
+- **Your Linux distribution is missing `python3` or `python3-venv`.** Installing
+  those needs your Linux password, so the installer gives you the exact command
+  instead of asking for it.
+
+Everything else — finding or fetching OmoBench, creating an isolated
+environment, installing the pinned runner, checking it works — it does itself.
 
 If you already work in a checkout and prefer the terminal, nothing here
 replaces that — see [the setup guide](quickstart.md). The installer only

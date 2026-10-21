@@ -77,11 +77,26 @@ namespace OmoBench.Installer
         /// one directory and an older one can simply be deleted.
         /// </summary>
         /// <summary>
-        /// Redirects the managed source location, so a test can exercise the
-        /// preparation without creating directories in the user's profile.
-        /// Null in normal use.
+        /// Every destination the preparation writes to is redirectable, so a
+        /// test can exercise the real thing against throwaway locations rather
+        /// than the places a person's own installation lives. Redirecting only
+        /// some of them would still write the rest to fixed paths under the
+        /// Linux home directory, which is exactly what makes a "safe" test
+        /// unsafe. All are null in normal use.
         /// </summary>
         internal static string SourceRootOverride = null;
+
+        /// <summary>Replaces ~/.local/share/omobench as the environment root.</summary>
+        internal static string EnvironmentRootOverride = null;
+
+        /// <summary>Replaces the download's scratch location.</summary>
+        internal static string ArchiveDirectoryOverride = null;
+
+        /// <summary>
+        /// A directory this preparation created, marked so a later run can
+        /// tell its own working area from somebody else's data.
+        /// </summary>
+        public const string OwnershipMarkerName = ".omobench-managed";
 
         public static string SourceDirectory(string revision)
         {
@@ -99,9 +114,25 @@ namespace OmoBench.Installer
         /// on /mnt: a virtual environment on DrvFs is slow and carries Windows
         /// permission semantics the Python tooling does not expect.
         /// </summary>
+        public static string EnvironmentRoot(string home)
+        {
+            return string.IsNullOrEmpty(EnvironmentRootOverride)
+                ? (home ?? "").TrimEnd('/') + "/.local/share/omobench"
+                : EnvironmentRootOverride.TrimEnd('/');
+        }
+
         public static string EnvironmentDirectory(string home)
         {
-            return (home ?? "").TrimEnd('/') + "/.local/share/omobench/managed-env";
+            return EnvironmentRoot(home) + "/managed-env";
+        }
+
+        /// <summary>Where the downloaded archive is written before unpacking.</summary>
+        public static string ArchivePath(string home)
+        {
+            string directory = string.IsNullOrEmpty(ArchiveDirectoryOverride)
+                ? EnvironmentRoot(home)
+                : ArchiveDirectoryOverride.TrimEnd('/');
+            return directory + "/omobench-source.tar.gz";
         }
 
         public static string EnvironmentInterpreter(string home)
@@ -228,20 +259,24 @@ namespace OmoBench.Installer
             Report(progress, result);
             string sourceWindows = SourceDirectory(build.Revision);
             string sourceWsl, archiveWsl;
-            try
+
+            // Only write into a directory that is empty or that a previous
+            // preparation created. Unpacking an archive over somebody's
+            // existing folder because its name happened to match would destroy
+            // data this program has no claim to.
+            string ownership = ClaimDirectory(sourceWindows);
+            if (ownership != null)
             {
-                Directory.CreateDirectory(sourceWindows);
-            }
-            catch (Exception error)
-            {
-                return Fail(result, fetch, "Could not create " + sourceWindows, error.Message);
+                return Fail(result, fetch, "The managed source location is already in use.", ownership);
             }
             if (!CommandLine.TryToWslPath(sourceWindows, out sourceWsl))
             {
                 return Fail(result, fetch, "WSL cannot reach " + sourceWindows,
                     "The managed source must be on a local drive.");
             }
-            archiveWsl = home.TrimEnd('/') + "/.omobench-source.tar.gz";
+            archiveWsl = ArchivePath(home);
+            Run(distribution, BuildMakeDirectoryProgram(
+                archiveWsl.Substring(0, archiveWsl.LastIndexOf('/'))), 30000, cancel);
 
             if (string.IsNullOrEmpty(build.Revision))
             {
@@ -255,8 +290,13 @@ namespace OmoBench.Installer
             {
                 return Fail(result, fetch, "The source could not be downloaded.",
                     "Revision " + build.ShortRevision + "\r\n"
+                    + "From " + SourceArchiveHost + build.ShortRevision + "\r\n"
                     + Describe(download)
-                    + "\r\n\r\nCheck the machine's internet connection and try again.");
+                    + "\r\n\r\nThis is usually one of two things. Either this machine cannot reach the "
+                    + "internet, or that revision is not publicly downloadable -- a 404 is also what a "
+                    + "private repository returns to an anonymous request.\r\n\r\n"
+                    + "If you already have an OmoBench checkout, the companion's Setup window can use "
+                    + "it directly instead.");
             }
             ProcessResult extract = Run(distribution,
                 BuildExtractProgram(archiveWsl, sourceWsl), 300000, cancel);
@@ -333,6 +373,13 @@ namespace OmoBench.Installer
                     check == null ? null : check.Detail);
             }
 
+            // Validation is the slowest step and cannot itself be interrupted,
+            // so a cancellation arriving during it would otherwise be noticed
+            // only after success had already been decided. Reporting ready
+            // here -- and letting the caller save a configuration -- would act
+            // on an instruction the person had already withdrawn.
+            if (Stopped(cancel, result, verify)) { return result; }
+
             verify.State = StageState.Done;
             verify.Message = check.Summary;
             result.Ok = true;
@@ -341,6 +388,45 @@ namespace OmoBench.Installer
             result.Detail = check.Detail;
             Report(progress, result);
             return result;
+        }
+
+        /// <summary>
+        /// Take ownership of a directory, or explain why it cannot be taken.
+        ///
+        /// Returns null when the directory is ours to use -- newly created,
+        /// already marked by a previous preparation, or empty. Otherwise it
+        /// returns the reason, and the caller refuses rather than writing over
+        /// whatever is there.
+        /// </summary>
+        internal static string ClaimDirectory(string windowsPath)
+        {
+            try
+            {
+                if (!Directory.Exists(windowsPath))
+                {
+                    Directory.CreateDirectory(windowsPath);
+                    File.WriteAllText(Path.Combine(windowsPath, OwnershipMarkerName),
+                        "Created by the OmoBench installer. Deleting this folder removes the managed copy.\r\n");
+                    return null;
+                }
+                if (File.Exists(Path.Combine(windowsPath, OwnershipMarkerName)))
+                {
+                    return null;   // a previous preparation's working area
+                }
+                if (Directory.GetFileSystemEntries(windowsPath).Length == 0)
+                {
+                    File.WriteAllText(Path.Combine(windowsPath, OwnershipMarkerName),
+                        "Created by the OmoBench installer. Deleting this folder removes the managed copy.\r\n");
+                    return null;
+                }
+                return windowsPath + "\r\n\r\nThis folder already contains files and was not created by "
+                    + "OmoBench, so it will not be written over. Move or remove it, or remove the folder "
+                    + "if you no longer need what is in it, and try again.";
+            }
+            catch (Exception error)
+            {
+                return windowsPath + "\r\n\r\n" + error.Message;
+            }
         }
 
         private static PreparationStage Add(PreparationResult result, string name)

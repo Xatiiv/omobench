@@ -20,9 +20,16 @@ export default function RunPage() {
         <section className="mt-10 rounded-xl border border-sky-400/30 bg-sky-400/5 p-6">
           <h2 className="text-lg font-medium text-zinc-50">New to OmoBench on Windows?</h2>
           <p className="mt-3 text-sm leading-7 text-zinc-300">
-            The Windows installer sets everything up for you: it installs the OmoBench companion,
-            checks what your machine already has, and prepares a benchmark environment if you do not
-            have one. No commands, no repository to clone, no Python paths to find.
+            The Windows installer installs the OmoBench companion, checks what your machine already
+            has, and prepares a benchmark environment if you do not have one — no repository to clone
+            and no Python paths to find.
+          </p>
+          <p className="mt-3 text-sm leading-7 text-zinc-300">
+            It cannot do quite everything for you. If Windows Subsystem for Linux is not installed
+            yet, that step needs an administrator command and a restart, and if your Linux
+            distribution is missing Python&nbsp;3 or its <code className="text-sky-200">venv</code>{" "}
+            package, installing those needs your Linux password. The installer detects both cases,
+            tells you the exact command to run, and continues once you have.
           </p>
 
           {windowsRelease ? (
