@@ -23,6 +23,14 @@ namespace OmoBench.Installer
         public string BuiltAt;
         public bool Signed;
 
+        /// <summary>
+        /// False when this was built from a working tree with uncommitted
+        /// changes. The revision then describes the checkout it was built in,
+        /// not this binary -- and the managed environment would fetch that
+        /// revision's source, which is not what is embedded here.
+        /// </summary>
+        public bool SourceClean = true;
+
         public static BuildInfo Current()
         {
             return new BuildInfo
@@ -31,6 +39,7 @@ namespace OmoBench.Installer
                 Revision = BuildStamp.Revision,
                 BuiltAt = BuildStamp.BuiltAt,
                 Signed = BuildStamp.Signed,
+                SourceClean = BuildStamp.SourceClean,
             };
         }
 
@@ -62,6 +71,7 @@ namespace OmoBench.Installer
         {
             return "Version " + (Version ?? "unknown")
                 + "\r\nSource revision " + (string.IsNullOrEmpty(Revision) ? "unknown" : Revision)
+                + (SourceClean ? "" : "  (built from a modified working tree -- not this exact revision)")
                 + "\r\nBuilt " + (BuiltAt ?? "unknown")
                 + "\r\n" + SigningStatement();
         }

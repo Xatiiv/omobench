@@ -61,6 +61,26 @@ if (-not $Revision) {
     Write-Warning "No git revision available; the installer will not be able to fetch pinned sources."
 }
 
+# Is the stamped revision actually what is being compiled? `git rev-parse HEAD`
+# answers "which commit is checked out", not "does the working tree match it".
+# A build from a modified tree would otherwise claim a revision it does not
+# contain -- and its managed environment would then fetch that revision's
+# source, which is not the source embedded here.
+$sourceClean = $true
+if ($Revision) {
+    try {
+        $pending = & git -C $repository status --porcelain 2>$null
+        $sourceClean = [string]::IsNullOrWhiteSpace(($pending | Out-String))
+    } catch {
+        $sourceClean = $false
+    }
+}
+if (-not $sourceClean) {
+    Write-Warning ("The working tree has uncommitted changes. This build is marked as not matching " +
+        "revision $Revision; its managed environment would download that revision's source, which is " +
+        "not what is embedded here. Commit before producing a build for anyone else.")
+}
+
 $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (-not (Test-Path $csc)) { $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe' }
 if (-not (Test-Path $csc)) {
@@ -89,6 +109,7 @@ namespace OmoBench.Installer
         public const string BuiltAt = "$((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))";
         public const bool Signed = $(if ($signed) { 'true' } else { 'false' });
         public const string SigningIdentity = "$SigningIdentity";
+        public const bool SourceClean = $(if ($sourceClean) { 'true' } else { 'false' });
     }
 }
 "@
@@ -147,6 +168,14 @@ $metadata = [ordered]@{
     companion_sha256   = $companionChecksum
     signed             = $signed
     signing_identity   = $SigningIdentity
+    # False when the working tree had uncommitted changes, so the revision
+    # above describes the checkout but not necessarily this binary.
+    source_clean       = $sourceClean
+    # These checksums identify this particular build. The in-box compiler
+    # stamps a fresh module id into every output, so rebuilding the same
+    # revision produces a different hash: use them to confirm a download
+    # matches the published asset, not to re-derive the binary from source.
+    reproducible       = $false
 }
 $metadata | ConvertTo-Json | Set-Content -Path (Join-Path $OutputDirectory 'version.json') -Encoding utf8
 
@@ -154,7 +183,7 @@ $metadata | ConvertTo-Json | Set-Content -Path (Join-Path $OutputDirectory 'vers
 
 Write-Host ""
 Write-Host "Version  : $Version"
-Write-Host "Revision : $Revision"
+Write-Host "Revision : $Revision$(if (-not $sourceClean) { '  (working tree had uncommitted changes)' })"
 Write-Host "SHA-256  : $checksum"
 if ($signed) {
     Write-Host "Signing  : signed as $SigningIdentity"

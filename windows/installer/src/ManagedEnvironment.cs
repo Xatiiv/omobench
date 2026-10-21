@@ -266,7 +266,11 @@ namespace OmoBench.Installer
                 return Fail(result, fetch, "The downloaded source could not be unpacked.", Describe(extract));
             }
             fetch.State = StageState.Done;
-            fetch.Message = "Revision " + build.ShortRevision + " in " + sourceWindows;
+            fetch.Message = "Revision " + build.ShortRevision + " in " + sourceWindows
+                + (build.SourceClean ? "" :
+                    "\r\n         Note: this installer was built from a modified working tree, so the "
+                    + "source downloaded here is revision " + build.ShortRevision
+                    + ", not the code embedded in the installer.");
             Report(progress, result);
 
             // 3. An isolated environment, separate from anything already here.

@@ -455,6 +455,23 @@ namespace OmoBench.Installer.Tests
             Check("a signed build reports the identity it was signed with",
                 signed.SigningStatement().Contains("signed as"));
 
+            // A build from a modified tree must not present itself as that
+            // revision: the revision is what the managed environment would
+            // download, and it is not what such a build contains.
+            BuildInfo modified = new BuildInfo
+            {
+                Version = "0.1.0",
+                Revision = "b81e907dec8398778cce46c225d4abb0695b1f80",
+                SourceClean = false,
+            };
+            Check("a build from a modified tree says so where the revision is shown",
+                modified.Describe().Contains("modified working tree"));
+            Check("a clean build makes no such claim",
+                !new BuildInfo { Version = "0.1.0", Revision = "abc", SourceClean = true }
+                    .Describe().Contains("modified working tree"));
+            Check("this build reports its own source-clean state",
+                BuildInfo.Current().SourceClean == BuildStamp.SourceClean);
+
             Check("the revision is shortened for display, not invented",
                 new BuildInfo { Revision = "b81e907dec8398778cce46c225d4abb0695b1f80" }
                     .ShortRevision == "b81e907dec83");
