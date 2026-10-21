@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from omobench.ui import UIServer
 from omobench import managed_setup as ms
-from test_cli import GUIDELLM_REPORT_V2
+from test_cli import GUIDELLM_REPORT_V2, install_guidellm_module_stub, patch_parent_process_preflight
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -79,9 +79,21 @@ class GuidedServiceTests(unittest.TestCase):
             self.assertNotIn(self.server.token.encode(), content)
             self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
 
-    def test_index_links_to_guided_page(self):
-        _, _, content = self.request("/")
-        self.assertIn(b'href="/guided"', content)
+    def test_root_serves_the_guided_page_by_default(self):
+        """omobench ui now opens the guided experience by default (previously the
+        advanced panel)."""
+        status_root, _, content_root = self.request("/")
+        status_guided, _, content_guided = self.request("/guided")
+        self.assertEqual(status_root, 200)
+        self.assertEqual(content_root, content_guided)
+        self.assertIn(b"Choose your test", content_root)
+
+    def test_advanced_panel_stays_available_and_cross_links_with_guided(self):
+        status, _, content = self.request("/advanced")
+        self.assertEqual(status, 200)
+        self.assertIn(b'href="/"', content)  # back to the guided page
+        _, _, guided_content = self.request("/")
+        self.assertIn(b'href="/advanced"', guided_content)
 
     # -- auth ------------------------------------------------------------------
 
@@ -105,6 +117,34 @@ class GuidedServiceTests(unittest.TestCase):
         for recipe in recipes.values():
             self.assertEqual(recipe["model_id"], "Qwen/Qwen3-4B")
             self.assertEqual(recipe["execution_device"], "cpu")
+
+    def test_recipes_carry_their_real_profile_duration_and_request_ceiling(self):
+        """The guided page picks a "recommended for slower hardware" recipe and
+        explains its duration ceiling from this real, profile-sourced data -- never
+        a hard-coded recipe id or an invented number."""
+        _, _, body = self.request("/api/managed/recipes", self.auth())
+        recipes = {r["id"]: r for r in json.loads(body)["recipes"]}
+        self.assertEqual(recipes["qwen3-4b-cpu-v1"]["max_duration_seconds"], 900)
+        self.assertEqual(recipes["qwen3-4b-cpu-v1"]["max_requests"], 50)
+        self.assertEqual(recipes["qwen3-4b-cpu-extended-v1"]["max_duration_seconds"], 5400)
+        self.assertEqual(recipes["qwen3-4b-cpu-extended-v1"]["max_requests"], 60)
+
+    def test_recipes_expose_the_declared_measured_request_target_not_the_runner_budget(self):
+        """Regression: max_requests is the runner's total request budget,
+        including warmup/cooldown (60 for the extended profile) -- the guided
+        page must label its "measured requests" from measured_requests, the
+        profile's own declared target (benchmarks/profiles/<id>.yaml), which
+        stays 50 for both recipes even though their runner budgets differ."""
+        _, _, body = self.request("/api/managed/recipes", self.auth())
+        recipes = {r["id"]: r for r in json.loads(body)["recipes"]}
+        self.assertEqual(recipes["qwen3-4b-cpu-v1"]["measured_requests"], 50)
+        self.assertEqual(recipes["qwen3-4b-cpu-extended-v1"]["measured_requests"], 50)
+        # The mismatch this regression guards against: max_requests (the
+        # runner budget) must not be confused with measured_requests here.
+        self.assertNotEqual(
+            recipes["qwen3-4b-cpu-extended-v1"]["max_requests"],
+            recipes["qwen3-4b-cpu-extended-v1"]["measured_requests"],
+        )
 
     def test_managed_run_requires_token_too(self):
         headers = {"Content-Type": "application/json"}
@@ -187,6 +227,34 @@ class GuidedServiceTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body), [])
 
+    def test_storage_folder_is_remembered_and_suggested_next_time(self):
+        """"Reuse previously selected storage" -- never assumes either developer's
+        own path, but a folder the operator already picked for this checkout comes
+        back as the suggestion next time /api/managed/recipes is fetched."""
+
+        def fake_download_and_install(root, recipe_id, storage_dir, *, progress=None, cancel_event=None):
+            Path(storage_dir).mkdir(parents=True, exist_ok=True)  # the real installer creates it too
+            return {"model": {"path": "x"}, "runtime": {"executable_path": "y"}}
+
+        with patch("omobench.managed_setup.download_and_install", side_effect=fake_download_and_install):
+            with tempfile.TemporaryDirectory() as storage:
+                storage_dir = str(Path(storage) / "remember-me")
+                status, _, body = self.post(
+                    "/api/managed/setup-jobs",
+                    {"recipe": "qwen3-4b-cpu-v1", "storage_dir": storage_dir, "confirmed": True},
+                )
+                self.assertEqual(status, 202, body)
+                job_id = json.loads(body)["id"]
+
+                def finished():
+                    detail = json.loads(self.request(f"/api/managed/setup-jobs/{job_id}", self.auth())[2])
+                    return detail["status"] == "completed"
+
+                wait_for(finished)
+                status, _, body = self.request("/api/managed/recipes", self.auth())
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(body)["default_storage_dir"], storage_dir)
+
     # -- run mode validation ------------------------------------------------------
 
     def test_run_requires_a_known_mode(self):
@@ -195,6 +263,17 @@ class GuidedServiceTests(unittest.TestCase):
         )
         self.assertEqual(status, 400)
         self.assertIn("smoke", json.loads(body)["error"])
+
+    def test_unknown_managed_run_is_404_not_silently_treated_as_resumed(self):
+        """The guided page distinguishes "the panel restarted, this run's own
+        bookkeeping is gone" from any other error using exactly this 404 -- it
+        never claims a benchmark resumed when the panel has no record of it."""
+        status, _, body = self.request("/api/managed/runs/mrun-0000000000000000", self.auth())
+        self.assertEqual(status, 404)
+        self.assertIn("Unknown managed run.", json.loads(body)["error"])
+        status, _, body = self.request("/api/managed/runs", self.auth())
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), [])
 
 
 @unittest.skipIf(os.name == "nt", "The fixture server/runner use a POSIX shebang and process group")
@@ -211,15 +290,17 @@ class GuidedRunLifecycleTests(unittest.TestCase):
             script = self.bin / tool
             script.write_text("#!/bin/sh\nexit 0\n")
             script.chmod(0o755)
-        guidellm = self.bin / "guidellm"
-        guidellm.write_text(
-            f"#!{sys.executable}\n"
+        # The runner stand-in shadows the guidellm *module* on the subprocess's
+        # PYTHONPATH (set below): execution runs "<interpreter> -m guidellm"
+        # and deliberately ignores anything named "guidellm" on PATH.
+        self.stub = self.root / "stub"
+        install_guidellm_module_stub(
+            self.stub,
             "import json, pathlib, sys\n"
             "if '--version' in sys.argv:\n print('GuideLLM 0.7.3'); sys.exit(0)\n"
             "output = pathlib.Path(sys.argv[sys.argv.index('--output') + 1].split('path=', 1)[1])\n"
-            f"output.write_text(json.dumps({GUIDELLM_REPORT_V2!r}))\n"
+            f"output.write_text(json.dumps({GUIDELLM_REPORT_V2!r}))\n",
         )
-        guidellm.chmod(0o755)
 
         self.llama_server = self.root / "llama-server"
         self.llama_server.write_text(
@@ -244,8 +325,12 @@ class GuidedRunLifecycleTests(unittest.TestCase):
         self.model_path = self.root / "model.gguf"
         self.model_path.write_bytes(b"fixture-model")
 
+        # ManagedController runs the real preflight in *this* process before
+        # any managed run starts; the stub runner's metadata reaches only the
+        # child. See patch_parent_process_preflight in test_cli.py.
+        patch_parent_process_preflight(self)
         self.server = UIServer(("127.0.0.1", 0), self.root)
-        self.server.controller.environment["PYTHONPATH"] = str(ROOT / "cli" / "src")
+        self.server.controller.environment["PYTHONPATH"] = str(self.stub) + os.pathsep + str(ROOT / "cli" / "src")
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 
@@ -256,7 +341,9 @@ class GuidedRunLifecycleTests(unittest.TestCase):
                 "id": "fixture-recipe",
                 "model_id": "Fixture/Alias",
                 "benchmark_profile": "chat-small-v1",
-                "model": {"url": self.fixture_model_source},
+                "quantization": "Q4_K_M",
+                "model": {"url": self.fixture_model_source, "revision": "fixture-revision-abc123"},
+                "runtime": {"version": "b99999"},
             },
         )
         self.verify_patch = patch(
@@ -326,6 +413,16 @@ class GuidedRunLifecycleTests(unittest.TestCase):
         self.assertEqual(status, 202, body)
         job_id = json.loads(body)["id"]
 
+        # Reconnect-after-refresh relies on the still-active run showing up in the
+        # plain listing endpoint, exactly like the advanced panel's own jobs do --
+        # confirm that happens for at least one of this run's active phases.
+        def visible_while_active():
+            listing = json.loads(self.request("/api/managed/runs", self.auth())[2])
+            match = next((j for j in listing if j["id"] == job_id), None)
+            return match if match and match["status"] in {"starting_server", "waiting_ready", "running_benchmark"} else None
+
+        wait_for(visible_while_active)
+
         def completed():
             detail = json.loads(self.request(f"/api/managed/runs/{job_id}", self.auth())[2])
             return detail if detail["status"] not in {
@@ -342,9 +439,151 @@ class GuidedRunLifecycleTests(unittest.TestCase):
         benchmark_detail = json.loads(benchmark_body)
         self.assertEqual(benchmark_detail["execution_device"], "cpu")
         self.assertEqual(benchmark_detail["status"], "completed")
-        # The recipe's own pinned download URL prefills model_source, so packaging
-        # this run through the advanced panel never requires typing a source by hand.
+        # Every field the reviewed recipe already establishes with certainty is
+        # filled in automatically, so the guided page's "Share results" screen
+        # (and the advanced panel's package form) never require typing a model
+        # identity, weight source, revision, quantization, or runtime version by
+        # hand -- only the submitter identity is genuinely unknown.
         self.assertEqual(benchmark_detail["model_source"], self.fixture_model_source)
+        self.assertEqual(benchmark_detail["model_revision"], "fixture-revision-abc123")
+        self.assertEqual(benchmark_detail["quantization"], "Q4_K_M")
+        self.assertEqual(benchmark_detail["framework"], "llama.cpp")
+        self.assertEqual(benchmark_detail["framework_version"], "b99999")
+        self.assertIn("--device", benchmark_detail["runtime_args"])
+        self.assertIn("none", benchmark_detail["runtime_args"])
+
+        # Once no longer active, the run job no longer appears in the active
+        # listing either -- reconnect logic sees a real terminal state, not a
+        # stale "still active" row.
+        listing = json.loads(self.request("/api/managed/runs", self.auth())[2])
+        self.assertEqual(next(j for j in listing if j["id"] == job_id)["status"], "completed")
+
+    def test_execute_mode_runner_preflight_fails_fast_before_any_server_work(self):
+        """Regression for the guided-benchmark startup failure: a broken
+        GuideLLM install must be caught before the managed server ever
+        starts loading a model, not ~45s later once `Controller.start()`
+        happens to run its own check. No run job, no server process, and
+        no server.log should exist afterward -- the failure must be
+        reported synchronously from the POST itself."""
+        from omobench import cli as omobench_cli
+
+        preflight = omobench_cli.RunnerPreflight(
+            ok=False, kind="missing", version=None, message="GuideLLM is not installed in this environment (test)."
+        )
+        with patch("omobench.cli.guidellm_runner_preflight", return_value=preflight):
+            with patch("omobench.launcher.managed_server", side_effect=AssertionError("must not start the managed server")):
+                status, _, body = self.post(
+                    "/api/managed/runs", {"recipe": "fixture-recipe", "storage_dir": str(self.root), "mode": "execute"}
+                )
+        self.assertEqual(status, 400, body)
+        self.assertIn("not installed", json.loads(body)["error"])
+        self.assertEqual(json.loads(self.request("/api/managed/runs", self.auth())[2]), [])
+
+    def test_smoke_mode_is_unaffected_by_the_execute_only_preflight(self):
+        """Smoke mode never runs GuideLLM at all (see the mode == "smoke"
+        branch in _run_managed), so it must keep working even when the
+        runner preflight would fail -- the guard must be execute-only."""
+        from omobench import cli as omobench_cli
+
+        preflight = omobench_cli.RunnerPreflight(
+            ok=False, kind="missing", version=None, message="GuideLLM is not installed in this environment (test)."
+        )
+        with patch("omobench.cli.guidellm_runner_preflight", return_value=preflight):
+            status, _, body = self.post(
+                "/api/managed/runs", {"recipe": "fixture-recipe", "storage_dir": str(self.root), "mode": "smoke"}
+            )
+        self.assertEqual(status, 202, body)
+        job_id = json.loads(body)["id"]
+
+        def finished():
+            detail = json.loads(self.request(f"/api/managed/runs/{job_id}", self.auth())[2])
+            return detail if detail["status"] not in {"starting_server", "waiting_ready"} else None
+
+        detail = wait_for(finished)
+        self.assertEqual(detail["status"], "completed", detail)
+
+    def test_a_download_failure_is_reported_honestly_and_never_starts_a_server(self):
+        """"Missing downloads": a corrupted/interrupted download must fail the
+        setup job with its real reason, and must never let the launcher start a
+        server against files that were never actually verified."""
+        with patch(
+            "omobench.managed_setup.download_and_install",
+            side_effect=ms.ManagedSetupError("model failed SHA-256 verification and was quarantined, not installed."),
+        ), patch("omobench.launcher.subprocess.Popen") as popen:
+            with tempfile.TemporaryDirectory() as storage:
+                status, _, body = self.post(
+                    "/api/managed/setup-jobs",
+                    {"recipe": "fixture-recipe", "storage_dir": storage, "confirmed": True},
+                )
+                self.assertEqual(status, 202, body)
+                job_id = json.loads(body)["id"]
+
+                def finished():
+                    detail = json.loads(self.request(f"/api/managed/setup-jobs/{job_id}", self.auth())[2])
+                    return detail if detail["status"] in {"failed", "completed", "cancelled"} else None
+
+                detail = wait_for(finished)
+                self.assertEqual(detail["status"], "failed")
+                self.assertIn("quarantined", detail["error"])
+                popen.assert_not_called()
+
+    def test_completed_guided_run_can_be_packaged_reviewed_and_downloaded_without_gh(self):
+        """Packaging and submission review are integrated directly into the guided
+        flow, reusing the existing Controller endpoints. Without gh authentication,
+        direct submission stays unavailable but the validated bundle can still be
+        downloaded -- a completed process is not automatically a publishable
+        result, and a local result stays usable either way."""
+        status, _, body = self.post(
+            "/api/managed/runs", {"recipe": "fixture-recipe", "storage_dir": str(self.root), "mode": "execute"}
+        )
+        job_id = json.loads(body)["id"]
+
+        def completed():
+            detail = json.loads(self.request(f"/api/managed/runs/{job_id}", self.auth())[2])
+            return detail if detail["status"] not in {
+                "starting_server", "waiting_ready", "running_benchmark"
+            } else None
+
+        detail = wait_for(completed, timeout=20)
+        benchmark_job_id = detail["benchmark_job_id"]
+
+        with patch("omobench.cli.current_git_commit", return_value="a" * 40):
+            status, _, body = self.post(
+                f"/api/runs/{benchmark_job_id}/package",
+                {
+                    # A real recipe's model_id is the canonical catalog identity;
+                    # this fixture's alias ("Fixture/Alias") is only a stand-in for
+                    # the API name used during inference, so the package call uses
+                    # a real catalog-eligible model id here, as an actual managed
+                    # recipe's own model_id would.
+                    "model": "Qwen/Qwen3-4B",
+                    "model_revision": "fixture-revision-abc123",
+                    "framework": "llama.cpp",
+                    "framework_version": "b99999",
+                    "quantization": "Q4_K_M",
+                    "model_source": self.fixture_model_source,
+                    "runtime_args": ["--device", "none"],
+                    "submitter": "octocat",
+                },
+            )
+        self.assertEqual(status, 200, body)
+        packaged = json.loads(body)
+        self.assertTrue(packaged["validation"]["valid"], packaged["validation"])
+
+        status, _, body = self.post(f"/api/runs/{benchmark_job_id}/prepare", {})
+        self.assertEqual(status, 200, body)
+        preview = json.loads(body)
+        # This fixture's "gh" stub exits 0 but implements no real GitHub API, so
+        # authentication/repository access is effectively unavailable here: direct
+        # submission stays unavailable, but the reviewed bundle can still be
+        # downloaded either way.
+        self.assertFalse(preview["can_submit"])
+        self.assertTrue(preview["message"])
+
+        status, headers, body = self.request(f"/api/runs/{benchmark_job_id}/bundle", self.auth())
+        self.assertEqual(status, 200)
+        self.assertIn("application/zip", headers["Content-Type"])
+        self.assertGreater(len(body), 0)
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 from omobench.cli import build_parser
 from omobench.ui import Controller, UIError, UIServer, endpoint_origin, panel_lock, probe_connection, run_config, safe_log
-from test_cli import GUIDELLM_REPORT_V2
+from test_cli import GUIDELLM_REPORT_V2, install_guidellm_module_stub, patch_parent_process_preflight
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -219,15 +219,26 @@ class ExecutionTests(unittest.TestCase):
         make_root(self.root)
         self.bin = self.root / "bin"
         self.bin.mkdir()
+        self.stub = self.root / "stub"
+        self.stub.mkdir()
         self.path_patch = patch.dict(os.environ, {"PATH": str(self.bin) + os.pathsep + os.environ["PATH"]})
         self.path_patch.start()
+        # Controller.start() runs the real preflight in *this* process, before
+        # spawning anything; the stub runner's metadata reaches only the child.
+        patch_parent_process_preflight(self)
         self.controller = Controller(self.root)
-        # The fixture checkout uses the real CLI under test, not a separately installed worktree.
-        self.controller.environment["PYTHONPATH"] = str(ROOT / "cli" / "src")
+        # The fixture checkout uses the real CLI under test, not a separately
+        # installed worktree. The runner stand-in shadows the guidellm *module*
+        # (self.stub), because execution goes through "<interpreter> -m
+        # guidellm" and deliberately ignores anything named "guidellm" on PATH.
+        self.controller.environment["PYTHONPATH"] = str(self.stub) + os.pathsep + str(ROOT / "cli" / "src")
         for tool in ["nvidia-smi", "rocm-smi", "lspci", "gh"]:
             script = self.bin / tool
             script.write_text("#!/bin/sh\nexit 0\n")
             script.chmod(0o755)
+        # Safety net: without an explicit runner() call, no test may reach the
+        # real GuideLLM and start a genuine benchmark against a dead endpoint.
+        self.runner("missing")
 
     def tearDown(self):
         self.controller.close()
@@ -235,8 +246,10 @@ class ExecutionTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def runner(self, mode="success", report=None):
+        """Install the stand-in runner as a `guidellm` module shadowing the
+        real package on the subprocess's PYTHONPATH (see setUp): execution
+        runs `<interpreter> -m guidellm`, so a PATH script is never consulted."""
         content = (
-            f"#!{sys.executable}\n"
             "import json, pathlib, subprocess, sys, time\n"
             "if '--version' in sys.argv:\n print('GuideLLM 0.7.3'); sys.exit(0)\n"
             "output = pathlib.Path(sys.argv[sys.argv.index('--output') + 1].split('path=', 1)[1])\n"
@@ -252,9 +265,7 @@ class ExecutionTests(unittest.TestCase):
             content += "sys.exit(7)\n"
         elif mode != "missing":
             content += f"output.write_text(json.dumps({report if report is not None else GUIDELLM_REPORT_V2!r}))\n"
-        script = self.bin / "guidellm"
-        script.write_text(content)
-        script.chmod(0o755)
+        install_guidellm_module_stub(self.stub, content)
 
     def finished(self, job):
         wait_for(lambda: not self.controller.busy)

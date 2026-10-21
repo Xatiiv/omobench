@@ -1,23 +1,20 @@
-# Local browser control
+# Advanced panel: browser control
 
 `omobench ui` opens a local control panel around the existing OmoBench CLI.
-You use browser forms and buttons; benchmark execution still runs through
-`omobench run --execute`, with the same GuideLLM version, profiles, and evidence.
-Packaging still runs through `omobench package`. Submission remains a GitHub PR.
+Its **default page is a guided benchmark** — see
+[Guided CPU setup](guided-launcher.md) — that downloads, verifies, runs, and
+helps submit one reviewed small CPU model for you, with nothing to type but a
+submitter identity. This page describes the **advanced panel**, at
+`/advanced` in the same running panel: connecting to a model server you
+already run yourself. You use browser forms and buttons; benchmark execution
+still runs through `omobench run --execute`, with the same GuideLLM version,
+profiles, and evidence. Packaging still runs through `omobench package`.
+Submission remains a GitHub PR.
 
-The panel connects to an already-running model server on the same machine.
-It does not install models, start the model server, or switch its execution device.
-The hosted website links to these launch instructions; it does not remotely execute
-programs on visitors' computers.
-
-Don't have a server running yet? The panel's **guided CPU setup** link opens
-`/guided`, a separate page that downloads, verifies, and starts one reviewed
-small CPU model for you, then runs this same benchmark. It is a development
-milestone, not a general installer, and CPU results from it are local-only
-for the same reason CPU results are local-only everywhere else in OmoBench.
-See [Guided CPU setup](guided-launcher.md). This page describes the original,
-"connect to a server you already run yourself" workflow, which stays available
-either way.
+The advanced panel connects to an already-running model server on the same
+machine. It does not install models, start the model server, or switch its
+execution device. The hosted website links to these launch instructions; it
+does not remotely execute programs on visitors' computers.
 
 ## First-time setup
 
@@ -47,7 +44,9 @@ either way.
 5. Keep this terminal open. The browser opens automatically when supported.
    Otherwise, copy the **full URL**, including `#token=…`, from the terminal into
    your browser. The default panel port is `8765`; your model server uses a
-   different port, for example `8092`.
+   different port, for example `8092`. The page that opens is the guided
+   benchmark; click through to **`/advanced`** (same token, same origin) for
+   the connect-your-own-server workflow this page describes.
 
 No `npm install`, Node.js, or website development server is needed for this panel.
 On native Windows you can install `./cli[ui]` and open the panel for setup and

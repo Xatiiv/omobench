@@ -181,6 +181,152 @@ class ReviewIsReadOnlyTests(unittest.TestCase):
             self.assertGreater(report["required_bytes"], 0)
 
 
+class StorageSpaceVerificationTests(unittest.TestCase):
+    """WSL2's own virtual disk can report far more "free" space than its
+    Windows backing drive can actually provide (shutil.disk_usage() there
+    reflects the virtual filesystem's own capacity, not the host drive). A
+    path under a real, mounted Windows drive -- whichever letter is actually
+    mounted, never assumed to be C: -- passes disk usage through to that real
+    volume and stays trustworthy, exactly like ordinary Linux."""
+
+    def test_non_wsl_reports_verified_space(self):
+        with patch("omobench.managed_setup._running_under_wsl", return_value=False), patch(
+            "omobench.managed_setup._disk_usage", return_value=(Path("/"), 500_000_000_000)
+        ):
+            status = ms.storage_space_status(Path("/some/path"))
+        self.assertEqual(status["free_space_bytes"], 500_000_000_000)
+        self.assertTrue(status["free_space_verified"])
+        self.assertIsNone(status["space_note"])
+
+    def test_wsl_internal_virtual_disk_is_unverified(self):
+        """A path on WSL2's own root filesystem (not under /mnt/<drive>) --
+        the common case for a suggested per-user home-directory folder --
+        must not be reported as confidently verified free space."""
+        with patch("omobench.managed_setup._running_under_wsl", return_value=True), patch(
+            "omobench.managed_setup._read_proc_mounts", return_value=[("/", "ext4")]
+        ), patch("omobench.managed_setup._disk_usage", return_value=(Path("/home/user"), 999_000_000_000)):
+            status = ms.storage_space_status(Path("/home/user/OmoBench"))
+        self.assertEqual(status["free_space_bytes"], 999_000_000_000)
+        self.assertFalse(status["free_space_verified"])
+        self.assertIsNotNone(status["space_note"])
+        self.assertIn("virtual disk", status["space_note"])
+        self.assertNotIn("C:", status["space_note"])  # never assumes the backing drive
+
+    def test_wsl_mounted_windows_drive_is_verified(self):
+        """A path under a real, mounted Windows drive -- here /mnt/e, not the
+        commonly-assumed C: or D: -- is trusted exactly like ordinary Linux."""
+        with patch("omobench.managed_setup._running_under_wsl", return_value=True), patch(
+            "omobench.managed_setup._read_proc_mounts", return_value=[("/", "ext4"), ("/mnt/e", "9p")]
+        ), patch("omobench.managed_setup._disk_usage", return_value=(Path("/mnt/e/OmoBench"), 42)):
+            status = ms.storage_space_status(Path("/mnt/e/OmoBench"))
+        self.assertEqual(status["free_space_bytes"], 42)
+        self.assertTrue(status["free_space_verified"])
+        self.assertIsNone(status["space_note"])
+
+    def test_longest_mount_prefix_wins_over_root(self):
+        mounts = [("/", "ext4"), ("/mnt/c", "9p")]
+        self.assertTrue(ms._on_a_mounted_windows_drive(Path("/mnt/c/Users/example/OmoBench"), mounts))
+        self.assertFalse(ms._on_a_mounted_windows_drive(Path("/home/example/OmoBench"), mounts))
+
+    def test_free_disk_usage_unavailable_is_reported_as_unknown_not_unverified(self):
+        """Distinct from the WSL case: when free space cannot be read at all
+        (no existing ancestor), that is "unknown", not "unverified"."""
+        with patch("omobench.managed_setup._disk_usage", return_value=None):
+            status = ms.storage_space_status(Path("/does/not/exist"))
+        self.assertIsNone(status["free_space_bytes"])
+        self.assertTrue(status["free_space_verified"])
+        self.assertIsNone(status["space_note"])
+
+    def test_review_marks_has_enough_space_unverified_not_confidently_true(self):
+        """End to end through review(): even though the raw free-space number
+        would satisfy the requirement, has_enough_space must not claim True
+        while the check itself is unverified."""
+        with tempfile.TemporaryDirectory() as temporary:
+            storage_dir = Path(temporary)
+            with patch("omobench.managed_setup._running_under_wsl", return_value=True), patch(
+                "omobench.managed_setup._read_proc_mounts", return_value=[("/", "ext4")]
+            ):
+                report = ms.review(ROOT, "qwen3-4b-cpu-v1", storage_dir)
+        self.assertFalse(report["free_space_verified"])
+        self.assertIsNone(report["has_enough_space"])
+        self.assertIsNotNone(report["space_note"])
+        self.assertIsNotNone(report["free_space_bytes"])  # still reported, just not trusted
+
+
+class CachedArtifactReuseTests(unittest.TestCase):
+    """Both catalog recipes pin identical model/runtime artifacts; installing
+    one must be reflected as reuse for the other, not a second full download."""
+
+    def test_uncached_recipe_reports_the_full_download(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            storage_dir = Path(temporary)
+            report = ms.review(ROOT, "qwen3-4b-cpu-v1", storage_dir)
+        self.assertFalse(report["files"][0]["already_cached"])
+        self.assertFalse(report["files"][1]["already_cached"])
+        expected_total = report["files"][0]["size_bytes"] + report["files"][1]["size_bytes"]
+        self.assertEqual(report["bytes_to_download"], expected_total)
+
+    def test_files_already_downloaded_for_one_recipe_are_reused_by_the_other(self):
+        """Simulates what a real install leaves behind in the shared
+        downloads/ cache, without actually downloading anything, then
+        confirms a *different*, not-yet-installed recipe with byte-identical
+        artifacts sees them as cached rather than needing a fresh download."""
+        model_content = b"fixture-model-bytes"
+        runtime_content = b"fixture-runtime-bytes"
+        classic = base_recipe(
+            id="fixture-classic",
+            model={"size_bytes": len(model_content), "sha256": hashlib.sha256(model_content).hexdigest()},
+            runtime={"size_bytes": len(runtime_content), "sha256": hashlib.sha256(runtime_content).hexdigest()},
+        )
+        extended = base_recipe(
+            id="fixture-extended",
+            model={"size_bytes": len(model_content), "sha256": hashlib.sha256(model_content).hexdigest()},
+            runtime={"size_bytes": len(runtime_content), "sha256": hashlib.sha256(runtime_content).hexdigest()},
+        )
+        with tempfile.TemporaryDirectory() as root_dir, tempfile.TemporaryDirectory() as storage_temp:
+            root = Path(root_dir)
+            shutil.copytree(ROOT / "catalog" / "models", root / "catalog" / "models")
+            (root / "catalog" / "downloads").mkdir(parents=True)
+            (root / "catalog" / "downloads" / "cpu-v1.json").write_text(
+                json.dumps({"catalog_version": 1, "recipes": [classic, extended]}), encoding="utf-8"
+            )
+            (root / "benchmarks" / "profiles").mkdir(parents=True)
+            (root / "results").mkdir()
+
+            storage_dir = Path(storage_temp)
+            downloads = ms.managed_root(storage_dir) / "downloads"
+            downloads.mkdir(parents=True)
+            (downloads / classic["model"]["filename"]).write_bytes(model_content)
+            (downloads / classic["runtime"]["filename"]).write_bytes(runtime_content)
+
+            report = ms.review(root, "fixture-extended", storage_dir)
+        self.assertFalse(report["already_installed"]["installed"])  # this recipe's own manifest never ran
+        self.assertTrue(report["files"][0]["already_cached"])
+        self.assertTrue(report["files"][1]["already_cached"])
+        self.assertEqual(report["bytes_to_download"], 0)
+
+    def test_a_corrupted_cached_file_is_not_reported_as_cached(self):
+        model_content = b"fixture-model-bytes"
+        runtime_content = b"fixture-runtime-bytes"
+        recipe = base_recipe(
+            model={"size_bytes": len(model_content), "sha256": hashlib.sha256(model_content).hexdigest()},
+            runtime={"size_bytes": len(runtime_content), "sha256": hashlib.sha256(runtime_content).hexdigest()},
+        )
+        with tempfile.TemporaryDirectory() as root_dir, tempfile.TemporaryDirectory() as storage_temp:
+            root = Path(root_dir)
+            make_fake_repo_root(root, recipe)
+            storage_dir = Path(storage_temp)
+            downloads = ms.managed_root(storage_dir) / "downloads"
+            downloads.mkdir(parents=True)
+            (downloads / recipe["model"]["filename"]).write_bytes(b"not the right bytes at all")
+            (downloads / recipe["runtime"]["filename"]).write_bytes(runtime_content)
+
+            report = ms.review(root, recipe["id"], storage_dir)
+        self.assertFalse(report["files"][0]["already_cached"])
+        self.assertTrue(report["files"][1]["already_cached"])
+        self.assertEqual(report["bytes_to_download"], recipe["model"]["size_bytes"])
+
+
 class PlatformCheckTests(unittest.TestCase):
     def test_native_windows_is_blocked_with_wsl_message(self):
         with patch("omobench.managed_setup.sys.platform", "win32"):

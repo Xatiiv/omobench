@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import gzip
 import hashlib
+import importlib.metadata
 import json
 import math
 import os
@@ -14,6 +16,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -102,21 +105,29 @@ PROFILE_SPECS: dict[str, dict[str, Any]] = {
     # percentage/prefer_duration scheme, so the sample size holds regardless
     # of how long each request takes.
     #
-    # cooldown.value=4, not 5: GuideLLM 0.7.3's own request-count cooldown
-    # boundary excludes phase_requests + 1 trailing requests, not
-    # phase_requests -- confirmed by driving the real scheduler-facing
-    # accumulator (GenerativeBenchmarkAccumulator.update_estimate) through a
-    # full synthetic request sequence and reading GenerativeMetrics.compile()'s
-    # final request_totals, not by inspecting compute_transition_time alone.
-    # A bare cooldown.value=5 excludes 6 requests; value=4 is the documented
-    # compensation that makes the *actual* excluded count 5, matching the
-    # declared contract exactly: 5 warmup + 50 measured + 5 cooldown = 60
-    # total, verified end to end. See ChatSmallExtendedBoundaryTests in
-    # cli/tests/test_cli.py and docs/proposals/chat-small-extended-v1.md.
+    # warmup.value=4 and cooldown.value=4, not 5: GuideLLM 0.7.3's own
+    # request-count phase boundaries each exclude phase_requests + 1 requests,
+    # not phase_requests. Both are compensated here so the *actual* excluded
+    # counts match this profile's declared contract exactly: 5 warmup +
+    # 50 measured + 5 cooldown = 60 total.
+    #
+    # Verified by driving the real scheduler-facing accumulator
+    # (GenerativeBenchmarkAccumulator.update_estimate) through the real
+    # per-request event sequence -- queued, pending, in_progress, first_token,
+    # terminal -- and reading GenerativeMetrics.compile()'s final
+    # request_totals. The full lifecycle matters: GenerativeBenchmarkTimings
+    # re-evaluates TransientPhaseConfig.compute_transition_time on *every*
+    # scheduler event, keyed on info.started_at, which is only populated once a
+    # request reaches "in_progress". An earlier completion-only simulation
+    # (one update_estimate call per request) made warmup.value=5 look correct
+    # and shipped it; a real extended CPU run then recorded 24 successful
+    # requests with six warmup requests excluded instead of the declared five.
+    # See ChatSmallExtendedBoundaryTests in cli/tests/test_cli.py and
+    # docs/proposals/chat-small-extended-v1.md.
     "chat-small-extended-v1": {
         "input_tokens": 1024,
         "output_tokens": 256,
-        "profile": "kind=synchronous,warmup.value=5,warmup.mode=requests,cooldown.value=4,cooldown.mode=requests",
+        "profile": "kind=synchronous,warmup.value=4,warmup.mode=requests,cooldown.value=4,cooldown.mode=requests",
         "max_requests": 60,
         "max_duration_seconds": 5400,
     },
@@ -144,6 +155,88 @@ def executable_version(executable: str) -> str | None:
         return None
     output = command_output([executable, "--version"])
     return output.splitlines()[0] if output else None
+
+
+def guidellm_installed_version() -> str | None:
+    """The installed GuideLLM distribution's version, from package metadata
+    only -- no subprocess, no import of guidellm itself. Cheap (a metadata
+    file read, not a process spawn) and safe to call at any time, including
+    while a model server is loaded: unlike `executable_version("guidellm")`
+    (which runs the real "guidellm --version" subprocess -- itself a cold
+    import of GuideLLM's full dependency tree, observed to occasionally
+    exceed command_output()'s 60s timeout under real load), this cannot
+    hang or time out.
+
+    Reflects *this* interpreter's own environment (sys.executable), which
+    is exactly the Python binary `omobench run --execute` launches as a
+    subprocess (see Controller._cli_command in ui.py) -- so this is an
+    accurate proxy for what that subprocess will actually have available,
+    not a possibly-different "guidellm" resolved elsewhere on PATH.
+    """
+    try:
+        return importlib.metadata.version("guidellm")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+@dataclass
+class RunnerPreflight:
+    """Result of guidellm_runner_preflight(): whether the pinned GuideLLM
+    version is installed in this environment, and a specific, actionable
+    reason when it is not. `kind` distinguishes the two things package
+    metadata can actually tell us apart -- "missing" and "version_mismatch"
+    -- from any later, separate runtime problem (a broken install, or an
+    import/initialization failure), which this never claims to detect; see
+    guidellm_runner_preflight()'s docstring.
+    """
+
+    ok: bool
+    kind: str  # "ok" | "missing" | "version_mismatch"
+    version: str | None
+    message: str
+
+
+def guidellm_runner_preflight() -> RunnerPreflight:
+    """Fast, cheap, execute-mode preflight check: is the pinned GuideLLM
+    version installed in this same environment? Meant to run before any
+    expensive managed preparation or model startup, so a real problem is
+    reported in milliseconds instead of after loading a model server (the
+    slow, subprocess-based version check this replaces could take up to a
+    minute -- long enough that a user could see a fully-loaded model server
+    followed by a generic "GuideLLM is required" failure with no model ever
+    benchmarked).
+
+    This verifies installation and version only, via package metadata --
+    never runtime health. A package that is installed at the right version
+    can still fail to import or initialize later (a corrupted install, a
+    missing native dependency, and so on); that is a genuinely different
+    problem, already handled where it actually happens: a nonzero GuideLLM
+    exit code in write_local_run(), or telemetry.TelemetryUnavailable for
+    the in-process telemetry adapter. This function does not attempt to
+    predict or replace that handling.
+    """
+    version = guidellm_installed_version()
+    if version is None:
+        return RunnerPreflight(
+            ok=False,
+            kind="missing",
+            version=None,
+            message=(
+                f"GuideLLM is not installed in this environment ({sys.executable}). "
+                "Run: python -m pip install -e './cli[ui,runner]'"
+            ),
+        )
+    if version != GUIDELLM_VERSION:
+        return RunnerPreflight(
+            ok=False,
+            kind="version_mismatch",
+            version=version,
+            message=(
+                f"OmoBench v1 requires GuideLLM {GUIDELLM_VERSION}; found {version} installed in "
+                f"{sys.executable}. Run: python -m pip install -e './cli[ui,runner]'"
+            ),
+        )
+    return RunnerPreflight(ok=True, kind="ok", version=version, message=f"GuideLLM {GUIDELLM_VERSION} ready.")
 
 
 def detect_nvidia_gpus() -> list[dict[str, Any]]:
@@ -404,7 +497,11 @@ def doctor_report() -> dict[str, Any]:
         "operating_system": platform.platform(),
         "cpu": detect_cpu(),
         "ram_gb": detect_ram_gb(),
-        "guidellm": executable_version("guidellm"),
+        "guidellm": (
+            f"guidellm version: {version}"
+            if (version := guidellm_installed_version()) is not None
+            else None
+        ),
         "git": executable_version("git"),
         "github_cli": executable_version("gh"),
         "gpus": detect_gpus(),
@@ -437,8 +534,32 @@ def parsed_guidellm_version(version_text: str | None) -> str | None:
     return match.group(1) if match else None
 
 
+def profile_request_timeout_seconds(root: Path, profile_id: str) -> float | None:
+    """The profile's own declared execution.request_timeout_seconds, from
+    benchmarks/profiles/<id>.yaml.
+
+    Unlike profile_measured_requests() this IS fed into the runner: it becomes
+    the openai_http backend's `timeout`. Returns None when the profile declares
+    no timeout or cannot be read, in which case the backend keeps GuideLLM's
+    own default rather than OmoBench inventing a value."""
+    try:
+        import yaml
+
+        path = root / "benchmarks" / "profiles" / f"{profile_id}.yaml"
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, ImportError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    value = document.get("execution", {}).get("request_timeout_seconds")
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value) if value > 0 else None
+
+
 def build_guidellm_command(
     *,
+    root: Path,
     endpoint: str,
     model: str,
     profile_id: str,
@@ -446,11 +567,27 @@ def build_guidellm_command(
 ) -> list[str]:
     spec = PROFILE_SPECS[profile_id]
     target = endpoint.rstrip("/")
+    backend = f"kind=openai_http,target={target},model={model},request_format=/v1/chat/completions"
+    # execution.request_timeout_seconds -> OpenAIHTTPBackendArgs.timeout, which
+    # GuideLLM 0.7.3 passes to httpx as its READ timeout
+    # (httpx.Timeout(read=args.timeout, connect=args.timeout_connect, ...), see
+    # guidellm/backends/openai/http.py). That bounds how long a request may wait
+    # for its NEXT response chunk -- not the total duration of a streaming
+    # request. A slow-but-steadily-streaming response can therefore still run
+    # far longer than this value, and legitimately does on slow CPU hosts; this
+    # alone does not cap a long request at the profile's timeout, nor prevent a
+    # single request from overrunning the max_duration ceiling. What it does
+    # bound is a server that stops producing: a stall of more than this many
+    # seconds between chunks (or before any first byte) now fails that request
+    # instead of hanging until the duration constraint fires.
+    timeout_seconds = profile_request_timeout_seconds(root, profile_id)
+    if timeout_seconds is not None:
+        backend += f",timeout={timeout_seconds}"
     return [
         "guidellm",
         "run",
         "--backend",
-        f"kind=openai_http,target={target},model={model},request_format=/v1/chat/completions",
+        backend,
         "--data",
         f"kind=synthetic_text,prompt_tokens={spec['input_tokens']},output_tokens={spec['output_tokens']}",
         "--profile",
@@ -469,6 +606,164 @@ def build_guidellm_command(
         f"kind=json,path={raw_output_path}",
         "--disable-console-interactive",
     ]
+
+
+def profile_measured_requests(root: Path, profile_id: str) -> int | None:
+    """The profile's own declared measured-request target
+    (execution.measured_requests in benchmarks/profiles/<id>.yaml),
+    display-only: never fed into build_guidellm_command() or any stopping
+    condition, which continue to come from PROFILE_SPECS unchanged."""
+    try:
+        import yaml
+
+        path = root / "benchmarks" / "profiles" / f"{profile_id}.yaml"
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, ImportError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    value = document.get("execution", {}).get("measured_requests")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+# A benchmark that ran, but whose required evidence log could not be
+# finalized (flushed and closed): the measurements exist, but the bundle is
+# incomplete, so the run is not a completed result. Value borrowed from
+# sysexits' EX_IOERR.
+#
+# The code alone is never used to *identify* this case -- a runner is free to
+# exit 74 for its own reasons -- so RunnerOutcome below carries the fact
+# explicitly, reported only by the code that actually observed it.
+EVIDENCE_FINALIZATION_EXIT_CODE = 74
+
+
+@dataclass
+class RunnerOutcome:
+    """How a benchmark invocation ended.
+
+    `returncode` is the runner's own exit status (or
+    EVIDENCE_FINALIZATION_EXIT_CODE when an otherwise successful run could not
+    have its required log finalized). `evidence_log_finalized` records whether
+    guidellm.stdout.log -- required evidence, unlike the optional telemetry
+    snapshot -- was actually flushed and closed, so callers never have to infer
+    that from a number that could mean something else.
+    """
+
+    returncode: int
+    evidence_log_finalized: bool = True
+
+
+def guidellm_runner_invocation(command: list[str]) -> list[str]:
+    """Rewrite a canonical `["guidellm", "run", ...]` command so it executes
+    the GuideLLM installation `guidellm_runner_preflight()` actually verified.
+
+    Preflight reads `importlib.metadata` in *this* interpreter, so the only
+    runner it can vouch for is this interpreter's own. A bare "guidellm" is
+    resolved by PATH, which can point at an entirely different environment
+    (a second virtual environment, a pipx shim, a stale global install): the
+    version check would pass against one install while a different one ran
+    the benchmark -- discovered, if at all, only after the full run, when
+    normalization rejects the report's `guidellm_version`.
+
+    `python -m guidellm` is the *same entry point* as the console script --
+    GuideLLM 0.7.3 declares `guidellm = guidellm.__main__:cli` -- just
+    resolved through `sys.executable` instead of PATH, so this changes which
+    install runs, never what it does.
+
+    The canonical form is deliberately kept in `build_guidellm_command()`:
+    it is what reproduce.md publishes, and an interpreter path
+    (`/home/<user>/.venvs/...`) does not belong in a public evidence bundle.
+    """
+    if not command or command[0] != "guidellm":
+        raise ValueError(f"Expected a 'guidellm ...' command, got: {command[:1]!r}")
+    return [sys.executable, "-m", "guidellm", *command[1:]]
+
+
+def run_guidellm_command(
+    command: list[str],
+    *,
+    log_path: Path,
+    root: Path,
+    profile_id: str,
+    telemetry_dir: Path | None,
+) -> RunnerOutcome:
+    """Run `command` (as built by build_guidellm_command) exactly as the
+    plain subprocess path always has -- unless `telemetry_dir` is given, in
+    which case this additionally tries an in-process run with a live
+    telemetry observer attached (see telemetry.py), producing the identical
+    resolved configuration and the same evidence artifacts.
+
+    Fallback to the plain subprocess path is restricted to failures that
+    happen *before* the benchmark is invoked, so a telemetry-adapter problem
+    can disable live monitoring but never prevent the benchmark from running
+    -- and, equally important, never cause a second one. Once execution has
+    begun, its outcome is reported as-is: nothing here may re-run it or
+    truncate the evidence it already wrote.
+    """
+    invocation = guidellm_runner_invocation(command)
+
+    def plain_subprocess(note: str | None = None) -> RunnerOutcome:
+        log_file = log_path.open("w", encoding="utf-8")
+        try:
+            if note is not None:
+                log_file.write(note)
+                log_file.flush()
+            returncode = subprocess.run(invocation, stdout=log_file, stderr=subprocess.STDOUT, text=True).returncode
+        except BaseException:
+            with contextlib.suppress(OSError, ValueError):
+                log_file.close()
+            raise
+        # Same contract as the telemetry path: the benchmark has already run,
+        # so a failure finalizing its required log never re-runs it and never
+        # touches what was written -- but it does stop the run being reported
+        # as completed. See EVIDENCE_FINALIZATION_EXIT_CODE.
+        try:
+            log_file.flush()
+            log_file.close()
+        except (OSError, ValueError) as error:
+            print(f"Could not finalize the required evidence log {log_path}: {error}", file=sys.stderr)
+            return RunnerOutcome(returncode or EVIDENCE_FINALIZATION_EXIT_CODE, evidence_log_finalized=False)
+        return RunnerOutcome(returncode)
+
+    if telemetry_dir is None:
+        return plain_subprocess()
+
+    from . import telemetry as telemetry_module
+
+    # Pre-invocation setup. A failure here means nothing has been sent and
+    # the log is still untouched, so the plain subprocess path can safely
+    # (re)open it and run the benchmark for the first time.
+    try:
+        telemetry_dir.mkdir(parents=True, exist_ok=True)
+        argv = telemetry_module.argv_for_run_command(command)
+    except (OSError, ValueError) as error:
+        return plain_subprocess(f"OmoBench: live telemetry unavailable ({error}); running without it.\n")
+
+    # The benchmark itself. TelemetryUnavailable is contractually raised only
+    # from this function's own setup block, before the entrypoint is invoked
+    # (see run_generative_benchmark_with_telemetry's docstring), so it is the
+    # ONLY exception that may start a second attempt here. Anything else --
+    # notably an OSError from writing, flushing, or closing the run's own log
+    # -- happens after execution began: catching it would reopen the log with
+    # "w", destroying the finished run's output, and launch a duplicate
+    # benchmark. It is allowed to propagate instead.
+    try:
+        returncode = telemetry_module.run_generative_benchmark_with_telemetry(
+            argv,
+            snapshot_path=telemetry_dir / "telemetry.json",
+            history_path=telemetry_dir / "telemetry-history.json",
+            stdout_log_path=log_path,
+            run_label=profile_id,
+            total_measured_requests=profile_measured_requests(root, profile_id),
+        )
+    except telemetry_module.TelemetryUnavailable as error:
+        return plain_subprocess(f"OmoBench: live telemetry unavailable ({error}); running without it.\n")
+    # telemetry.py reports an unfinalized required log through this code, and
+    # reports it only when it actually observed the failure itself.
+    return RunnerOutcome(
+        returncode,
+        evidence_log_finalized=returncode != EVIDENCE_FINALIZATION_EXIT_CODE,
+    )
 
 
 def redact_endpoint(text: str, endpoint: str) -> str:
@@ -866,6 +1161,7 @@ def write_local_run(args: argparse.Namespace) -> int:
         return 2
     raw_output_path = run_directory / "guidellm-benchmarks.json"
     command = build_guidellm_command(
+        root=root,
         endpoint=args.endpoint,
         model=args.model,
         profile_id=args.profile,
@@ -879,24 +1175,22 @@ def write_local_run(args: argparse.Namespace) -> int:
         print("\nAdd --execute to create a local evidence bundle under .omobench-runs/.")
         return 0
 
-    installed_version = parsed_guidellm_version(executable_version("guidellm"))
-    if installed_version is None:
-        print(
-            "GuideLLM is not installed. Run: pip install -e './cli[runner]'",
-            file=sys.stderr,
-        )
-        return 2
-    if installed_version != GUIDELLM_VERSION:
-        print(
-            f"OmoBench v1 requires GuideLLM {GUIDELLM_VERSION}; found {installed_version}.",
-            file=sys.stderr,
-        )
+    preflight = guidellm_runner_preflight()
+    if not preflight.ok:
+        print(preflight.message, file=sys.stderr)
         return 2
 
     run_directory.mkdir(parents=True, exist_ok=False)
     log_path = run_directory / "guidellm.stdout.log"
-    with log_path.open("w", encoding="utf-8") as log_file:
-        completed = subprocess.run(command, stdout=log_file, stderr=subprocess.STDOUT, text=True)
+    telemetry_dir = getattr(args, "telemetry_dir", None)
+    outcome = run_guidellm_command(
+        command,
+        log_path=log_path,
+        root=root,
+        profile_id=args.profile,
+        telemetry_dir=(root / telemetry_dir).resolve() if telemetry_dir else None,
+    )
+    returncode = outcome.returncode
 
     log_path.write_text(
         redact_endpoint(log_path.read_text(encoding="utf-8"), args.endpoint),
@@ -918,9 +1212,23 @@ def write_local_run(args: argparse.Namespace) -> int:
     if raw_output_path.exists():
         compress_file(raw_output_path)
 
-    if completed.returncode != 0:
+    if not outcome.evidence_log_finalized:
+        # The benchmark itself ran. Everything it produced above -- the
+        # compressed runner output, environment.json, reproduce.md, and the
+        # partial log -- is preserved and left untouched; the run is simply
+        # not a complete result, because its required runner log is not.
+        # Driven by the explicit flag, never by the exit code alone: a runner
+        # is free to exit 74 for reasons of its own.
+        print(
+            f"The benchmark ran, but its required evidence log could not be finalized: {log_path}\n"
+            f"The measurements and files already written in {run_directory} are preserved. "
+            "This run is not a completed result: check the disk and re-run when it can be written in full.",
+            file=sys.stderr,
+        )
+        return returncode
+    if returncode != 0:
         print(f"GuideLLM failed; inspect {log_path}", file=sys.stderr)
-        return completed.returncode
+        return returncode
 
     compressed_raw_output = raw_output_path.with_suffix(".json.gz")
     if not compressed_raw_output.exists():
@@ -1270,6 +1578,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--profile", required=True, choices=sorted(PROFILE_SPECS), help="versioned OmoBench profile")
     run.add_argument("--output-dir", default=".omobench-runs", help="local staging directory, relative to repository root")
     run.add_argument("--execute", action="store_true", help="actually invoke GuideLLM; omit for a safe dry run")
+    run.add_argument(
+        "--telemetry-dir",
+        default=None,
+        help=(
+            "optional directory for a live-progress snapshot/history, read by the local panel's dashboard; "
+            "additive only -- omit for the exact existing behavior. Relative to repository root."
+        ),
+    )
 
     package = subcommands.add_parser("package", help="normalize a completed local GuideLLM staging run")
     package.add_argument("--run-dir", required=True, help="local staging directory created by omobench run --execute")

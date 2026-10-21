@@ -68,7 +68,11 @@ function profileDetail() {
   if (!setup) return;
   const spec = setup.profiles[$("profile").value];
   const load = spec.profile.includes("streams=16") ? "16 streams" : "1 stream";
-  $("profile-detail").textContent = `${spec.input_tokens.toLocaleString()} input tokens · ${spec.output_tokens} requested output tokens · ${load} · up to ${spec.max_requests} measured requests / ${spec.max_duration_seconds / 60} min, plus warm-up and cool-down`;
+  // max_requests is the runner's total request budget, including warmup and
+  // cooldown -- never label it "measured requests" here. The profile's own
+  // declared measured-request target (execution.measured_requests) is not
+  // part of this setup payload; only show it once it is.
+  $("profile-detail").textContent = `${spec.input_tokens.toLocaleString()} input tokens · ${spec.output_tokens} requested output tokens · ${load} · maximum ${spec.max_requests} total requests, including warmup and cooldown · up to ${spec.max_duration_seconds / 60} min`;
 }
 
 async function refreshSetup() {

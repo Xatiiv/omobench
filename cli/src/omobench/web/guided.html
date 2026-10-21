@@ -3,97 +3,185 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>OmoBench · Guided CPU setup</title>
+  <title>OmoBench · Guided benchmark</title>
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/guided.css">
   <script src="/guided.js" defer></script>
 </head>
 <body>
-  <header class="topbar"><a class="brand" href="/">Omo<span>Bench</span><span class="brand-mark">▥</span></a><span class="pill"><span class="dot"></span> Guided CPU setup · development milestone</span></header>
+  <header class="topbar">
+    <a class="brand" href="/">Omo<span>Bench</span><span class="brand-mark">▥</span></a>
+    <span class="pill"><span class="dot"></span> Guided benchmark</span>
+  </header>
   <div class="guided-layout">
     <main>
-      <div class="eyebrow">GUIDED CPU SETUP</div>
-      <h1>Set up a reviewed CPU model, step by step.</h1>
+      <div class="eyebrow">GUIDED BENCHMARK</div>
+      <h1>Benchmark a model, step by step.</h1>
       <p class="intro">
-        This guided path downloads and verifies one reviewed model + runtime recipe, then runs the
-        <strong>same, unchanged</strong> benchmark engine as the <a href="/">advanced panel</a>. It is a development
-        milestone, not an installer: it does not touch system packages, and this page only runs the CPU benchmark —
-        it does not package or submit results itself. The evidence it produces is a normal local run, and CPU and
-        GPU results are both eligible for packaging and submission from <a href="/">the advanced panel</a> or the
-        <code>omobench package</code> CLI command. <a href="/">Use the advanced panel</a> to connect to a model
-        server you already run yourself, or to package a run from this page.
+        This walks through a reviewed, verified CPU model end to end: download, run, understand the
+        result, and prepare a submission — without typing server addresses, model revisions, runtime
+        arguments, or shell commands. It runs the <strong>same, unchanged</strong> benchmark engine,
+        packager, and validator as the <a href="/advanced">advanced panel</a>.
+        Already have a model server of your own running? <a href="/advanced">Use the advanced panel</a>
+        to connect to it directly instead — every existing CLI command keeps working unchanged too.
       </p>
+      <nav class="stepper" id="stepper" aria-label="Guided steps">
+        <button type="button" class="step-tab" data-screen="choose">1 · Choose your test</button>
+        <button type="button" class="step-tab" data-screen="run">2 · Prepare and run</button>
+        <button type="button" class="step-tab" data-screen="results">3 · Your results</button>
+        <button type="button" class="step-tab" data-screen="share">4 · Share results</button>
+      </nav>
       <div id="notice" class="notice" role="status" hidden></div>
 
-      <section class="panel" id="stage-platform">
-        <div class="section-head"><div><span class="step">•</span><h2>Environment check</h2></div></div>
-        <p id="platform-status" class="muted">Checking this environment…</p>
+      <!-- Screen 1: Choose your test -->
+      <section class="screen" id="screen-choose">
+        <section class="panel">
+          <div class="section-head"><div><span class="step">1</span><h2>Choose your test</h2></div></div>
+          <p id="runner-status" class="muted">Checking this environment…</p>
+          <div id="recipe-list" class="recipe-grid"></div>
+        </section>
+        <section class="panel" id="recent-panel" hidden>
+          <div class="section-head"><div><h2>Previous runs on this machine</h2></div></div>
+          <div id="recent-list"></div>
+        </section>
       </section>
 
-      <section class="panel" id="stage-1">
-        <div class="section-head"><div><span class="step">01</span><h2>Select test</h2></div></div>
-        <p class="muted">This milestone ships two reviewed recipes for the same downloaded model and runtime, on CPU: the standard <code>chat-small-v1</code> profile, and an extended-duration <code>chat-small-extended-v1</code> variant with the same workload for hardware that needs more than 15 minutes to collect enough measured samples.</p>
-        <div id="recipe-list"></div>
+      <!-- Screen 2: Prepare and run -->
+      <section class="screen" id="screen-run" hidden>
+        <section class="panel" id="summary-panel">
+          <div class="section-head"><div><span class="step">2</span><h2>Prepare and run</h2></div></div>
+          <p id="summary-checking" class="muted">Checking your system and this recipe's requirements…</p>
+          <div id="summary-body" hidden>
+            <dl class="kv" id="summary-facts"></dl>
+            <p id="platform-message" class="notice"></p>
+            <p id="space-message" class="muted"></p>
+            <div class="actions"><button id="change-location-button" type="button" class="secondary">Change location</button></div>
+            <div id="storage-location-editor" hidden>
+              <label>Storage folder
+                <input id="storage-dir" spellcheck="false" placeholder="/mnt/d/OmoBench">
+                <span class="hint">Large model and runtime files are kept here, under <code>omobench-managed-v1/</code>.
+                  Use an absolute path in the form your current environment expects.</span>
+              </label>
+              <div class="actions"><button id="recheck-button" type="button" class="secondary">Re-check this folder</button></div>
+            </div>
+            <p id="storage-error" class="notice error" role="status" hidden></p>
+            <details id="technical-details-review"><summary>Technical details <span class="hint">Exact files, hashes, and revisions</span></summary>
+              <div id="review-files"></div>
+            </details>
+            <div class="actions"><button id="start-button" type="button">Start</button></div>
+          </div>
+        </section>
+        <section class="panel" id="progress-panel" hidden>
+          <div class="section-head">
+            <div><h2 id="progress-heading">Running</h2><p id="dashboard-subtitle" class="muted small"></p></div>
+            <span id="elapsed" class="pill"></span>
+          </div>
+
+          <div class="progress-bar-wrap" role="progressbar" id="progress-bar-wrap" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Benchmark progress">
+            <div class="progress-bar-track"><div class="progress-bar-fill" id="progress-bar-fill"></div></div>
+            <span id="progress-bar-label" class="progress-bar-label">Starting…</span>
+          </div>
+
+          <ol class="stage-list" id="stage-list"></ol>
+          <div id="download-progress"></div>
+
+          <dl class="dashboard-facts" id="dashboard-facts">
+            <div><dt>Elapsed</dt><dd id="fact-elapsed">—</dd></div>
+            <div><dt>Estimated time remaining</dt><dd id="fact-eta">—</dd></div>
+            <div><dt>Requests completed</dt><dd id="fact-requests">—</dd></div>
+            <div><dt>Maximum duration</dt><dd id="fact-max-duration">—</dd></div>
+          </dl>
+          <p id="eta-basis-note" class="hint">The run ends at its configured request or time limit, whichever comes first; it may finish earlier.</p>
+
+          <div class="chart-wrap">
+            <div class="section-head chart-head"><h3>Output tokens / second</h3>
+              <span class="hint" id="chart-label">Cumulative average since the first request · live estimate</span></div>
+            <div id="chart-empty" class="muted">Waiting for the first measurement…</div>
+            <svg id="chart-svg" viewBox="0 0 600 160" preserveAspectRatio="none" role="img" aria-label="Output tokens per second over elapsed time" hidden>
+              <polyline id="chart-line" points=""></polyline>
+            </svg>
+          </div>
+
+          <p id="run-error" class="notice error" role="status" hidden></p>
+          <div class="actions">
+            <button id="cancel-button" type="button" class="danger">Cancel</button>
+            <button id="start-over-button" type="button" class="secondary" hidden>Choose a different test</button>
+          </div>
+
+          <details id="live-log-details" open>
+            <summary>Live log <span class="hint" id="log-connection-status">Refreshes automatically</span></summary>
+            <div class="log-toolbar">
+              <button id="jump-to-latest-button" type="button" class="quiet" hidden>Jump to latest ↓</button>
+            </div>
+            <pre id="benchmark-log" tabindex="0">Waiting…</pre>
+          </details>
+          <details id="technical-details-progress">
+            <summary>Technical details <span class="hint">Raw progress data and managed server diagnostic log</span></summary>
+            <div id="server-log-wrap" hidden><p class="hint">Managed server diagnostic log</p><pre id="server-log"></pre></div>
+            <dl class="kv" id="telemetry-technical-facts"></dl>
+          </details>
+        </section>
       </section>
 
-      <section class="panel" id="stage-2" hidden>
-        <div class="section-head"><div><span class="step">02</span><h2>Reviewed model &amp; configuration</h2></div></div>
-        <dl id="recipe-detail" class="kv"></dl>
+      <!-- Screen 3: Your results -->
+      <section class="screen" id="screen-results" hidden>
+        <section class="panel">
+          <div class="section-head"><div><span class="step">3</span><h2>Your results</h2></div></div>
+          <p id="results-status" class="notice"></p>
+          <div id="results-metrics" class="grid metrics"></div>
+          <div class="actions">
+            <button id="download-summary-button" type="button" class="secondary">Download local summary</button>
+            <button id="run-another-button" type="button" class="secondary">Run another test</button>
+            <button id="go-share-button" type="button" hidden>Prepare submission →</button>
+          </div>
+        </section>
       </section>
 
-      <section class="panel" id="stage-3" hidden>
-        <div class="section-head"><div><span class="step">03</span><h2>Storage folder</h2></div></div>
-        <p class="muted">Large model and runtime files are kept here, under <code>omobench-managed-v1/</code>. Use an absolute
-          path in the form your current environment expects (WSL/Linux: <code>/mnt/d/OmoBench</code>; native Windows setup/review only).</p>
-        <label>Storage folder<input id="storage-dir" spellcheck="false" placeholder="/mnt/d/OmoBench"></label>
-        <div class="actions"><button id="review-button" type="button">Review downloads</button></div>
+      <!-- Screen 4: Share results -->
+      <section class="screen" id="screen-share" hidden>
+        <section class="panel">
+          <div class="section-head"><div><span class="step">4</span><h2>Share results</h2></div></div>
+          <ul class="status-checklist" id="status-checklist"></ul>
+
+          <details id="technical-details-package" open>
+            <summary>Technical details <span class="hint">Filled in automatically from the verified recipe</span></summary>
+            <dl class="kv" id="package-facts"></dl>
+            <label class="check"><input id="edit-details-toggle" type="checkbox"><span>These look wrong — let me edit them</span></label>
+            <div id="package-editable" hidden>
+              <div class="grid two">
+                <label>Model weights source (URL)<input id="edit-model-source" type="url" spellcheck="false"></label>
+                <label>Model revision<input id="edit-model-revision" spellcheck="false"></label>
+                <label>Quantization<input id="edit-quantization" spellcheck="false"></label>
+                <label>Runtime version<input id="edit-framework-version" spellcheck="false"></label>
+              </div>
+              <label>Runtime startup arguments<textarea id="edit-runtime-args" rows="3"></textarea></label>
+            </div>
+          </details>
+
+          <form id="submit-form">
+            <label>Submitter<input id="submitter" required spellcheck="false" placeholder="GitHub username or organization">
+              <span class="hint">The only detail this run's verified recipe cannot already know.</span></label>
+            <div class="actions"><button id="package-button" type="submit">Package &amp; validate</button></div>
+          </form>
+          <p id="validation-result" class="notice" role="status" hidden></p>
+
+          <button id="prepare-review-button" type="button" class="secondary" hidden>Review submission files</button>
+          <div id="submission-preview" hidden>
+            <h3>Submission preview</h3>
+            <p id="repository" class="muted"></p>
+            <ul id="submission-files" class="files-list"></ul>
+            <details><summary>Normalized result</summary><pre id="result-json" tabindex="0"></pre></details>
+            <details><summary>Pull request description</summary><pre id="pr-description" tabindex="0"></pre></details>
+            <div class="actions"><button id="download-bundle-button" type="button" class="secondary">Download complete bundle</button></div>
+            <p id="github-message" class="hint"></p>
+            <label class="check"><input id="submit-confirmed" type="checkbox"><span>I reviewed the complete bundle, confirmed real CPU inference, and checked that the evidence contains no secrets. Create a branch and pull request in the repository shown above.</span></label>
+            <button id="submit-button" type="button" disabled>Create pull request</button>
+          </div>
+          <p id="submission-link" class="notice" hidden></p>
+        </section>
       </section>
 
-      <section class="panel" id="stage-4" hidden>
-        <div class="section-head"><div><span class="step">04</span><h2>Review downloads</h2></div></div>
-        <div id="review-report"></div>
-      </section>
-
-      <section class="panel" id="stage-5" hidden>
-        <div class="section-head"><div><span class="step">05</span><h2>Confirm preparation</h2></div></div>
-        <label class="check"><input id="confirm-download" type="checkbox"><span>I reviewed the exact files, sizes, licences, and SHA-256 hashes above, and I have enough free space. Download and verify them now.</span></label>
-        <div class="actions"><button id="prepare-button" type="button" disabled>Download &amp; install</button></div>
-      </section>
-
-      <section class="panel" id="stage-6" hidden>
-        <div class="section-head"><div><span class="step">06</span><h2>Download progress</h2></div><span id="setup-status" class="pill"></span></div>
-        <div id="download-progress"></div>
-        <p id="setup-error" class="notice error" role="status" hidden></p>
-        <div class="actions"><button id="cancel-setup" type="button" class="danger" hidden>Cancel download</button></div>
-      </section>
-
-      <section class="panel" id="stage-7" hidden>
-        <div class="section-head"><div><span class="step">07</span><h2>Verify readiness</h2></div></div>
-        <p class="muted">Starts the verified server, confirms it reports the expected model alias, then stops it. This performs no inference and reports no performance result.</p>
-        <div class="actions"><button id="smoke-button" type="button">Check readiness</button></div>
-        <p id="smoke-result" class="notice" role="status" hidden></p>
-      </section>
-
-      <section class="panel" id="stage-8" hidden>
-        <div class="section-head"><div><span class="step">08</span><h2>Run the CPU benchmark</h2></div><span id="run-status" class="pill"></span></div>
-        <p class="muted">Runs the existing <code>chat-small-v1</code> profile through the unchanged CLI/GuideLLM runner against the managed server.</p>
-        <div class="actions"><button id="execute-button" type="button">Run benchmark</button><button id="cancel-run" type="button" class="danger" hidden>Cancel</button></div>
-        <p id="run-error" class="notice error" role="status" hidden></p>
-        <details id="server-log-details"><summary>Managed server diagnostic log</summary><pre id="server-log"></pre></details>
-        <details id="benchmark-log-details" open><summary>Live runner log</summary><pre id="benchmark-log">Waiting for the runner…</pre></details>
-      </section>
-
-      <section class="panel" id="stage-9" hidden>
-        <div class="section-head"><div><span class="step">09</span><h2>Results</h2></div></div>
-        <p class="notice">These are real CPU measurements from the managed server, staged as a normal local evidence
-          directory. Packaging and submission are not available from this guided page; use
-          <a href="/">the advanced panel</a>, or run <code>omobench package --execution-device cpu</code> from the
-          CLI against this run's directory, to review and submit it.</p>
-        <div id="guided-metrics" class="grid metrics" hidden></div>
-        <div class="actions"><button id="guided-download-summary" type="button" class="secondary" hidden>Download local summary</button></div>
-      </section>
-
-      <footer>Reviewed recipes. Verified downloads. The same fixed benchmark engine as the advanced panel.</footer>
+      <footer>Reviewed recipes. Verified downloads. The same fixed benchmark engine, packaging, and submission review as the advanced panel.</footer>
     </main>
   </div>
 </body>

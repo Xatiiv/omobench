@@ -209,7 +209,7 @@ class Controller:
 
     def setup(self) -> dict:
         report = cli.doctor_report()
-        version = cli.parsed_guidellm_version(report.get("guidellm"))
+        preflight = cli.guidellm_runner_preflight()
         native_windows = sys.platform == "win32"
         catalog = []
         import yaml
@@ -222,10 +222,9 @@ class Controller:
                 continue
         return {"environment": report, "profiles": cli.PROFILE_SPECS,
                 "frameworks": cli.RUNTIME_FRAMEWORKS, "catalog": sorted(set(catalog)),
-                "can_execute": not native_windows and version == cli.GUIDELLM_VERSION,
+                "can_execute": not native_windows and preflight.ok,
                 "runner_message": ("Start this panel from WSL2 or Linux to execute benchmarks." if native_windows else
-                    f"GuideLLM {cli.GUIDELLM_VERSION} ready." if version == cli.GUIDELLM_VERSION else
-                    f"Install the pinned runner in this environment: python -m pip install -e './cli[ui,runner]'"),
+                    preflight.message),
                 "can_validate": importlib.util.find_spec("jsonschema") is not None}
 
     def _cli_command(self, arguments: list[str]) -> list[str]:
@@ -246,9 +245,9 @@ class Controller:
         config = run_config(data)
         if sys.platform == "win32":
             raise UIError("The current GuideLLM runner needs WSL2, Linux, or macOS. Start omobench ui there.")
-        version = cli.parsed_guidellm_version(cli.executable_version("guidellm"))
-        if version != cli.GUIDELLM_VERSION:
-            raise UIError(f"GuideLLM {cli.GUIDELLM_VERSION} is required. Install './cli[ui,runner]' in this environment.")
+        preflight = cli.guidellm_runner_preflight()
+        if not preflight.ok:
+            raise UIError(preflight.message)
         with self.lock:
             if self.busy or self.closing:
                 raise UIError("Another operation is active. Wait or cancel the current benchmark.", 409)
@@ -261,8 +260,10 @@ class Controller:
                    "summary": None, "error": None, "validation": None, "submission": None}
             self.jobs[job_id] = job
             self._save(job)
+            telemetry_dir = directory.relative_to(self.root).as_posix() + "/telemetry"
             arguments = ["run", f"--endpoint={config['endpoint']}", f"--model={config['model']}",
-                         f"--profile={config['profile']}", f"--output-dir={directory.relative_to(self.root).as_posix()}", "--execute"]
+                         f"--profile={config['profile']}", f"--output-dir={directory.relative_to(self.root).as_posix()}",
+                         f"--telemetry-dir={telemetry_dir}", "--execute"]
             self.worker = threading.Thread(target=self._execute, args=(job, arguments), daemon=True)
             self.worker.start()
             return dict(job)
@@ -339,6 +340,28 @@ class Controller:
         if len(runs) != 1:
             raise UIError("This operation has no single completed evidence directory.")
         return self._inside(runs[0])
+
+    def telemetry(self, job_id: str) -> dict:
+        """The job's live telemetry, if any -- a small, bounded snapshot the
+        in-process GuideLLM adapter (telemetry.py) writes to
+        <job>/telemetry/telemetry.json, kept outside the run's own evidence
+        directory. Never required: an older job, one run without telemetry
+        attached, or one where the adapter disabled itself all just report
+        "available": false, honestly, rather than fabricating progress."""
+        directory = self._directory(job_id)
+        if job_id not in self.jobs:
+            raise UIError("Unknown run.", 404)
+        snapshot_path = self._inside(directory / "telemetry" / "telemetry.json")
+        if not snapshot_path.is_file():
+            return {"available": False}
+        try:
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {"available": False}
+        if not isinstance(snapshot, dict):
+            return {"available": False}
+        snapshot["available"] = True
+        return snapshot
 
     def set_prefill(self, job_id: str, **fields: Any) -> None:
         """Attach optional, editable prefill metadata to a job (for example a managed
@@ -534,12 +557,18 @@ class UIHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             self._authorize()
-            static = {"/": ("index.html", "text/html; charset=utf-8"),
-                      "/app.js": ("app.js", "text/javascript; charset=utf-8"),
-                      "/style.css": ("style.css", "text/css; charset=utf-8"),
+            # The guided experience is the default entry point; the original
+            # "connect to a server you already run yourself" panel stays fully
+            # available at /advanced (and every existing CLI command keeps working
+            # unchanged). /guided is kept as an alias to the same page so existing
+            # bookmarks/docs links and the previous default keep working.
+            static = {"/": ("guided.html", "text/html; charset=utf-8"),
                       "/guided": ("guided.html", "text/html; charset=utf-8"),
                       "/guided.js": ("guided.js", "text/javascript; charset=utf-8"),
-                      "/guided.css": ("guided.css", "text/css; charset=utf-8")}
+                      "/guided.css": ("guided.css", "text/css; charset=utf-8"),
+                      "/advanced": ("index.html", "text/html; charset=utf-8"),
+                      "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+                      "/style.css": ("style.css", "text/css; charset=utf-8")}
             if self.path in static:
                 name, mime = static[self.path]
                 return self._send(200, files("omobench").joinpath("web", name).read_bytes(), mime)
@@ -553,6 +582,9 @@ class UIHandler(BaseHTTPRequestHandler):
                 if match[2]:
                     return self._send(200, controller.bundle(match[1]), "application/zip")
                 return self._json(controller.detail(match[1]))
+            match = re.fullmatch(r"/api/runs/(job-[a-f0-9]{16})/telemetry", self.path)
+            if match:
+                return self._json(controller.telemetry(match[1]))
             managed = self.server.managed
             if self.path == "/api/managed/recipes":
                 return self._json({"recipes": managed.recipes(), "default_storage_dir": managed.default_storage_dir()})

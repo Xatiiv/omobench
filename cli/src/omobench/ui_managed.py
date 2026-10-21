@@ -13,6 +13,8 @@ local, non-evidence UI state.
 from __future__ import annotations
 
 import contextlib
+import json
+import os
 import secrets
 import threading
 import time
@@ -24,7 +26,6 @@ from .ui import UIError, text_field
 
 
 MANAGED_JOB_ACTIVE = {"starting_server", "waiting_ready", "running_benchmark", "preparing", "cancelling"}
-DEFAULT_STORAGE_SUGGESTIONS = ("/mnt/d/OmoBench", "D:\\OmoBench")
 
 
 class ManagedController:
@@ -42,32 +43,126 @@ class ManagedController:
 
     # -- recipes and defaults -------------------------------------------------
 
+    def _profile_definition(self, profile_id: str) -> dict[str, Any]:
+        """The profile's own declared workload (benchmarks/profiles/<id>.yaml),
+        read for display only -- never fed into command construction or
+        acceptance checks, which continue to come from cli.PROFILE_SPECS (the
+        runner mapping) and the profile's own acceptance section, unchanged."""
+        import yaml
+
+        path = self.root / "benchmarks" / "profiles" / f"{profile_id}.yaml"
+        try:
+            document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, yaml.YAMLError):
+            return {}
+        return document if isinstance(document, dict) else {}
+
     def recipes(self) -> list[dict]:
+        from . import cli as omobench_cli
         from . import managed_setup
 
         try:
             loaded = managed_setup.load_recipes(self.root)
         except managed_setup.ManagedSetupError as error:
             raise UIError(str(error)) from error
-        return [
-            {
-                "id": recipe["id"],
-                "title": recipe["title"],
-                "model_id": recipe["model_id"],
-                "quantization": recipe["quantization"],
-                "benchmark_profile": recipe["benchmark_profile"],
-                "execution_device": recipe["execution_device"],
-                "supported_environment": recipe["supported_environment"],
-            }
-            for recipe in loaded
-        ]
+        results = []
+        for recipe in loaded:
+            spec = omobench_cli.PROFILE_SPECS.get(recipe["benchmark_profile"], {})
+            execution = self._profile_definition(recipe["benchmark_profile"]).get("execution", {})
+            results.append(
+                {
+                    "id": recipe["id"],
+                    "title": recipe["title"],
+                    "model_id": recipe["model_id"],
+                    "quantization": recipe["quantization"],
+                    "benchmark_profile": recipe["benchmark_profile"],
+                    "execution_device": recipe["execution_device"],
+                    "supported_environment": recipe["supported_environment"],
+                    # From the profile the recipe actually runs, never invented here:
+                    # lets the guided page explain the duration ceiling and pick a
+                    # "recommended for slower hardware" recipe from real data (the
+                    # longest ceiling among same-device recipes) instead of a
+                    # hard-coded recipe id.
+                    "max_duration_seconds": spec.get("max_duration_seconds"),
+                    # The runner's own request budget (cli.PROFILE_SPECS), which
+                    # includes warmup/cooldown and so can exceed the profile's
+                    # declared measured-request target -- kept for anything that
+                    # needs the literal --constraint value, but the UI must not
+                    # display this as "measured requests"; see measured_requests.
+                    "max_requests": spec.get("max_requests"),
+                    # The profile's own declared measured-request target
+                    # (benchmarks/profiles/<id>.yaml execution.measured_requests),
+                    # excluding warmup/cooldown -- what the guided page shows as
+                    # "measured requests". For chat-small-extended-v1 this is 50,
+                    # even though its runner budget (max_requests, above) is 60.
+                    "measured_requests": execution.get("measured_requests"),
+                }
+            )
+        return results
+
+    def _state_path(self) -> Path:
+        return self.storage / "preferences.json"
+
+    def _read_state(self) -> dict[str, Any]:
+        try:
+            return json.loads(self._state_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def _remember_selection(self, recipe_id: str, storage_dir: Path) -> None:
+        """Reuse this storage folder (and recipe) as the default next time.
+
+        Best-effort local UI preference, not benchmark evidence -- stays beside
+        this checkout's other local panel state in .omobench-runs/ui/managed/.
+        """
+        state = {
+            "last_recipe": recipe_id,
+            "last_storage_dir": str(storage_dir),
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        path = self._state_path()
+        temporary = path.with_suffix(".tmp")
+        try:
+            temporary.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+            temporary.replace(path)
+        except OSError:
+            pass  # Remembering the last selection is a convenience, not required.
+
+    def _writable_ancestor(self, path: Path) -> bool:
+        current = path
+        while not current.exists():
+            if current.parent == current:
+                return False
+            current = current.parent
+        return os.access(current, os.W_OK)
+
+    def suggested_storage_dir(self) -> str | None:
+        """Suggest a storage folder without assuming either developer's own path.
+
+        Order: (1) reuse whatever this checkout's panel last used, if it still
+        exists; (2) /mnt/d/OmoBench, but only when that exact path already
+        exists (a common WSL2 convention, never assumed); (3) a per-user
+        folder under the current environment's home directory, offered only
+        when its nearest existing ancestor is actually writable. Always a
+        suggestion the storage-folder field can be edited away from, never
+        created here.
+        """
+        previous = self._read_state().get("last_storage_dir")
+        if previous and Path(previous).exists():
+            return previous
+        wsl_convention = Path("/mnt/d/OmoBench")
+        if wsl_convention.exists():
+            return str(wsl_convention)
+        home_candidate = Path.home() / "OmoBench"
+        if self._writable_ancestor(home_candidate):
+            return str(home_candidate)
+        return None
 
     def default_storage_dir(self) -> str | None:
-        """Suggest /mnt/d/OmoBench only when that exact path already exists."""
-        candidate = Path("/mnt/d/OmoBench")
-        if candidate.exists():
-            return str(candidate)
-        return None
+        # Kept for backward compatibility; suggested_storage_dir() is the
+        # current, fuller suggestion (previous selection, then WSL convention,
+        # then a per-user default) that /api/managed/recipes now returns.
+        return self.suggested_storage_dir()
 
     # -- review (read-only) ---------------------------------------------------
 
@@ -115,6 +210,7 @@ class ManagedController:
             self.setup_jobs[job_id] = job
             cancel_event = threading.Event()
             self.cancel_events[job_id] = cancel_event
+        self._remember_selection(recipe_id, storage_dir)
         threading.Thread(target=self._run_prepare, args=(job, storage_dir, cancel_event), daemon=True).start()
         return dict(job)
 
@@ -172,6 +268,18 @@ class ManagedController:
     def start_run(self, data: dict, *, mode: str) -> dict:
         recipe_id = text_field(data, "recipe")
         storage_dir = self._resolve_storage_dir(data)
+        if mode == "execute":
+            # Fail fast, before spending any time on the managed server:
+            # loading a model can take the better part of a minute, and a
+            # runner that will never be reachable should never cost the
+            # contributor that wait. Smoke runs never touch GuideLLM at
+            # all (see the mode == "smoke" branch in _run_managed below),
+            # so this check is deliberately execute-only.
+            from . import cli as omobench_cli
+
+            preflight = omobench_cli.guidellm_runner_preflight()
+            if not preflight.ok:
+                raise UIError(preflight.message)
         with self.lock:
             if self.closing:
                 raise UIError("The panel is shutting down.")
@@ -191,6 +299,7 @@ class ManagedController:
                 "finished_at": None,
             }
             self.run_jobs[job_id] = job
+        self._remember_selection(recipe_id, storage_dir)
         threading.Thread(target=self._run_managed, args=(job, storage_dir, mode), daemon=True).start()
         return dict(job)
 
@@ -236,12 +345,28 @@ class ManagedController:
                 )
                 with self.lock:
                     job["benchmark_job_id"] = benchmark_job["id"]
-                # Prefill the advanced panel's package form with this reviewed recipe's
-                # own pinned download URL, so packaging this run never requires typing
-                # a weights source by hand.
+                # Fill in every field the reviewed recipe already establishes with
+                # certainty, so packaging this run (from the guided page's "Share
+                # results" screen or the advanced panel) never requires typing a
+                # model identity, weight source, revision, quantization, runtime
+                # version, or startup arguments by hand -- only genuinely unknown
+                # information (the submitter identity) is left for a person to
+                # enter. Never invents hardware or provenance: everything here
+                # comes from the reviewed recipe or the fixed managed server
+                # command this launcher itself built.
+                prefill: dict[str, Any] = {"framework": "llama.cpp", "runtime_args": list(launcher.CPU_ONLY_SERVER_ARGS)}
                 model_source = recipe.get("model", {}).get("url")
                 if model_source:
-                    self.benchmark_controller.set_prefill(benchmark_job["id"], model_source=model_source)
+                    prefill["model_source"] = model_source
+                model_revision = recipe.get("model", {}).get("revision")
+                if model_revision:
+                    prefill["model_revision"] = model_revision
+                if recipe.get("quantization"):
+                    prefill["quantization"] = recipe["quantization"]
+                runtime_version = recipe.get("runtime", {}).get("version")
+                if runtime_version:
+                    prefill["framework_version"] = runtime_version
+                self.benchmark_controller.set_prefill(benchmark_job["id"], **prefill)
                 while True:
                     detail = self.benchmark_controller.detail(benchmark_job["id"])
                     if detail["status"] not in {"running", "cancelling"}:
