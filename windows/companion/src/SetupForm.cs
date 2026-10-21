@@ -46,14 +46,9 @@ namespace OmoBench.Companion
         private readonly Panel _advanced = new Panel();
 
         private DiscoveryCancel _cancel;
-        private bool _discoveryRunning;
 
-        /// <summary>
-        /// Incremented whenever a new search starts, or the person changes the
-        /// distribution or the checkout. A result carrying an older number
-        /// describes a question nobody is asking any more, and is dropped.
-        /// </summary>
-        private int _generation;
+        /// <summary>Generations, edit tracking and readiness; see SetupState.</summary>
+        private readonly SetupState _state = new SetupState();
 
         /// <summary>
         /// Set while this code is assigning to a text box, so the resulting
@@ -61,8 +56,13 @@ namespace OmoBench.Companion
         /// </summary>
         private bool _assigning;
 
-        private bool _userEditedCheckout;
-        private bool _userEditedPython;
+        /// <summary>
+        /// Set while this code is selecting a list entry, so filling in a
+        /// default at the end of a search is not mistaken for the person
+        /// choosing that entry.
+        /// </summary>
+        private bool _selectingDefault;
+
         private List<InstallationCandidate> _ready = new List<InstallationCandidate>();
 
         public SetupForm(Configuration configuration)
@@ -184,8 +184,8 @@ namespace OmoBench.Companion
             _checkout.TextChanged += (s, e) =>
             {
                 if (_assigning) { return; }
-                _userEditedCheckout = true;
-                InvalidateDiscovery();
+                bool hadResult = _state.Validated != null;
+                AfterSettingsChanged(_state.NoteCheckoutEdited(), hadResult);
             };
             _advanced.Controls.Add(_checkout);
             Button browse = new Button { Text = "Browse…", Bounds = new Rectangle(514, -1, 96, 26) };
@@ -203,7 +203,11 @@ namespace OmoBench.Companion
             _python.TextChanged += (s, e) =>
             {
                 if (_assigning) { return; }
-                _userEditedPython = true;
+                // Changing the interpreter invalidates a validation just as
+                // surely as changing the checkout: the pairing is what was
+                // checked, not either half of it.
+                bool hadResult = _state.Validated != null;
+                AfterSettingsChanged(_state.NoteInterpreterEdited(), hadResult);
             };
             _advanced.Controls.Add(_python);
             _advanced.Controls.Add(new Label
@@ -289,38 +293,69 @@ namespace OmoBench.Companion
         /// Anything already in flight now describes a different question.
         /// Bumping the generation makes its result arrive and be discarded.
         /// </summary>
+        /// <summary>
+        /// Something a search depends on changed: the distribution, the
+        /// checkout or the interpreter. Any result in flight is abandoned, and
+        /// anything previously validated stops applying to what is on screen.
+        /// </summary>
         private void InvalidateDiscovery()
         {
-            _generation++;
-            if (_discoveryRunning)
+            bool hadResult = _state.Validated != null;
+            AfterSettingsChanged(_state.SettingsChanged(), hadResult);
+        }
+
+        /// <summary>
+        /// Reflect a change to the distribution, checkout or interpreter. The
+        /// state has already been updated; this only says what happened.
+        /// </summary>
+        private void AfterSettingsChanged(bool stoppedSearch, bool hadResult)
+        {
+            if (stoppedSearch)
             {
-                // The question changed, so the search in flight is answering
-                // the wrong one. Stop it rather than letting it finish and be
-                // discarded -- that would keep probing WSL for nothing, and
-                // leave the status line frozen on a stale message.
+                // Stop it rather than letting it finish and be discarded --
+                // that would keep probing WSL for nothing, and leave the status
+                // line frozen on a stale message.
                 DiscoveryCancel cancel = _cancel;
                 if (cancel != null) { cancel.Cancel(); }
-                _discoveryRunning = false;
-                _cancelDiscovery.Enabled = false;
-                _findAutomatically.Enabled = true;
                 _discoveryStatus.Text = "Search stopped because you changed a setting. "
                     + "Use \"Find automatically\" to look again.";
             }
+            else if (hadResult)
+            {
+                // The displayed combination is no longer the one that was
+                // checked, so it must stop claiming to be ready.
+                _discoveryStatus.Text = "These settings have not been checked. "
+                    + "Use \"Check this environment\", or \"Find automatically\".";
+            }
+
+            if (hadResult)
+            {
+                // The detail below the status described the combination that
+                // was checked. Leaving it there would go on showing a "Ready"
+                // report next to settings it no longer describes.
+                _result.Text = "The previous check does not apply to what is now entered.\r\n\r\n"
+                    + "Use \"Check this environment\" to test these settings, "
+                    + "or \"Find automatically\" to search again.";
+            }
+            ApplySearchControls();
+        }
+
+        private void ApplySearchControls()
+        {
+            _cancelDiscovery.Enabled = _state.CancelEnabled;
+            _findAutomatically.Enabled = _state.FindEnabled;
         }
 
         private void BeginDiscovery()
         {
-            if (_discoveryRunning)
+            int generation = _state.BeginSearch();
+            if (generation == 0)
             {
                 return;     // one search at a time
             }
-            _discoveryRunning = true;
-            _generation++;
-            int generation = _generation;
             _cancel = new DiscoveryCancel();
 
-            _findAutomatically.Enabled = false;
-            _cancelDiscovery.Enabled = true;
+            ApplySearchControls();
             _discoveryStatus.Text = "Looking for your OmoBench installation…";
             _candidates.Items.Clear();
             Relayout();
@@ -337,7 +372,7 @@ namespace OmoBench.Companion
                     report = Discovery.Run(snapshot, executable, new DiscoveryLimits(), cancel,
                         message => Post(() =>
                         {
-                            if (generation == _generation) { _discoveryStatus.Text = message; }
+                            if (_state.Generation == generation) { _discoveryStatus.Text = message; }
                         }));
                 }
                 catch (Exception error)
@@ -370,25 +405,23 @@ namespace OmoBench.Companion
         {
             DiscoveryCancel cancel = _cancel;
             if (cancel != null) { cancel.Cancel(); }
-            _generation++;
-            _discoveryRunning = false;
-            _cancelDiscovery.Enabled = false;
-            _findAutomatically.Enabled = true;
+            _state.CancelSearch();
+            ApplySearchControls();
             if (message != null && !IsDisposed) { _discoveryStatus.Text = message; }
         }
 
         private void FinishDiscovery(int generation, DiscoveryReport report)
         {
-            _discoveryRunning = false;
-            _cancelDiscovery.Enabled = false;
-            _findAutomatically.Enabled = true;
-
-            if (generation != _generation)
+            // Nothing above this line. A stale completion must not touch the
+            // running flag, the buttons, the status or the results: by the time
+            // it arrives those may belong to a newer search, and clearing the
+            // running flag here would let a second search start beside it.
+            if (!_state.CompleteSearch(generation))
             {
-                // The distribution or checkout changed, or another search
-                // started, while this one was running.
                 return;
             }
+            ApplySearchControls();
+
             if (report.Cancelled)
             {
                 _discoveryStatus.Text = "Search cancelled.";
@@ -404,18 +437,19 @@ namespace OmoBench.Companion
 
             if (report.Ready.Count == 1)
             {
-                Apply(report.Ready[0], true);
-                _discoveryStatus.Text = "OmoBench is ready.";
-                _result.Text = (report.Ready[0].Summary + "\r\n\r\n"
-                    + (report.Ready[0].Detail ?? "")).Replace("\n", "\r\n").TrimEnd();
+                Apply(report.Ready[0], false);
+                ReportReadiness(report.Ready[0]);
             }
             else if (report.Ready.Count > 1)
             {
                 _discoveryStatus.Text = report.Ready.Count.ToString(CultureInfo.InvariantCulture)
                     + " installations are ready. Choose one.";
-                _candidates.SelectedIndex = 0;   // applies the first
-                _result.Text = "Each entry below was checked: OmoBench imports from that checkout and the "
-                    + "pinned GuideLLM runner is installed in that environment.";
+                // Selecting the first is this code filling in a default, not
+                // the person choosing it, so it must not overwrite an edit.
+                _selectingDefault = true;
+                try { _candidates.SelectedIndex = 0; }
+                finally { _selectingDefault = false; }
+                ReportReadiness(report.Ready[0]);
             }
             else
             {
@@ -427,6 +461,39 @@ namespace OmoBench.Companion
             Relayout();
         }
 
+        /// <summary>
+        /// Say "ready" only when the combination actually on screen is the one
+        /// that was validated. A search can validate a pairing while the person
+        /// is typing a different interpreter; the result is then a real finding
+        /// about a combination they are no longer looking at, and reporting it
+        /// as theirs would be wrong.
+        /// </summary>
+        private void ReportReadiness(InstallationCandidate candidate)
+        {
+            Configuration displayed = Collect();
+            if (_state.IsReadyFor(displayed.Distribution, displayed.CheckoutWindowsPath,
+                    displayed.PythonWslPath))
+            {
+                _discoveryStatus.Text = _candidates.Items.Count > 1
+                    ? _candidates.Items.Count.ToString(CultureInfo.InvariantCulture)
+                        + " installations are ready. Choose one."
+                    : "OmoBench is ready.";
+                _result.Text = (candidate.Summary + "\r\n\r\n" + (candidate.Detail ?? ""))
+                    .Replace("\n", "\r\n").TrimEnd();
+                return;
+            }
+
+            _discoveryStatus.Text = "Found a working installation, but it is not what you have entered.";
+            _result.Text = ("A validated installation was found:\r\n"
+                + "    Distribution: " + candidate.Distribution + "\r\n"
+                + "    Checkout:     " + candidate.CheckoutWindowsPath + "\r\n"
+                + "    Interpreter:  " + candidate.PythonWslPath + "\r\n\r\n"
+                + "Your entries differ from it, and that combination has not been checked. "
+                + "Use \"Check this environment\" to test what you entered"
+                + (_candidates.Items.Count > 0 ? ", or choose a listed installation." : "."));
+            _advancedToggle.Checked = true;
+        }
+
         private void ApplySelectedCandidate()
         {
             InstallationCandidate candidate = _candidates.SelectedItem as InstallationCandidate;
@@ -436,20 +503,27 @@ namespace OmoBench.Companion
             // whole candidate. Keeping an earlier hand-typed checkout here would
             // leave a distribution, checkout and interpreter that were never
             // validated together, under a message saying they were.
-            Apply(candidate, false);
-            _result.Text = (candidate.Summary + "\r\n\r\n" + (candidate.Detail ?? ""))
-                .Replace("\n", "\r\n").TrimEnd();
+            //
+            // Filling in the first entry at the end of a search is not that
+            // decision, even though it arrives through the same event.
+            bool explicitChoice = !_selectingDefault;
+            Apply(candidate, explicitChoice);
+            if (explicitChoice)
+            {
+                ReportReadiness(candidate);
+            }
         }
 
         /// <summary>
         /// Fill in what was found.
         ///
-        /// <paramref name="respectManualEdits"/> separates the two ways this
-        /// happens: a search finishing must not step on what the person typed
-        /// while it ran, whereas picking a candidate from the list is their own
-        /// choice and replaces all three fields together.
+        /// <paramref name="explicitChoice"/> separates the two ways this
+        /// happens: a search finishing, or a default being filled in, must not
+        /// step on what the person typed while it ran, whereas picking a
+        /// candidate from the list is their own choice and replaces all three
+        /// fields together.
         /// </summary>
-        private void Apply(InstallationCandidate candidate, bool respectManualEdits)
+        private void Apply(InstallationCandidate candidate, bool explicitChoice)
         {
             if (candidate == null) { return; }
 
@@ -467,22 +541,16 @@ namespace OmoBench.Companion
                 }
             }
 
-            if (!respectManualEdits || !_userEditedCheckout)
+            if (_state.MayApplyCheckout(explicitChoice))
             {
                 AssignText(_checkout, candidate.CheckoutWindowsPath);
             }
-            if (!respectManualEdits || !_userEditedPython)
+            if (_state.MayApplyInterpreter(explicitChoice))
             {
                 AssignText(_python, candidate.PythonWslPath);
             }
 
-            if (!respectManualEdits)
-            {
-                // The fields now hold a validated pair rather than anything
-                // typed by hand, so there is no longer an edit to protect.
-                _userEditedCheckout = false;
-                _userEditedPython = false;
-            }
+            _state.NoteApplied(candidate, explicitChoice);
         }
 
         private void DistributionChanged(object sender, EventArgs e)
@@ -553,9 +621,11 @@ namespace OmoBench.Companion
                 }
                 if (dialog.ShowDialog(this) == DialogResult.OK)
                 {
-                    _userEditedCheckout = true;
+                    // Browsing is the person choosing a checkout, so it counts
+                    // as an edit even though the text is set from code.
+                    bool hadResult = _state.Validated != null;
                     AssignText(_checkout, dialog.SelectedPath);
-                    InvalidateDiscovery();
+                    AfterSettingsChanged(_state.NoteCheckoutEdited(), hadResult);
                 }
             }
         }

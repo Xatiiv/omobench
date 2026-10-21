@@ -43,6 +43,7 @@ namespace OmoBench.Companion.Tests
             CheckoutDiscoveryTests();
             InterpreterDiscoveryTests();
             DiscoveryOutcomeTests();
+            SetupStateTests();
             RegistrationTests();
 
             Console.WriteLine();
@@ -2098,6 +2099,147 @@ namespace OmoBench.Companion.Tests
                 Discovery.SearchRootProvider = savedRoots;
                 Discard(sandbox);
             }
+        }
+
+        /// <summary>
+        /// The Setup window's own state machine: which search result still
+        /// counts, what a filled-in value may overwrite, and whether what is on
+        /// screen is the combination that was actually validated.
+        ///
+        /// These are window interactions rather than discovery results, and
+        /// both cases below were real defects: a cancelled search reaching in
+        /// to change the controls of the search that replaced it, and a
+        /// validated candidate being reported as ready for a combination the
+        /// person had since edited.
+        /// </summary>
+        private static void SetupStateTests()
+        {
+            Section("Setup window state");
+
+            // -- a stale completion must change nothing --------------------
+
+            SetupState state = new SetupState();
+            Check("a fresh window offers Find and nothing to cancel",
+                state.FindEnabled && !state.CancelEnabled && !state.SearchRunning);
+
+            int searchA = state.BeginSearch();
+            Check("starting a search disables Find and offers Cancel",
+                searchA != 0 && state.SearchRunning && state.CancelEnabled && !state.FindEnabled);
+            Check("a second search cannot start alongside the first",
+                state.BeginSearch() == 0);
+
+            state.CancelSearch();
+            int searchB = state.BeginSearch();
+            Check("after cancelling, a new search starts", searchB != 0 && searchB != searchA);
+            Check("the new search owns the controls",
+                state.SearchRunning && state.CancelEnabled && !state.FindEnabled);
+
+            // Search A now finishes, late, while B is still running.
+            Check("the cancelled search's completion is refused",
+                !state.CompleteSearch(searchA));
+            Check("it did not stop the running search", state.SearchRunning);
+            Check("it did not take away the running search's Cancel button", state.CancelEnabled);
+            Check("it did not re-enable Find while a search is running", !state.FindEnabled);
+            Check("and it did not let a third search start alongside B",
+                state.BeginSearch() == 0);
+
+            Check("the current search's completion is accepted",
+                state.CompleteSearch(searchB));
+            Check("which releases the controls",
+                !state.SearchRunning && !state.CancelEnabled && state.FindEnabled);
+
+            // -- an edit invalidates the question --------------------------
+
+            InstallationCandidate found = new InstallationCandidate
+            {
+                Distribution = "Ubuntu",
+                CheckoutWindowsPath = @"C:\Projects\omobench",
+                PythonWslPath = "/home/sam/.venvs/omobench-runner/bin/python",
+                Ready = true,
+                Summary = "Ready: ...",
+            };
+
+            state = new SetupState();
+            int search = state.BeginSearch();
+            Check("editing the interpreter stops the search in flight",
+                state.NoteInterpreterEdited());
+            Check("and its result is then refused", !state.CompleteSearch(search));
+            Check("the interpreter edit is remembered", state.UserEditedInterpreter);
+
+            state = new SetupState();
+            search = state.BeginSearch();
+            Check("editing the checkout stops the search in flight", state.NoteCheckoutEdited());
+            Check("and its result is then refused", !state.CompleteSearch(search));
+
+            state = new SetupState();
+            search = state.BeginSearch();
+            Check("changing the distribution stops the search in flight",
+                state.NoteDistributionChanged());
+            Check("and its result is then refused", !state.CompleteSearch(search));
+
+            // -- ready means this exact combination ------------------------
+
+            state = new SetupState();
+            state.NoteApplied(found, true);
+            Check("the validated combination reports ready",
+                state.IsReadyFor("Ubuntu", @"C:\Projects\omobench",
+                    "/home/sam/.venvs/omobench-runner/bin/python"));
+            Check("a trailing slash and different case on the checkout still match",
+                state.IsReadyFor("Ubuntu", @"c:\projects\omobench\",
+                    "/home/sam/.venvs/omobench-runner/bin/python"));
+            Check("a different interpreter is not ready",
+                !state.IsReadyFor("Ubuntu", @"C:\Projects\omobench",
+                    "/home/sam/.venvs/something-else/bin/python"));
+            Check("a different checkout is not ready",
+                !state.IsReadyFor("Ubuntu", @"C:\Other\omobench",
+                    "/home/sam/.venvs/omobench-runner/bin/python"));
+            Check("a different distribution is not ready",
+                !state.IsReadyFor("Debian", @"C:\Projects\omobench",
+                    "/home/sam/.venvs/omobench-runner/bin/python"));
+            Check("Linux interpreter paths are compared case-sensitively",
+                !state.IsReadyFor("Ubuntu", @"C:\Projects\omobench",
+                    "/home/sam/.venvs/OMOBENCH-RUNNER/bin/python"));
+
+            state.NoteInterpreterEdited();
+            Check("editing a value drops the validation entirely",
+                state.Validated == null
+                && !state.IsReadyFor("Ubuntu", @"C:\Projects\omobench",
+                    "/home/sam/.venvs/omobench-runner/bin/python"));
+
+            // -- a default filled in is not a choice made -------------------
+
+            state = new SetupState();
+            state.BeginSearch();
+            state.NoteInterpreterEdited();     // the person types an interpreter
+            Check("a default must not overwrite the typed interpreter",
+                !state.MayApplyInterpreter(false));
+            Check("but may still fill in the untouched checkout",
+                state.MayApplyCheckout(false));
+
+            Check("an explicit choice may replace the typed interpreter",
+                state.MayApplyInterpreter(true));
+            Check("an explicit choice may replace the checkout too",
+                state.MayApplyCheckout(true));
+
+            state.NoteApplied(found, true);
+            Check("after an explicit choice there is no edit left to protect",
+                !state.UserEditedInterpreter && !state.UserEditedCheckout);
+            Check("so all three fields came from one validated candidate",
+                state.MayApplyCheckout(false) && state.MayApplyInterpreter(false)
+                && state.IsReadyFor(found.Distribution, found.CheckoutWindowsPath,
+                    found.PythonWslPath));
+
+            // A default applied at the end of a search records the candidate
+            // but leaves the edit in place, so the window can see that what is
+            // displayed is not what was validated.
+            state = new SetupState();
+            state.BeginSearch();
+            state.NoteCheckoutEdited();
+            state.NoteApplied(found, false);
+            Check("a default keeps the person's edit flagged", state.UserEditedCheckout);
+            Check("and the displayed combination is not reported ready",
+                !state.IsReadyFor("Ubuntu", @"D:\my own choice\omobench",
+                    "/home/sam/.venvs/omobench-runner/bin/python"));
         }
 
         // -- protocol registration ---------------------------------------------
