@@ -1,0 +1,39 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>OmoBench companion — local link test</title>
+<style>
+  body { font: 15px/1.7 system-ui, sans-serif; max-width: 42rem; margin: 3rem auto; padding: 0 1.25rem;
+         background: #0a0a0b; color: #e8e8ea; }
+  h1 { font-size: 1.4rem; }
+  a.button { display: inline-block; margin: 1.25rem 0; padding: .8rem 1.3rem; border-radius: .5rem;
+             background: #34d399; color: #04291c; font-weight: 650; text-decoration: none; }
+  code { background: #1b1b1f; padding: .1rem .35rem; border-radius: .25rem; }
+  .note { color: #a1a1aa; font-size: .9rem; }
+</style>
+
+<h1>OmoBench companion — local link test</h1>
+
+<p>
+  This file is a plain local page, not the OmoBench website. It exists so the registered
+  <code>omobench://open</code> handler can be tested without running the site and without
+  typing a command.
+</p>
+
+<a class="button" href="omobench://open">Open OmoBench</a>
+
+<p class="note">
+  Expected: Windows starts the companion (it may ask once which app to use), the companion
+  starts the panel in your configured WSL environment, and your browser opens the guided
+  benchmark page. Clicking again reuses the same panel rather than starting a second one.
+</p>
+
+<p class="note">
+  Nothing happened? The companion is probably not registered yet — open it and use
+  <strong>Setup… → Save and register omobench://</strong>. The companion window itself also has an
+  <strong>Open panel</strong> button that does the same thing without any link.
+</p>
+
+<p class="note">
+  This page cannot tell whether the panel opened: it has no access to it. Check the companion
+  window, which shows starting, ready, or failed.
+</p>

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hmac
 import importlib.util
 import json
@@ -33,9 +34,13 @@ MAX_LOG_BYTES = 24_000
 
 
 class UIError(Exception):
-    def __init__(self, message: str, status: int = 400):
+    def __init__(self, message: str, status: int = 400, reason: str | None = None):
         super().__init__(message)
         self.status = status
+        # Stable, machine-readable cause for the few startup failures a
+        # non-interactive launcher has to tell apart (see STATUS_FILE_SCHEMA).
+        # Never shown to the browser; the human-readable message still is.
+        self.reason = reason
 
 
 @contextmanager
@@ -58,7 +63,10 @@ def panel_lock(root: Path):
                 import fcntl
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as error:
-            raise UIError("A control panel is already running for this checkout. Use its browser window or stop it first.") from error
+            raise UIError(
+                "A control panel is already running for this checkout. Use its browser window or stop it first.",
+                reason="already_running",
+            ) from error
         yield
 
 
@@ -651,30 +659,118 @@ class UIHandler(BaseHTTPRequestHandler):
             self._json({"error": "The operation failed. Evidence has been kept locally; check the run log or retry."}, 500)
 
 
-def serve_ui(port: int = 8765, *, open_browser: bool = True) -> int:
+# Version of the --status-file document below. Bump only for an incompatible
+# change; a reader must refuse a schema it does not know.
+STATUS_FILE_SCHEMA = 1
+
+
+def write_status_file(path: Path, payload: dict) -> None:
+    """Publish one startup status document for a non-interactive launcher.
+
+    This is the panel's private channel to whatever started it (the Windows
+    companion, a future service wrapper): a reader gets the connection details
+    as data instead of scraping the explanatory text on stdout.
+
+    The ready document contains the connection token, so it is created with a
+    0600 mode and replaced atomically, and it refuses to follow a symlink at
+    the path it is told to write.
+
+    The mode is not the whole story, and callers should not treat it as such.
+    A Windows launcher points this at a /mnt/... path, where the default DrvFs
+    mount discards POSIX modes outright (the file reads back as 0777); there,
+    privacy comes from the directory's own access list, which the Windows
+    companion sets explicitly. Point this at a directory only this user can
+    read -- never inside the checkout, a log directory, or an evidence bundle.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
+    # O_NOFOLLOW: if something has planted a symlink at the temporary path,
+    # fail rather than write a token through it. O_NOFOLLOW is POSIX-only;
+    # Windows-hosted panels are not a supported execution path.
+    flags = os.O_CREAT | os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump({"schema": STATUS_FILE_SCHEMA, **payload}, stream)
+            stream.write("\n")
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    os.replace(temporary, path)
+
+
+def _publish(status_path: Path | None, payload: dict) -> None:
+    """Best-effort status publication: never let it break the panel itself."""
+    if status_path is None:
+        return
+    try:
+        write_status_file(status_path, payload)
+    except OSError as error:
+        print(f"Could not write the startup status file: {error}", file=sys.stderr)
+
+
+def serve_ui(port: int = 8765, *, open_browser: bool = True, status_file: str | None = None) -> int:
+    status_path = Path(status_file) if status_file else None
     root = cli.find_repository_root()
     if root is None:
-        print("Run omobench ui from an OmoBench checkout.", file=sys.stderr)
+        message = "Run omobench ui from an OmoBench checkout."
+        print(message, file=sys.stderr)
+        _publish(status_path, {"state": "failed", "reason": "not_a_checkout", "message": message})
         return 2
     if not 1 <= port <= 65535:
-        print("Choose a port between 1 and 65535.", file=sys.stderr)
+        message = "Choose a port between 1 and 65535."
+        print(message, file=sys.stderr)
+        _publish(status_path, {"state": "failed", "reason": "invalid_port", "message": message})
         return 2
     try:
         with panel_lock(root):
-            return _serve_ui(root, port, open_browser)
+            return _serve_ui(root, port, open_browser, status_path)
     except (OSError, UIError) as error:
         print(f"Could not start the local panel: {error}", file=sys.stderr)
+        _publish(
+            status_path,
+            {
+                "state": "failed",
+                "reason": getattr(error, "reason", None) or "startup_failed",
+                "message": str(error),
+            },
+        )
         return 2
 
 
-def _serve_ui(root: Path, port: int, open_browser: bool) -> int:
+def _serve_ui(root: Path, port: int, open_browser: bool, status_path: Path | None = None) -> int:
     try:
         server = UIServer(("127.0.0.1", port), root)
-    except (OSError, UIError) as error:
+    except OSError as error:
         print(f"Could not start the local panel: {error}", file=sys.stderr)
+        _publish(
+            status_path,
+            {"state": "failed", "reason": "port_unavailable", "port": port, "message": str(error)},
+        )
+        return 2
+    except UIError as error:
+        print(f"Could not start the local panel: {error}", file=sys.stderr)
+        _publish(
+            status_path,
+            {"state": "failed", "reason": error.reason or "startup_failed", "message": str(error)},
+        )
         return 2
     url = f"{server.origin}/#token={server.token}"
     print(f"OmoBench local control panel\n\n{url}\n\nKeep this terminal open. Ctrl+C stops the panel and its active benchmark.", flush=True)
+    _publish(
+        status_path,
+        {
+            "state": "ready",
+            "url": url,
+            "origin": server.origin,
+            "port": server.server_port,
+            "token": server.token,
+            "pid": os.getpid(),
+            "root": str(root),
+            "started_at": datetime.now(UTC).isoformat(),
+        },
+    )
     if open_browser:
         threading.Thread(target=webbrowser.open, args=(url,), daemon=True).start()
     previous = signal.getsignal(signal.SIGTERM)
@@ -692,4 +788,10 @@ def _serve_ui(root: Path, port: int, open_browser: bool) -> int:
         server.controller.close()
         server.server_close()
         signal.signal(signal.SIGTERM, previous)
+        # The document carries the connection token: remove it as soon as the
+        # panel it describes is gone, so a stale file can never hand a live
+        # token to a later reader.
+        if status_path is not None:
+            with contextlib.suppress(OSError):
+                status_path.unlink(missing_ok=True)
     return 0

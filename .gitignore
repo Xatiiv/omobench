@@ -44,3 +44,6 @@ next-env.d.ts
 /outputs/
 /work/
 /.omobench-runs/
+
+# Windows companion build output (built from windows/companion/src)
+/windows/companion/build/

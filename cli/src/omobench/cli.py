@@ -1564,6 +1564,15 @@ def build_parser() -> argparse.ArgumentParser:
     ui = subcommands.add_parser("ui", help="open the local browser control panel")
     ui.add_argument("--port", type=int, default=8765, help="localhost port (default: 8765)")
     ui.add_argument("--no-browser", action="store_true", help="print the URL without opening a browser")
+    ui.add_argument(
+        "--status-file",
+        help=(
+            "write a small JSON startup document (connection URL, port, token, pid) to this path "
+            "for a non-interactive launcher, instead of it parsing this command's console output. "
+            "The file contains the connection token: choose a user-private path outside the "
+            "checkout. It is removed when the panel stops."
+        ),
+    )
 
     intent = subcommands.add_parser("init-run", help="prepare a benchmark intent without running it")
     intent.add_argument("--endpoint", required=True, help="OpenAI-compatible endpoint base URL")
@@ -1682,7 +1691,7 @@ def main() -> int:
     if args.command == "ui":
         from .ui import serve_ui
 
-        return serve_ui(args.port, open_browser=not args.no_browser)
+        return serve_ui(args.port, open_browser=not args.no_browser, status_file=args.status_file)
     if args.command == "doctor":
         report = doctor_report()
         if args.json:
