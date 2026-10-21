@@ -57,8 +57,16 @@ namespace OmoBench.Companion
             get { return File.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "wsl.exe")); }
         }
 
-        /// <summary>Run a program and capture its output, without a console window.</summary>
-        public static ProcessResult Run(string fileName, string arguments, int timeoutMilliseconds, Encoding outputEncoding = null)
+        /// <summary>
+        /// Run a program and capture its output, without a console window.
+        ///
+        /// <paramref name="cancelled"/> is polled while waiting, so work
+        /// started on behalf of a window that has since been closed or
+        /// cancelled is ended rather than left running in the background.
+        /// </summary>
+        public static ProcessResult Run(
+            string fileName, string arguments, int timeoutMilliseconds,
+            Encoding outputEncoding = null, Func<bool> cancelled = null)
         {
             ProcessStartInfo startInfo = new ProcessStartInfo
             {
@@ -85,7 +93,7 @@ namespace OmoBench.Companion
                 process.Start();
                 process.BeginOutputReadLine();
                 process.BeginErrorReadLine();
-                if (!process.WaitForExit(timeoutMilliseconds))
+                if (!WaitFor(process, timeoutMilliseconds, cancelled))
                 {
                     try { process.Kill(); } catch (Exception) { }
                     return new ProcessResult { ExitCode = -1, TimedOut = true, StandardOutput = output.ToString(), StandardError = error.ToString() };
@@ -98,6 +106,38 @@ namespace OmoBench.Companion
                     StandardError = error.ToString(),
                 };
             }
+        }
+
+        /// <summary>
+        /// Wait for exit, in slices, so cancellation is noticed promptly.
+        /// Returns false when the wait ended without the process exiting --
+        /// whether it ran out of time or was cancelled; the caller ends it
+        /// either way, because a probe nobody is waiting for must not survive.
+        /// </summary>
+        private static bool WaitFor(Process process, int timeoutMilliseconds, Func<bool> cancelled)
+        {
+            if (cancelled == null)
+            {
+                return process.WaitForExit(timeoutMilliseconds);
+            }
+            const int Slice = 200;
+            int waited = 0;
+            while (waited < timeoutMilliseconds)
+            {
+                int slice = Math.Min(Slice, timeoutMilliseconds - waited);
+                if (process.WaitForExit(slice))
+                {
+                    return true;
+                }
+                waited += slice;
+                bool stop;
+                try { stop = cancelled(); } catch (Exception) { stop = false; }
+                if (stop)
+                {
+                    return false;
+                }
+            }
+            return false;
         }
 
         /// <summary>

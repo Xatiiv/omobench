@@ -40,6 +40,9 @@ namespace OmoBench.Companion.Tests
             RecoveryCorrectnessTests();
             ActivityCheckTests();
             ArgumentDeliveryTests();
+            CheckoutDiscoveryTests();
+            InterpreterDiscoveryTests();
+            DiscoveryOutcomeTests();
             RegistrationTests();
 
             Console.WriteLine();
@@ -1571,6 +1574,530 @@ namespace OmoBench.Companion.Tests
             }
             Check("every argument survived the boundary intact",
                 matched == awkward.Length);
+        }
+
+        // -- finding the checkout ----------------------------------------------
+
+        /// <summary>Build a directory that really is an OmoBench checkout.</summary>
+        private static string MakeCheckout(string path)
+        {
+            Directory.CreateDirectory(Path.Combine(path, "cli", "src", "omobench"));
+            Directory.CreateDirectory(Path.Combine(path, "benchmarks", "profiles"));
+            File.WriteAllText(Path.Combine(path, "cli", "src", "omobench", "cli.py"), "# fixture\n");
+            File.WriteAllText(Path.Combine(path, "benchmarks", "profiles", "chat-small-v1.yaml"), "name: fixture\n");
+            return path;
+        }
+
+        private static string Sandbox()
+        {
+            string path = Path.Combine(Path.GetTempPath(), "omobench-discovery-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(path);
+            return path;
+        }
+
+        private static void Discard(string path)
+        {
+            try { Directory.Delete(path, true); } catch (Exception) { }
+        }
+
+        private static void CheckoutDiscoveryTests()
+        {
+            Section("Discovery: finding the checkout");
+
+            string sandbox = Sandbox();
+            try
+            {
+                // A checkout is recognised by its files, not by its name.
+                string real = MakeCheckout(Path.Combine(sandbox, "some-folder-name"));
+                Check("a directory with the OmoBench files is a checkout",
+                    Discovery.LooksLikeCheckout(real));
+
+                string impostor = Path.Combine(sandbox, "omobench");
+                Directory.CreateDirectory(impostor);
+                File.WriteAllText(Path.Combine(impostor, "omobench-local-starter-v2.tar.gz"), "not a checkout");
+                Check("a folder merely named omobench is not a checkout",
+                    !Discovery.LooksLikeCheckout(impostor));
+
+                string halfway = Path.Combine(sandbox, "halfway");
+                Directory.CreateDirectory(Path.Combine(halfway, "cli", "src", "omobench"));
+                File.WriteAllText(Path.Combine(halfway, "cli", "src", "omobench", "cli.py"), "#");
+                Check("a checkout without benchmark profiles is not accepted",
+                    !Discovery.LooksLikeCheckout(halfway));
+
+                Check("a path that does not exist is not a checkout",
+                    !Discovery.LooksLikeCheckout(Path.Combine(sandbox, "nowhere")));
+                Check("null is handled", !Discovery.LooksLikeCheckout(null));
+
+                // The common case: the companion is built inside the checkout,
+                // so walking up from the executable finds it with no search --
+                // including when the path contains spaces and metacharacters.
+                string awkward = MakeCheckout(Path.Combine(sandbox, "My Projects", "omo$bench & co"));
+                string exe = Path.Combine(awkward, "windows", "companion", "build", "OmoBenchCompanion.exe");
+                Directory.CreateDirectory(Path.GetDirectoryName(exe));
+                List<CheckoutCandidate> fromExe = Discovery.CheckoutsFromExecutable(exe);
+                Check("the checkout is found from the executable's ancestors",
+                    fromExe.Count == 1 && fromExe[0].WindowsPath == awkward);
+                Check("a path with spaces and metacharacters survives: " + awkward,
+                    fromExe.Count == 1 && fromExe[0].WindowsPath.Contains(" ")
+                    && fromExe[0].WindowsPath.Contains("$") && fromExe[0].WindowsPath.Contains("&"));
+
+                List<CheckoutCandidate> fromStray = Discovery.CheckoutsFromExecutable(
+                    Path.Combine(sandbox, "elsewhere", "OmoBenchCompanion.exe"));
+                Check("an executable outside any checkout finds nothing", fromStray.Count == 0);
+
+                // Bounded search: depth, skipped directories, and unreadable
+                // roots that must not abort the whole search.
+                string roots = Path.Combine(sandbox, "search");
+                string shallow = MakeCheckout(Path.Combine(roots, "a", "shallow-checkout"));
+                string deep = MakeCheckout(Path.Combine(roots, "a", "b", "c", "d", "e", "deep-checkout"));
+                string hidden = MakeCheckout(Path.Combine(roots, "a", "node_modules", "ignored-checkout"));
+
+                DiscoveryLimits limits = new DiscoveryLimits();
+                limits.MaximumDirectoryDepth = 3;
+                DateTime far = DateTime.UtcNow.AddMinutes(5);
+                List<CheckoutCandidate> found = Discovery.SearchForCheckouts(
+                    new[] { roots, Path.Combine(sandbox, "does-not-exist") }, limits, null, far);
+
+                bool sawShallow = false, sawDeep = false, sawHidden = false;
+                foreach (CheckoutCandidate candidate in found)
+                {
+                    if (candidate.WindowsPath == shallow) { sawShallow = true; }
+                    if (candidate.WindowsPath == deep) { sawDeep = true; }
+                    if (candidate.WindowsPath == hidden) { sawHidden = true; }
+                }
+                Check("a checkout within the depth limit is found", sawShallow);
+                Check("a checkout beyond the depth limit is not", !sawDeep);
+                Check("node_modules is never descended into", !sawHidden);
+                Check("an unreadable or missing root does not abort the search", sawShallow);
+
+                limits.MaximumDirectoriesVisited = 1;
+                List<CheckoutCandidate> capped = Discovery.SearchForCheckouts(
+                    new[] { roots }, limits, null, far);
+                Check("the number of directories examined is capped", capped.Count <= 1);
+
+                limits = new DiscoveryLimits();
+                DiscoveryCancel cancelled = new DiscoveryCancel();
+                cancelled.Cancel();
+                Check("a cancelled search stops immediately",
+                    Discovery.SearchForCheckouts(new[] { roots }, limits, cancelled, far).Count == 0);
+                Check("an elapsed deadline stops the search",
+                    Discovery.SearchForCheckouts(new[] { roots }, limits, null,
+                        DateTime.UtcNow.AddSeconds(-1)).Count == 0);
+
+                // The checkout-location contract is unchanged: WSL must be able
+                // to reach it as /mnt/<drive>.
+                Configuration saved = new Configuration { CheckoutWindowsPath = @"\\server\share\omobench" };
+                List<CheckoutCandidate> reachable = Discovery.FindCheckouts(
+                    saved, exe, new DiscoveryLimits(), null, far);
+                foreach (CheckoutCandidate candidate in reachable)
+                {
+                    Check("every candidate is reachable from WSL: " + candidate.WindowsPath,
+                        !string.IsNullOrEmpty(candidate.WslPath)
+                        && candidate.WslPath.StartsWith("/mnt/", StringComparison.Ordinal));
+                }
+            }
+            finally
+            {
+                Discard(sandbox);
+            }
+        }
+
+        // -- finding the Python environment -------------------------------------
+
+        private static void InterpreterDiscoveryTests()
+        {
+            Section("Discovery: finding the Python environment");
+
+            Check("an absolute Linux interpreter is plausible",
+                Discovery.IsPlausibleLinuxInterpreter("/home/sam/.venvs/omobench-runner/bin/python"));
+            Check("a relative path is refused", !Discovery.IsPlausibleLinuxInterpreter("python3"));
+            Check("an empty value is refused", !Discovery.IsPlausibleLinuxInterpreter(""));
+
+            // A Windows virtual environment reached through /mnt is not the
+            // Linux runner environment, however OmoBench-looking its path.
+            Check("a Windows interpreter is refused",
+                !Discovery.IsPlausibleLinuxInterpreter("/mnt/c/Code/omobench/.venv/Scripts/python.exe"));
+            Check("a Windows interpreter is refused even without the extension",
+                !Discovery.IsPlausibleLinuxInterpreter("/mnt/c/Code/omobench/.venv/Scripts/python"));
+            Check("any .exe is refused",
+                !Discovery.IsPlausibleLinuxInterpreter("/mnt/c/Python312/python.exe"));
+
+            DiscoveryLimits limits = new DiscoveryLimits();
+            List<InterpreterCandidate> candidates = Discovery.BuildInterpreterCandidates(
+                "/home/linuxuser/.venvs/saved-env/bin/python",
+                "/home/linuxuser",
+                new[]
+                {
+                    "/home/linuxuser/.venvs/omobench/bin/python",
+                    "/home/linuxuser/.venvs/omobench-runner/bin/python",
+                },
+                new[] { "/mnt/c/Code/omobench" },
+                "/usr/bin/python3",
+                limits);
+
+            Check("the saved interpreter is tried first",
+                candidates.Count > 0 && candidates[0].WslPath == "/home/linuxuser/.venvs/saved-env/bin/python");
+            Check("the conventional environment is included",
+                Contains(candidates, "/home/linuxuser/.venvs/omobench-runner/bin/python"));
+            Check("other environments under the home directory are included",
+                Contains(candidates, "/home/linuxuser/.venvs/omobench/bin/python"));
+            Check("a Linux environment inside the checkout is included",
+                Contains(candidates, "/mnt/c/Code/omobench/.venv/bin/python"));
+            Check("the interpreter on PATH is included",
+                Contains(candidates, "/usr/bin/python3"));
+
+            // The identity point: a virtual environment is named by its own
+            // bin/python. Resolving that symlink would make every environment
+            // look like /usr/bin/python3 and pick the wrong one.
+            Check("virtual environments keep their own interpreter path, not the system one",
+                Contains(candidates, "/home/linuxuser/.venvs/omobench/bin/python")
+                && Contains(candidates, "/home/linuxuser/.venvs/omobench-runner/bin/python")
+                && candidates[0].WslPath != "/usr/bin/python3");
+
+            int duplicates = 0;
+            foreach (InterpreterCandidate candidate in candidates)
+            {
+                if (candidate.WslPath == "/usr/bin/python3") { duplicates++; }
+            }
+            Check("candidates are de-duplicated", duplicates == 1);
+
+            List<InterpreterCandidate> withWindows = Discovery.BuildInterpreterCandidates(
+                "/mnt/c/Code/omobench/.venv/Scripts/python.exe", "/home/linuxuser",
+                null, null, null, limits);
+            Check("a saved Windows interpreter is dropped rather than offered",
+                !Contains(withWindows, "/mnt/c/Code/omobench/.venv/Scripts/python.exe"));
+
+            limits.MaximumInterpreters = 2;
+            List<InterpreterCandidate> capped = Discovery.BuildInterpreterCandidates(
+                "/home/linuxuser/.venvs/a/bin/python", "/home/linuxuser",
+                new[] { "/home/linuxuser/.venvs/b/bin/python", "/home/linuxuser/.venvs/c/bin/python" },
+                null, "/usr/bin/python3", limits);
+            Check("the number of interpreters probed is capped", capped.Count == 2);
+
+            // No shell, in any of the programs discovery runs.
+            Check("the home directory is read without a shell",
+                Discovery.BuildHomeProgram()[0] == "printenv");
+            Check("directory listings use ls directly",
+                Discovery.BuildListProgram("/home/x/.venvs")[0] == "ls");
+            string arguments = Wsl.BuildRunArguments(
+                "Ubuntu", null, Discovery.BuildListProgram("/home/sam/my envs"));
+            Check("a listing path with spaces is quoted, not split",
+                arguments.Contains("\"/home/sam/my envs\""));
+            Check("discovery never builds a shell command",
+                !arguments.Contains("bash") && !arguments.Contains("sh -c")
+                && arguments.Contains(" --exec "));
+        }
+
+        private static bool Contains(List<InterpreterCandidate> candidates, string path)
+        {
+            foreach (InterpreterCandidate candidate in candidates)
+            {
+                if (candidate.WslPath == path) { return true; }
+            }
+            return false;
+        }
+
+        // -- the whole search, against a stand-in distribution -------------------
+
+        /// <summary>
+        /// A distribution that answers the handful of questions discovery
+        /// asks. No WSL, no panel, no benchmark.
+        /// </summary>
+        private sealed class FakeWsl
+        {
+            public readonly List<string> Commands = new List<string>();
+            public string Home = "/home/linuxuser";
+            public string PathPython = "/usr/bin/python3";
+            public readonly Dictionary<string, string[]> Listings = new Dictionary<string, string[]>();
+            public readonly Dictionary<string, string> Probes = new Dictionary<string, string>();
+            public bool HomeUnavailable;
+            public bool ProbesTimeOut;
+
+            public ProcessResult Run(string arguments, int timeout, DiscoveryCancel cancel)
+            {
+                Commands.Add(arguments);
+                if (cancel != null && cancel.IsCancelled)
+                {
+                    return new ProcessResult { ExitCode = -1, TimedOut = true };
+                }
+                if (arguments.Contains(" printenv HOME"))
+                {
+                    return HomeUnavailable
+                        ? new ProcessResult { ExitCode = 1, StandardError = "distribution not running" }
+                        : Ok(Home);
+                }
+                if (arguments.Contains(" which python3"))
+                {
+                    return PathPython == null ? new ProcessResult { ExitCode = 1 } : Ok(PathPython);
+                }
+                if (arguments.Contains(" ls -1 "))
+                {
+                    foreach (KeyValuePair<string, string[]> entry in Listings)
+                    {
+                        if (arguments.Contains(entry.Key))
+                        {
+                            return Ok(string.Join("\n", entry.Value));
+                        }
+                    }
+                    return new ProcessResult { ExitCode = 2, StandardError = "No such file or directory" };
+                }
+                if (arguments.Contains("OMOBENCH_PROBE"))
+                {
+                    if (ProbesTimeOut)
+                    {
+                        return new ProcessResult { ExitCode = -1, TimedOut = true };
+                    }
+                    string best = null;
+                    foreach (string interpreter in Probes.Keys)
+                    {
+                        if (arguments.Contains(interpreter)
+                            && (best == null || interpreter.Length > best.Length))
+                        {
+                            best = interpreter;
+                        }
+                    }
+                    if (best == null)
+                    {
+                        return new ProcessResult
+                        {
+                            ExitCode = 1,
+                            StandardError = "No such file or directory",
+                        };
+                    }
+                    return Ok(Probes[best]);
+                }
+                return new ProcessResult { ExitCode = 127 };
+            }
+
+            private static ProcessResult Ok(string output)
+            {
+                return new ProcessResult { ExitCode = 0, StandardOutput = output + "\n" };
+            }
+        }
+
+        /// <summary>
+        /// The rejection for one interpreter. Looked up rather than indexed:
+        /// every interpreter that is tried and fails is reported, so the list
+        /// also holds uninteresting ones such as the system python.
+        /// </summary>
+        private static InstallationCandidate RejectionFor(DiscoveryReport report, string interpreter)
+        {
+            foreach (InstallationCandidate rejected in report.Rejected)
+            {
+                if (rejected.PythonWslPath == interpreter) { return rejected; }
+            }
+            return null;
+        }
+
+        private static string ProbeAnswer(string module, string pinned, string runner, string executable)
+        {
+            return "OMOBENCH_PROBE {\"module\": \"" + module + "\", \"pinned\": \"" + pinned
+                + "\", \"runner\": " + (runner == null ? "null" : "\"" + runner + "\"")
+                + ", \"executable\": \"" + executable + "\"}";
+        }
+
+        private static void DiscoveryOutcomeTests()
+        {
+            Section("Discovery: validated installations");
+
+            Func<string, int, DiscoveryCancel, ProcessResult> savedRunner = Discovery.WslRunner;
+            Func<List<WslDistribution>> savedLister = Discovery.DistributionLister;
+            Func<bool> savedAvailable = Discovery.WslAvailable;
+            Func<List<string>> savedRoots = Discovery.SearchRootProvider;
+            string sandbox = Sandbox();
+
+            try
+            {
+                // Search the fixture tree instead of this machine's real
+                // project folders, so the test is about the rules rather than
+                // about whatever happens to be installed here.
+                Discovery.SearchRootProvider = () => new List<string> { sandbox };
+
+                string checkout = MakeCheckout(Path.Combine(sandbox, "My Projects", "omobench"));
+                string exe = Path.Combine(checkout, "windows", "companion", "build", "OmoBenchCompanion.exe");
+                Directory.CreateDirectory(Path.GetDirectoryName(exe));
+                string checkoutWsl;
+                CommandLine.TryToWslPath(checkout, out checkoutWsl);
+
+                Discovery.WslAvailable = () => true;
+                Discovery.DistributionLister = () => new List<WslDistribution>
+                {
+                    new WslDistribution { Name = "Ubuntu", Version = 2, IsDefault = true },
+                };
+
+                // 1. Exactly one validated installation.
+                FakeWsl one = new FakeWsl();
+                one.Listings["/home/linuxuser/.venvs"] = new[] { "omobench-runner" };
+                one.Probes["/home/linuxuser/.venvs/omobench-runner/bin/python"] =
+                    ProbeAnswer(checkoutWsl + "/cli/src/omobench/cli.py", "0.7.3", "0.7.3",
+                        "/home/linuxuser/.venvs/omobench-runner/bin/python");
+                Discovery.WslRunner = one.Run;
+                DiscoveryReport single = Discovery.Run(new Configuration(), exe, new DiscoveryLimits(), null, null);
+                Check("one validated installation is found",
+                    single.Ready.Count == 1);
+                Check("it names the distribution, checkout and interpreter",
+                    single.Ready.Count == 1
+                    && single.Ready[0].Distribution == "Ubuntu"
+                    && single.Ready[0].CheckoutWindowsPath == checkout
+                    && single.Ready[0].PythonWslPath == "/home/linuxuser/.venvs/omobench-runner/bin/python");
+                Check("the Linux home directory is asked for, not assumed from the Windows user",
+                    one.Commands.Exists(c => c.Contains("printenv HOME")));
+
+                // 2. Several validated installations, offered for selection.
+                FakeWsl several = new FakeWsl();
+                string second = MakeCheckout(Path.Combine(sandbox, "Code", "omobench"));
+                string secondWsl;
+                CommandLine.TryToWslPath(second, out secondWsl);
+                several.Listings["/home/linuxuser/.venvs"] = new[] { "omobench", "omobench-runner" };
+                several.Probes["/home/linuxuser/.venvs/omobench-runner/bin/python"] =
+                    ProbeAnswer(checkoutWsl + "/cli/src/omobench/cli.py", "0.7.3", "0.7.3", "x");
+                several.Probes["/home/linuxuser/.venvs/omobench/bin/python"] =
+                    ProbeAnswer(secondWsl + "/cli/src/omobench/cli.py", "0.7.3", "0.7.3", "y");
+                Discovery.WslRunner = several.Run;
+                DiscoveryReport many = Discovery.Run(new Configuration(), exe, new DiscoveryLimits(), null, null);
+                Check("both validated installations are offered", many.Ready.Count == 2);
+                Check("each one pairs its own checkout with its own interpreter",
+                    many.Ready.Count == 2
+                    && many.Ready[0].CheckoutWindowsPath != many.Ready[1].CheckoutWindowsPath
+                    && many.Ready[0].PythonWslPath != many.Ready[1].PythonWslPath);
+                Check("a candidate reads as one line a person can choose between",
+                    many.Ready[0].ToString().Contains("Ubuntu")
+                    && many.Ready[0].ToString().Contains(many.Ready[0].CheckoutWindowsPath));
+
+                // 3. An interpreter that imports a different checkout.
+                FakeWsl elsewhere = new FakeWsl();
+                elsewhere.Listings["/home/linuxuser/.venvs"] = new[] { "omobench-runner" };
+                elsewhere.Probes["/home/linuxuser/.venvs/omobench-runner/bin/python"] =
+                    ProbeAnswer("/home/linuxuser/some-older-copy/cli/src/omobench/cli.py", "0.7.3", "0.7.3", "z");
+                Discovery.WslRunner = elsewhere.Run;
+                DiscoveryReport other = Discovery.Run(new Configuration(), exe, new DiscoveryLimits(), null, null);
+                Check("an interpreter importing another checkout is not accepted",
+                    other.Ready.Count == 0 && other.Rejected.Count >= 1);
+                Check("both locations are shown, so the mismatch is actionable",
+                    other.Rejected.Count >= 1
+                    && other.Rejected[0].Detail != null
+                    && other.Rejected[0].Detail.Contains("some-older-copy")
+                    && other.Rejected[0].Detail.Contains(checkoutWsl));
+                Check("the explanation names what was found and what is missing",
+                    other.Explain().Contains("Checkouts found")
+                    && other.Explain().Contains("different checkout"));
+
+                // 4. Missing and wrong GuideLLM.
+                FakeWsl noRunner = new FakeWsl();
+                noRunner.Listings["/home/linuxuser/.venvs"] = new[] { "omobench-runner" };
+                noRunner.Probes["/home/linuxuser/.venvs/omobench-runner/bin/python"] =
+                    ProbeAnswer(checkoutWsl + "/cli/src/omobench/cli.py", "0.7.3", null, "z");
+                Discovery.WslRunner = noRunner.Run;
+                DiscoveryReport missing = Discovery.Run(new Configuration(), exe, new DiscoveryLimits(), null, null);
+                InstallationCandidate noRunnerEntry = RejectionFor(
+                    missing, "/home/linuxuser/.venvs/omobench-runner/bin/python");
+                Check("a missing GuideLLM runner is not ready",
+                    missing.Ready.Count == 0 && noRunnerEntry != null);
+                Check("and says the runner is not installed",
+                    noRunnerEntry != null && noRunnerEntry.Summary.Contains("not installed"));
+
+                FakeWsl wrongRunner = new FakeWsl();
+                wrongRunner.Listings["/home/linuxuser/.venvs"] = new[] { "omobench-runner" };
+                wrongRunner.Probes["/home/linuxuser/.venvs/omobench-runner/bin/python"] =
+                    ProbeAnswer(checkoutWsl + "/cli/src/omobench/cli.py", "0.7.3", "0.8.0", "z");
+                Discovery.WslRunner = wrongRunner.Run;
+                DiscoveryReport wrong = Discovery.Run(new Configuration(), exe, new DiscoveryLimits(), null, null);
+                InstallationCandidate wrongEntry = RejectionFor(
+                    wrong, "/home/linuxuser/.venvs/omobench-runner/bin/python");
+                Check("a different GuideLLM version is not ready",
+                    wrong.Ready.Count == 0 && wrongEntry != null);
+                Check("and both versions are named",
+                    wrongEntry != null && wrongEntry.Summary.Contains("0.8.0")
+                    && wrongEntry.Summary.Contains("0.7.3"));
+
+                // 5. A stale saved checkout and a stale saved interpreter.
+                FakeWsl stale = new FakeWsl();
+                stale.Listings["/home/linuxuser/.venvs"] = new[] { "omobench-runner" };
+                stale.Probes["/home/linuxuser/.venvs/omobench-runner/bin/python"] =
+                    ProbeAnswer(checkoutWsl + "/cli/src/omobench/cli.py", "0.7.3", "0.7.3", "z");
+                Discovery.WslRunner = stale.Run;
+                Configuration staleSaved = new Configuration
+                {
+                    Distribution = "Ubuntu",
+                    CheckoutWindowsPath = Path.Combine(sandbox, "moved-away"),
+                    PythonWslPath = "/home/linuxuser/.venvs/deleted-env/bin/python",
+                };
+                DiscoveryReport recovered = Discovery.Run(staleSaved, exe, new DiscoveryLimits(), null, null);
+                Check("a saved checkout that no longer exists is skipped, not offered",
+                    !recovered.Checkouts.Exists(c => c.WindowsPath.EndsWith("moved-away", StringComparison.Ordinal)));
+                Check("a saved interpreter that no longer exists does not stop discovery",
+                    recovered.Ready.Count == 1
+                    && recovered.Ready[0].PythonWslPath == "/home/linuxuser/.venvs/omobench-runner/bin/python");
+
+                // 6. Distribution problems are distinguished from missing packages.
+                Discovery.WslAvailable = () => false;
+                DiscoveryReport noWsl = Discovery.Run(new Configuration(), exe, new DiscoveryLimits(), null, null);
+                Check("a machine without WSL is reported as such",
+                    noWsl.Ready.Count == 0 && noWsl.Explain().Contains("wsl.exe"));
+
+                Discovery.WslAvailable = () => true;
+                Discovery.DistributionLister = () => new List<WslDistribution>
+                {
+                    new WslDistribution { Name = "Legacy", Version = 1, IsDefault = true },
+                };
+                DiscoveryReport onlyWsl1 = Discovery.Run(new Configuration(), exe, new DiscoveryLimits(), null, null);
+                Check("a WSL1-only machine is told to convert, not that packages are missing",
+                    onlyWsl1.Ready.Count == 0 && onlyWsl1.Explain().Contains("WSL2"));
+
+                Discovery.DistributionLister = () => new List<WslDistribution>
+                {
+                    new WslDistribution { Name = "Ubuntu", Version = 2, IsDefault = true },
+                };
+                FakeWsl stopped = new FakeWsl { HomeUnavailable = true };
+                Discovery.WslRunner = stopped.Run;
+                DiscoveryReport unavailable = Discovery.Run(new Configuration(), exe, new DiscoveryLimits(), null, null);
+                Check("a distribution that cannot answer is distinguished from one missing OmoBench",
+                    unavailable.Ready.Count == 0
+                    && unavailable.Explain().Contains("home directory"));
+
+                FakeWsl slow = new FakeWsl { ProbesTimeOut = true };
+                slow.Listings["/home/linuxuser/.venvs"] = new[] { "omobench-runner" };
+                Discovery.WslRunner = slow.Run;
+                DiscoveryReport timedOutProbe = Discovery.Run(
+                    new Configuration(), exe, new DiscoveryLimits(), null, null);
+                Check("a probe that times out is not read as 'not installed'",
+                    timedOutProbe.Ready.Count == 0
+                    && timedOutProbe.Rejected.Count >= 1
+                    && timedOutProbe.Rejected[0].Summary.Contains("timed out"));
+
+                // 7. Overall deadline and cancellation.
+                Discovery.WslRunner = one.Run;
+                DiscoveryLimits instant = new DiscoveryLimits();
+                instant.OverallTimeoutMilliseconds = 0;
+                DiscoveryReport expired = Discovery.Run(new Configuration(), exe, instant, null, null);
+                Check("an elapsed overall deadline is reported", expired.TimedOut);
+
+                DiscoveryCancel cancel = new DiscoveryCancel();
+                cancel.Cancel();
+                DiscoveryReport cancelled = Discovery.Run(
+                    new Configuration(), exe, new DiscoveryLimits(), cancel, null);
+                Check("a cancelled search reports itself cancelled", cancelled.Cancelled);
+                Check("and ran no probes", !cancelled.Explain().Contains("Why none"));
+
+                // 8. Discovery changes nothing on the machine.
+                bool configurationBefore = File.Exists(Configuration.FilePath);
+                string registrationBefore = ProtocolRegistration.RegisteredCommand();
+                Discovery.WslRunner = one.Run;
+                Discovery.Run(new Configuration(), exe, new DiscoveryLimits(), null, null);
+                Check("discovery writes no configuration file",
+                    File.Exists(Configuration.FilePath) == configurationBefore);
+                Check("discovery creates no protocol registration",
+                    string.Equals(ProtocolRegistration.RegisteredCommand() ?? "",
+                        registrationBefore ?? "", StringComparison.Ordinal));
+            }
+            finally
+            {
+                Discovery.WslRunner = savedRunner;
+                Discovery.DistributionLister = savedLister;
+                Discovery.WslAvailable = savedAvailable;
+                Discovery.SearchRootProvider = savedRoots;
+                Discard(sandbox);
+            }
         }
 
         // -- protocol registration ---------------------------------------------

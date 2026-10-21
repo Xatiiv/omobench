@@ -50,24 +50,72 @@ The `build\` folder is ignored by Git; no binary is committed.
 ## One-time setup (graphical)
 
 1. Double-click `OmoBenchCompanion.exe`. With no configuration saved yet it
-   opens **Setup** directly.
-2. **WSL distribution** — the list is read from your machine. The companion
-   checks the one you pick is WSL **2** and says how to convert it if not.
-3. **OmoBench checkout** — browse to the folder containing `cli\` and
-   `benchmarks\`. It must be on a local drive, because WSL reaches it as
-   `/mnt/<drive>/…`; a network share is refused rather than silently
-   mistranslated.
-4. **Python interpreter** — the absolute path *inside WSL* of the environment
-   that already has OmoBench installed, for example
-   `/home/you/.venvs/omobench-runner/bin/python`.
-5. **Check this environment** runs that interpreter and verifies two things
-   that matter: that it imports OmoBench **from the checkout you selected**
-   (not from a different copy installed elsewhere) and that the pinned
-   GuideLLM version is installed in the same environment.
-6. **Save and register omobench://** stores the configuration and registers
+   opens **Setup** directly and immediately starts looking for your
+   installation — **“Looking for your OmoBench installation…”**, with a
+   **Cancel** next to it.
+2. When it finds one validated installation it fills in the distribution, the
+   checkout and the interpreter, and says **“OmoBench is ready.”** There is
+   nothing to type.
+3. If it finds several, they are listed with their distribution and checkout
+   location so you can pick the one you meant.
+4. If it finds none, it says what it did find and what was missing — which
+   checkouts it saw, which environments it tried, and why each was rejected.
+5. **Save and register omobench://** stores the configuration and registers
    the link handler for your user account.
 
+**Searching never changes anything.** It reads directories and runs short
+read-only probes. It writes no configuration, creates no registry entry, and
+installs, upgrades or retargets nothing. Saving remains the single explicit
+action in step 5.
+
+Use **Find automatically** to search again at any time — after installing the
+runner, for example. **Advanced settings** keeps every path editable by hand,
+with **Browse…** for the checkout, for the machines where the search comes up
+short. A saved configuration that still works is left alone: the companion
+prefers it and does not go looking for something else behind your back.
+
 No terminal commands are needed for setup or for launching.
+
+### What it looks at, and what it will not
+
+Checkouts, in this order: the one already saved, then the directories above
+the companion executable itself (a build lives in
+`windows\companion\build\`, so this finds the checkout it was built from),
+then a bounded search of your own project folders under your user profile.
+
+A folder counts as a checkout only if it actually contains
+`cli\src\omobench\cli.py` and `benchmarks\profiles\*.yaml`. A folder merely
+*named* "omobench" — holding a download or an archive, say — is not one.
+
+The search is deliberately small: at most three levels below each starting
+folder, a few thousand directories, eight checkouts, and an overall time
+limit, after which it stops and says so. It never scans whole drives, never
+descends into `node_modules`, `.git`, `results`, `.omobench-runs`, model
+caches or virtual-environment internals, skips folders it cannot read instead
+of failing, and does not follow junctions or symbolic links, so a link
+pointing back up cannot send it round in circles.
+
+Python environments, inside the distribution you selected: the saved
+interpreter, `~/.venvs/omobench-runner/bin/python`, anything else directly
+under `~/.venvs`, `~/venvs` or `~/.virtualenvs`, Linux environments belonging
+to a candidate checkout, and finally the `python3` on that distribution's
+`PATH`. The home directory and user name are read *from the distribution* —
+your Linux user name often differs from your Windows one, and assuming they
+match finds nothing.
+
+A virtual environment is identified by its own `bin/python`, which is never
+resolved to the system interpreter underneath it: doing that would make every
+environment look alike and pick the wrong one. A Windows interpreter reached
+through `/mnt` (`.venv\Scripts\python.exe`) is refused outright — it cannot
+run the benchmark.
+
+Each environment is then checked exactly as **Check this environment** always
+did: it must import OmoBench **from that checkout** and have the pinned
+GuideLLM version installed alongside it. The check reads package metadata
+only; it does not run `guidellm` or import its benchmarking stack. An
+environment that works for a *different* checkout is never counted as
+validating the one you selected — both locations are shown instead, so you can
+see which copy it is really using.
 
 ## Trying it: three different things, in three different places
 
@@ -205,7 +253,10 @@ writes its outcome to the diagnostic log and reports it as an exit code
 | Nothing happens when you click the button | The handler is not registered on this PC, or your browser suppressed it. Open the companion and use **Setup → Save and register**. Windows may ask which app to use the first time. |
 | "Another OmoBench panel is already running for this checkout" | The one-panel-per-checkout lock is doing its job. Use the panel that is already running, or stop it, then click again. |
 | "Port … is already in use" | Something else holds every port in the probed range. Close it, or choose a different port in Setup. |
-| "That interpreter imports OmoBench from a different checkout" | The environment has OmoBench installed from somewhere else. Install it from the checkout you selected, or select the matching interpreter. |
+| "That interpreter imports OmoBench from a different checkout" | The environment has OmoBench installed from somewhere else. Both paths are shown so you can tell which copy it uses. Install it from the checkout you selected, or select the matching interpreter — the companion will not retarget the install for you. |
+| "No complete OmoBench installation was found" | The result box lists the checkouts seen, the environments tried, and why each failed. If your checkout is somewhere unusual, open **Advanced settings** and use **Browse…**. |
+| "The search ran out of time before checking everything" | The bounded search hit its time limit, usually on a machine with very many project folders. Use **Advanced settings** to enter the paths directly, or start the companion from inside the checkout so it is found without searching. |
+| Setup finds nothing but `omobench doctor` works in WSL | The environment probably lives outside the places searched (`~/.venvs`, `~/venvs`, `~/.virtualenvs`, the checkout, `PATH`). Enter its interpreter path under **Advanced settings**. |
 | "The pinned GuideLLM runner is not installed" | The panel would open but benchmarks could not run. Install the runner extra into that environment. |
 | "The panel did not report itself ready" | A slow first start (cold Python imports) or a failure inside WSL. The diagnostic log has the panel's own output, with tokens redacted. |
 | "The panel could not be confirmed stopped" | The panel did not go when asked, and the companion would not widen its aim to force it. It still owns the panel: press **Stop** again. The log says which step could not be confirmed. |
