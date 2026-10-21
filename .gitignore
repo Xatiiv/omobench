@@ -47,3 +47,6 @@ next-env.d.ts
 
 # Windows companion build output (built from windows/companion/src)
 /windows/companion/build/
+
+# Windows installer build output (built from windows/installer/src)
+/windows/installer/build/

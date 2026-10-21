@@ -23,11 +23,12 @@ first-class, publishable OmoBench results, provided the model is in the
 - **Already run your own model server?** Open `/advanced` in the same panel, or
   see the [Browser control guide](docs/browser-control.md) and
   [CPU demo walkthrough](docs/local-demo.md) for that workflow.
-- **On Windows, prefer not to use a terminal?** Build the
-  [Windows companion](docs/windows-companion.md) once and let it find your setup:
-  it looks for your checkout and your WSL Python environment itself, so there are
-  no paths to type, and afterwards the panel opens from its own window or from an
-  `omobench://open` link.
+- **On Windows, prefer not to use a terminal?** The
+  [Windows installer](docs/windows-installer.md) installs OmoBench, finds or
+  prepares a benchmark environment, and opens the panel — no commands, no
+  repository to clone, no Python paths to find. Afterwards the panel opens from
+  the Start menu or an `omobench://open` link. If you already have a checkout,
+  the [companion](docs/windows-companion.md) finds it and uses it as-is.
 - **Use terminal commands directly:** [CLI workflow](docs/quickstart.md#run-directly-from-the-cli).
 - **Develop the comparison website:** [Website development](#develop-the-comparison-website).
 

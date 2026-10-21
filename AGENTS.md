@@ -67,6 +67,7 @@ Keep localhost/token/origin protections and the one-panel-per-checkout lock.
 | `results/` | Submitted evidence bundles |
 | `app/` | Results website |
 | `windows/companion/` | Windows companion that opens the existing panel from the website's `omobench://` link; see [windows-companion.md](docs/windows-companion.md) |
+| `windows/installer/` | Downloadable Windows installer that installs the companion and prepares an environment; see [windows-installer.md](docs/windows-installer.md) |
 | `docs/` | Contributor and submission documentation |
 
 ## Safe change workflow

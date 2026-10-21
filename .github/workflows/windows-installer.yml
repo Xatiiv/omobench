@@ -1,0 +1,145 @@
+name: Windows installer
+
+# Builds the downloadable Windows installer and, separately, publishes it.
+#
+# The two are deliberately different events. Every pull request builds the
+# installer and attaches it as a CI artifact, so a reviewer can download and
+# run exactly what the branch produces. Publishing a public release happens
+# only from a tag or an explicit manual run on main -- never from an ordinary
+# pull request, which can come from anyone.
+
+on:
+  pull_request:
+    paths:
+      - "windows/**"
+      - ".github/workflows/windows-installer.yml"
+  push:
+    branches: [main]
+    paths:
+      - "windows/**"
+      - ".github/workflows/windows-installer.yml"
+    tags:
+      - "windows-v*"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish a GitHub Release from this build"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.build.outputs.version }}
+      revision: ${{ steps.build.outputs.revision }}
+      sha256: ${{ steps.build.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The harness runs against the production sources, not a copy: the test
+      # build links the same files the shipped companion is compiled from.
+      - name: Run the companion test harness
+        shell: pwsh
+        run: ./windows/companion/build.ps1 -Test
+
+      - name: Build the installer and run its tests
+        id: build
+        shell: pwsh
+        run: |
+          ./windows/installer/build.ps1 -Test -Revision "${{ github.sha }}"
+          $metadata = Get-Content ./windows/installer/build/version.json | ConvertFrom-Json
+          "version=$($metadata.version)"   >> $env:GITHUB_OUTPUT
+          "revision=$($metadata.revision)" >> $env:GITHUB_OUTPUT
+          "sha256=$($metadata.installer_sha256)" >> $env:GITHUB_OUTPUT
+          Write-Host "::notice::OmoBenchSetup.exe $($metadata.version) ($($metadata.revision)) sha256=$($metadata.installer_sha256)"
+          if (-not $metadata.signed) {
+            Write-Host "::warning::This installer is not code-signed. Windows will report an unknown publisher."
+          }
+
+      # The installer and the companion inside it must come from the same
+      # revision, or "which version is this?" has two answers.
+      - name: Check the build is pinned to this commit
+        shell: pwsh
+        run: |
+          $metadata = Get-Content ./windows/installer/build/version.json | ConvertFrom-Json
+          if ($metadata.revision -ne "${{ github.sha }}") {
+            throw "Installer revision $($metadata.revision) does not match the commit being built (${{ github.sha }})."
+          }
+
+      - name: Upload the installer as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OmoBenchSetup-${{ steps.build.outputs.version }}-${{ github.sha }}
+          path: |
+            windows/installer/build/OmoBenchSetup.exe
+            windows/installer/build/version.json
+            windows/installer/build/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish release
+    # Only from this repository's own main branch, by tag or deliberate
+    # dispatch. A pull request build never reaches this job.
+    if: >
+      github.event_name == 'workflow_dispatch' && inputs.publish ||
+      startsWith(github.ref, 'refs/tags/windows-v')
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    environment: windows-release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rebuild from the tagged revision
+        shell: pwsh
+        run: ./windows/installer/build.ps1 -Test -Revision "${{ github.sha }}"
+
+      - name: Summarise what is being published
+        shell: pwsh
+        run: |
+          $metadata = Get-Content ./windows/installer/build/version.json | ConvertFrom-Json
+          $signed = if ($metadata.signed) { "signed as $($metadata.signing_identity)" } else { "NOT SIGNED" }
+          @"
+          ## OmoBench for Windows $($metadata.version)
+
+          | | |
+          | --- | --- |
+          | Source revision | ``$($metadata.revision)`` |
+          | SHA-256 | ``$($metadata.installer_sha256)`` |
+          | Code signing | $signed |
+          "@ >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Create the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          name: OmoBench for Windows ${{ needs.build.outputs.version }}
+          tag_name: ${{ github.ref_name }}
+          files: |
+            windows/installer/build/OmoBenchSetup.exe
+            windows/installer/build/version.json
+            windows/installer/build/SHA256SUMS
+          body: |
+            OmoBench for Windows ${{ needs.build.outputs.version }}
+
+            Source revision: `${{ needs.build.outputs.revision }}`
+            SHA-256 of `OmoBenchSetup.exe`: `${{ needs.build.outputs.sha256 }}`
+
+            Verify the download before running it:
+
+                Get-FileHash .\OmoBenchSetup.exe -Algorithm SHA256
+
+            This build is **not code-signed**, so Windows SmartScreen will show
+            an unknown publisher. Compare the checksum above rather than
+            relying on the publisher name.
+
+            Installs for your user account only; no administrator rights are
+            needed. Benchmark evidence, saved settings and your WSL
+            installation are never removed by the uninstaller.
