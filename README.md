@@ -23,6 +23,11 @@ first-class, publishable OmoBench results, provided the model is in the
 - **Already run your own model server?** Open `/advanced` in the same panel, or
   see the [Browser control guide](docs/browser-control.md) and
   [CPU demo walkthrough](docs/local-demo.md) for that workflow.
+- **On Windows, prefer not to use a terminal?** Build the
+  [Windows companion](docs/windows-companion.md) once and let it find your setup:
+  it looks for your checkout and your WSL Python environment itself, so there are
+  no paths to type, and afterwards the panel opens from its own window or from an
+  `omobench://open` link.
 - **Use terminal commands directly:** [CLI workflow](docs/quickstart.md#run-directly-from-the-cli).
 - **Develop the comparison website:** [Website development](#develop-the-comparison-website).
 
@@ -83,6 +88,12 @@ The current runner dependency set includes `uvloop`, which does not install
 under native Windows Python. A Windows `.venv/Scripts/activate` environment
 cannot be used as a WSL environment. Node.js and npm are **not needed** for
 benchmarking through the local panel.
+
+On Windows, the [companion](docs/windows-companion.md) performs this step's
+*selection* for you once the environment exists: it finds the checkout and the
+Linux interpreter that already has OmoBench installed, checks the pair, and
+opens the panel without a terminal. It does not create the environment or
+install anything — the commands above still do that.
 
 ### 2. Start the model server
 
