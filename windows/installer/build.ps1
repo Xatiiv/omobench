@@ -133,7 +133,98 @@ Write-Host "Building the companion payload"
 $companionExe = Join-Path $companionOutput 'OmoBenchCompanion.exe'
 if (-not (Test-Path $companionExe)) { throw "The companion build produced no executable." }
 
-# 2. Stamp the identity in. Generated, never committed.
+# 2. The runtime source archive that the installer carries.
+#
+# An explicit allowlist, derived from what the installed CLI, guided panel,
+# packaging and validation actually read at run time -- not a snapshot of the
+# repository. Everything here was found by following the code:
+#
+#   cli/pyproject.toml, cli/src   the package pip installs, and its web assets
+#   benchmarks/profiles           cli.py and ui_managed.py read profiles here
+#   catalog/models                ui.py reads the eligible-model registry
+#   catalog/downloads             managed_setup.py reads cpu-v1.json
+#   schema/benchmark-run…json     tools/validate_results.py validates against it
+#   tools/validate_results.py     ui_submission.py loads it by path
+#   results/README.md             so the validator's results directory exists
+#
+# Deliberately absent: git history, the website, build output, the installer
+# itself, tests, caches, evidence bundles, model files and local configuration.
+$runtimeAllowList = @(
+    'cli/pyproject.toml',
+    'cli/src',
+    'benchmarks/profiles',
+    'catalog/models',
+    'catalog/downloads',
+    'schema/benchmark-run.schema.json',
+    'tools/validate_results.py',
+    'results/README.md'
+)
+
+$staging = Join-Path $OutputDirectory 'runtime-staging'
+if (Test-Path $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+$payloadRoot = Join-Path $staging 'omobench'
+New-Item -ItemType Directory -Force -Path $payloadRoot | Out-Null
+
+foreach ($relative in $runtimeAllowList) {
+    $source = Join-Path $repository ($relative -replace '/', '\')
+    if (-not (Test-Path $source)) { throw "Runtime source allowlist entry is missing: $relative" }
+    $destination = Join-Path $payloadRoot ($relative -replace '/', '\')
+    $parent = Split-Path -Parent $destination
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    if ((Get-Item $source).PSIsContainer) {
+        Copy-Item -LiteralPath $source -Destination $destination -Recurse -Force
+    } else {
+        Copy-Item -LiteralPath $source -Destination $destination -Force
+    }
+}
+
+# Strip anything that should never travel, even from inside an allowed tree:
+# caches, test suites, and the egg-info a local editable install leaves behind.
+#
+# Note the filtering is done with Where-Object. Get-ChildItem's -Include is
+# silently ignored alongside -LiteralPath, which makes it match everything --
+# an earlier version of this used it and deleted the entire payload.
+foreach ($junk in @('__pycache__', '.pytest_cache', '.mypy_cache', 'tests')) {
+    Get-ChildItem -LiteralPath $payloadRoot -Recurse -Force -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -eq $junk } |
+        ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+}
+Get-ChildItem -LiteralPath $payloadRoot -Recurse -Force -Directory -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -like '*.egg-info' } |
+    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+Get-ChildItem -LiteralPath $payloadRoot -Recurse -Force -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Extension -eq '.pyc' -or $_.Extension -eq '.pyo' } |
+    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+
+$payloadFiles = @(Get-ChildItem -LiteralPath $payloadRoot -Recurse -Force -File)
+if ($payloadFiles.Count -lt 20) {
+    throw ("The runtime source archive would contain only $($payloadFiles.Count) files, which cannot " +
+        "be a working OmoBench. Refusing to build a payload that would fail at install time.")
+}
+Write-Host ("Runtime source payload: {0} files, {1:N0} bytes" -f $payloadFiles.Count,
+    (($payloadFiles | Measure-Object -Sum Length).Sum))
+
+# A release must carry committed source. An archive built from a modified tree
+# would install code that exists nowhere else, under a revision that claims
+# otherwise.
+if (-not $sourceClean) {
+    Write-Warning ("The runtime source archive is being built from a modified working tree. " +
+        "Release builds require a clean checkout; this archive must not be published.")
+}
+
+$runtimeArchive = Join-Path $OutputDirectory 'omobench-runtime-source.tar.gz'
+if (Test-Path $runtimeArchive) { Remove-Item -LiteralPath $runtimeArchive -Force }
+$tar = Join-Path $env:WINDIR 'System32\tar.exe'
+if (-not (Test-Path $tar)) { throw "tar.exe was not found; Windows 10 1803 or later is required to build." }
+& $tar -czf $runtimeArchive -C $staging omobench
+if ($LASTEXITCODE -ne 0) { throw "Could not create the runtime source archive." }
+Remove-Item -LiteralPath $staging -Recurse -Force
+
+$runtimeChecksum = (Get-FileHash -Path $runtimeArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+$runtimeBytes = (Get-Item $runtimeArchive).Length
+Write-Host ("Runtime source archive: {0:N0} bytes, sha256 {1}" -f $runtimeBytes, $runtimeChecksum)
+
+# 3. Stamp the identity in. Generated, never committed.
 $stamp = @"
 // Generated by windows/installer/build.ps1. Do not commit.
 namespace OmoBench.Installer
@@ -146,6 +237,8 @@ namespace OmoBench.Installer
         public const bool Signed = $(if ($signed) { 'true' } else { 'false' });
         public const string SigningIdentity = "$SigningIdentity";
         public const bool SourceClean = $(if ($sourceClean) { 'true' } else { 'false' });
+        public const string RuntimeSourceSha256 = "$runtimeChecksum";
+        public const long RuntimeSourceBytes = $runtimeBytes;
     }
 }
 "@
@@ -178,6 +271,7 @@ $arguments = @(
     '/optimize+',
     '/main:OmoBench.Installer.InstallerProgram',
     "/resource:$companionExe,OmoBenchCompanion.exe",
+    "/resource:$runtimeArchive,OmoBenchRuntimeSource.tar.gz",
     "/out:$setupExe"
 ) + $references + $stampPath +
     ($installerSources | ForEach-Object { $_.FullName }) +
@@ -202,6 +296,8 @@ $metadata = [ordered]@{
     installer_sha256   = $checksum
     installer_bytes    = $setupSize
     companion_sha256   = $companionChecksum
+    runtime_source_sha256 = $runtimeChecksum
+    runtime_source_bytes  = $runtimeBytes
     signed             = $signed
     signing_identity   = $SigningIdentity
     # False when the working tree had uncommitted changes, so the revision
@@ -242,6 +338,8 @@ if ($Test) {
         '/langversion:5',
         '/warnaserror+',
         '/main:OmoBench.Installer.Tests.InstallerTestProgram',
+        "/resource:$companionExe,OmoBenchCompanion.exe",
+        "/resource:$runtimeArchive,OmoBenchRuntimeSource.tar.gz",
         "/out:$testExe"
     ) + $references + $stampPath +
         ($installerSources | ForEach-Object { $_.FullName }) +

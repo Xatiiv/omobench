@@ -25,9 +25,28 @@ namespace OmoBench.Installer
             Application.SetCompatibleTextRenderingDefault(false);
 
             bool uninstall = false, silent = false, help = false;
+            int finalizeFor = 0;
             foreach (string argument in argv)
             {
-                switch ((argument ?? "").ToLowerInvariant())
+                string value = (argument ?? "").ToLowerInvariant();
+                // The process id travels inside the switch, so no argument
+                // here is ever a path or a separate value to be matched up.
+                if (value.StartsWith("/finalize:", StringComparison.Ordinal))
+                {
+                    int parsed;
+                    if (!int.TryParse(value.Substring("/finalize:".Length),
+                            System.Globalization.NumberStyles.Integer,
+                            System.Globalization.CultureInfo.InvariantCulture, out parsed)
+                        || parsed <= 0)
+                    {
+                        Show(silent, "OmoBench setup was given an invalid /finalize value.",
+                            MessageBoxIcon.Warning);
+                        return 2;
+                    }
+                    finalizeFor = parsed;
+                    continue;
+                }
+                switch (value)
                 {
                     case "/uninstall": case "--uninstall": uninstall = true; break;
                     case "/silent": case "--silent": case "/s": silent = true; break;
@@ -57,7 +76,7 @@ namespace OmoBench.Installer
 
             if (uninstall)
             {
-                return RunUninstall(silent);
+                return RunUninstall(silent, finalizeFor);
             }
 
             if (silent)
@@ -69,8 +88,22 @@ namespace OmoBench.Installer
             return 0;
         }
 
-        private static int RunUninstall(bool silent)
+        private static int RunUninstall(bool silent, int finalizeFor)
         {
+            // Second stage: a copy of this program, running from a temporary
+            // directory, finishing the job once the original has exited.
+            if (finalizeFor > 0)
+            {
+                InstallOutcome finished = Installation.FinalizeUninstall(finalizeFor);
+                if (!silent)
+                {
+                    MessageBox.Show(finished.Describe(), "Uninstall OmoBench",
+                        MessageBoxButtons.OK,
+                        finished.Ok ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+                }
+                return finished.Ok ? 0 : 1;
+            }
+
             if (!silent)
             {
                 DialogResult choice = MessageBox.Show(
@@ -83,6 +116,13 @@ namespace OmoBench.Installer
                 {
                     return 1602;   // the conventional "user cancelled" code
                 }
+            }
+
+            // When running from inside the installation, hand the work to a
+            // copy elsewhere so the program folder can be removed completely.
+            if (Installation.TryRelaunchForUninstall(Application.ExecutablePath, silent))
+            {
+                return 0;
             }
 
             InstallOutcome outcome = Installation.Uninstall();

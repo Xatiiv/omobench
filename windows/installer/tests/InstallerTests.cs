@@ -27,6 +27,9 @@ namespace OmoBench.Installer.Tests
             ManagedEnvironmentCommandTests();
             ManagedEnvironmentStageTests();
             ReviewRegressionTests();
+            RuntimePayloadTests();
+            UninstallCompletionTests();
+            DelayedDiscoveryTests();
             BuildIdentityTests();
 
             Console.WriteLine();
@@ -209,13 +212,10 @@ namespace OmoBench.Installer.Tests
 
             string revision = "b81e907dec8398778cce46c225d4abb0695b1f80";
 
-            List<string> download = ManagedEnvironment.BuildDownloadProgram(revision, "/home/sam/a.tar.gz");
-            Check("the source is fetched at the pinned revision",
-                string.Join(" ", download.ToArray()).Contains(revision));
-            Check("it is fetched from the project's own repository",
-                string.Join(" ", download.ToArray()).Contains("codeload.github.com/Xatiiv/omobench"));
-            Check("curl is told to fail on an HTTP error rather than save the error page",
-                download.Contains("--fail"));
+            // The source is no longer fetched at install time; it travels in
+            // the installer and is checked before use.
+            Check("the managed source directory is named by the pinned revision",
+                ManagedEnvironment.SourceDirectory(revision).Contains(revision));
 
             List<string> extract = ManagedEnvironment.BuildExtractProgram("/home/sam/a.tar.gz", "/mnt/c/x");
             Check("the archive is unpacked into the managed directory",
@@ -236,7 +236,7 @@ namespace OmoBench.Installer.Tests
                 install.Contains("--no-input"));
 
             // No shell, anywhere -- the same rule the companion follows.
-            foreach (List<string> program in new[] { download, extract, venv, install })
+            foreach (List<string> program in new[] { extract, venv, install })
             {
                 string arguments = Wsl.BuildRunArguments("Ubuntu", null, program);
                 Check("runs directly with no shell: " + program[0],
@@ -391,14 +391,14 @@ namespace OmoBench.Installer.Tests
                 Check("nothing was installed afterwards",
                     venvFailed.Stages[3].State == StageState.Pending);
 
-                // A failed download is reported with the revision.
-                FakeWsl offline = new FakeWsl { FailOn = "curl" };
-                ManagedEnvironment.WslRunner = offline.Run;
-                PreparationResult offlineResult = ManagedEnvironment.Prepare("Ubuntu", build, null, null);
-                Check("a failed download stops at the fetch stage",
-                    !offlineResult.Ok && offlineResult.Stages[1].State == StageState.Failed);
-                Check("and names the revision it was trying to fetch",
-                    (offlineResult.Detail ?? "").Contains(build.ShortRevision));
+                // A failed unpack of the bundled source is reported there.
+                FakeWsl unpackFails = new FakeWsl { FailOn = "tar" };
+                ManagedEnvironment.WslRunner = unpackFails.Run;
+                PreparationResult unpackResult = ManagedEnvironment.Prepare("Ubuntu", build, null, null);
+                Check("a failed unpack stops at the source stage",
+                    !unpackResult.Ok && unpackResult.Stages[1].State == StageState.Failed);
+                Check("and says the bundled source could not be unpacked",
+                    (unpackResult.Summary ?? "").Contains("could not be unpacked"));
 
                 // Cancellation stops promptly and says nothing more changed.
                 DiscoveryCancel cancel = new DiscoveryCancel();
@@ -483,18 +483,18 @@ namespace OmoBench.Installer.Tests
                 Check("so can the interpreter path inside it",
                     ManagedEnvironment.EnvironmentInterpreter("/home/sam")
                         == "/tmp/omobench-test-env/managed-env/bin/python");
-                Check("and the downloaded archive",
-                    ManagedEnvironment.ArchivePath("/home/sam")
-                        == "/tmp/omobench-test-dl/omobench-source.tar.gz");
+                Check("and where the bundled archive is written",
+                    ManagedEnvironment.ArchiveWindowsPath()
+                        == Path.Combine("/tmp/omobench-test-dl", "omobench-runtime-source.tar.gz"));
 
                 ManagedEnvironment.EnvironmentRootOverride = null;
                 ManagedEnvironment.ArchiveDirectoryOverride = null;
                 Check("without redirection the environment is under the Linux home",
                     ManagedEnvironment.EnvironmentDirectory("/home/sam")
                         == "/home/sam/.local/share/omobench/managed-env");
-                Check("and the archive no longer lands in a fixed home-directory dotfile",
-                    ManagedEnvironment.ArchivePath("/home/sam")
-                        == "/home/sam/.local/share/omobench/omobench-source.tar.gz");
+                Check("and the archive defaults to a temporary Windows location",
+                    ManagedEnvironment.ArchiveWindowsPath().StartsWith(
+                        Path.GetTempPath(), StringComparison.OrdinalIgnoreCase));
             }
             finally
             {
@@ -596,6 +596,234 @@ namespace OmoBench.Installer.Tests
                 ManagedEnvironment.Validator = validator;
                 ManagedEnvironment.SourceRootOverride = sourceRoot;
                 try { Directory.Delete(lateSandbox, true); } catch (Exception) { }
+            }
+        }
+
+        // -- the embedded runtime payload ---------------------------------------
+
+        private static void RuntimePayloadTests()
+        {
+            Section("Embedded runtime source");
+
+            Func<System.IO.Stream> opener = RuntimePayload.Opener;
+            string expected = RuntimePayload.ExpectedSha256;
+            long bytes = RuntimePayload.ExpectedBytes;
+            string sandbox = Path.Combine(Path.GetTempPath(), "omobench-payload-" + Guid.NewGuid().ToString("N"));
+
+            try
+            {
+                string target = Path.Combine(sandbox, "payload.tar.gz");
+                byte[] good = System.Text.Encoding.UTF8.GetBytes("pretend archive contents");
+                string goodHash = RuntimePayload.Sha256(good);
+
+                // The real thing: this build carries an archive and knows its
+                // checksum, so the two must agree.
+                string failure;
+                bool wrote = RuntimePayload.TryWrite(Path.Combine(sandbox, "real.tar.gz"), out failure);
+                Check("this installer carries a verifiable runtime source: " + (failure ?? "ok"), wrote);
+                Check("and the build recorded its checksum",
+                    !string.IsNullOrEmpty(BuildStamp.RuntimeSourceSha256));
+                Check("and its size", BuildStamp.RuntimeSourceBytes > 0);
+
+                // Missing payload.
+                RuntimePayload.Opener = () => null;
+                Check("a missing payload is refused, not treated as empty",
+                    !RuntimePayload.TryWrite(target, out failure)
+                    && failure.Contains("does not carry"));
+
+                // Empty payload.
+                RuntimePayload.Opener = () => new System.IO.MemoryStream(new byte[0]);
+                Check("an empty payload is refused",
+                    !RuntimePayload.TryWrite(target, out failure) && failure.Contains("empty"));
+
+                // Corrupted payload: right length, wrong contents.
+                byte[] corrupted = (byte[])good.Clone();
+                corrupted[0] ^= 0xFF;
+                RuntimePayload.Opener = () => new System.IO.MemoryStream(corrupted);
+                RuntimePayload.ExpectedSha256 = goodHash;
+                RuntimePayload.ExpectedBytes = good.Length;
+                Check("a corrupted payload fails the checksum",
+                    !RuntimePayload.TryWrite(target, out failure) && failure.Contains("checksum"));
+                Check("and nothing was written for something else to unpack",
+                    !File.Exists(target));
+
+                // Truncated payload.
+                RuntimePayload.Opener = () => new System.IO.MemoryStream(good, 0, good.Length - 3);
+                Check("a truncated payload is refused on length",
+                    !RuntimePayload.TryWrite(target, out failure) && failure.Contains("bytes"));
+
+                // The honest one.
+                RuntimePayload.Opener = () => new System.IO.MemoryStream(good);
+                Check("a payload matching the recorded checksum is written",
+                    RuntimePayload.TryWrite(target, out failure) && File.Exists(target));
+
+                // A build with no recorded checksum cannot verify anything.
+                RuntimePayload.ExpectedSha256 = "";
+                Check("a payload with no recorded checksum is refused rather than trusted",
+                    !RuntimePayload.TryWrite(target, out failure) && failure.Contains("cannot be verified"));
+            }
+            finally
+            {
+                RuntimePayload.Opener = opener;
+                RuntimePayload.ExpectedSha256 = expected;
+                RuntimePayload.ExpectedBytes = bytes;
+                try { Directory.Delete(sandbox, true); } catch (Exception) { }
+            }
+
+            // Revision consistency: the companion payload and the runtime
+            // source are stamped by one build, so the managed source directory
+            // is named by the same revision the installer reports.
+            BuildInfo build = BuildInfo.Current();
+            Check("the installer and its runtime payload name one revision",
+                ManagedEnvironment.SourceDirectory(build.Revision).Contains(build.Revision)
+                || string.IsNullOrEmpty(build.Revision));
+            Check("no anonymous download remains in the preparation",
+                !HasMember(typeof(ManagedEnvironment), "BuildDownloadProgram"));
+        }
+
+        private static bool HasMember(Type type, string name)
+        {
+            return type.GetMethod(name, System.Reflection.BindingFlags.Public
+                | System.Reflection.BindingFlags.Static) != null;
+        }
+
+        // -- uninstall completes without elevation or a restart ------------------
+
+        private static void UninstallCompletionTests()
+        {
+            Section("Uninstall completion");
+
+            string savedRoot = InstallPaths.RootOverride;
+            // Ordinary, and the characters a shell would have mangled.
+            string[] roots =
+            {
+                "omobench-plain-",
+                "omo bench spaces-",
+                "omo & bench-",
+                "omo %PATH% bench-",
+                "omo & %TEMP% bench with spaces-",
+            };
+
+            foreach (string prefix in roots)
+            {
+                string root = Path.Combine(Path.GetTempPath(), prefix + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    InstallPaths.RootOverride = root;
+                    Directory.CreateDirectory(InstallPaths.ProgramDirectory);
+                    File.WriteAllText(InstallPaths.CompanionPath, "companion");
+                    File.WriteAllText(InstallPaths.ManifestPath, "{}");
+                    File.WriteAllText(Path.Combine(InstallPaths.ProgramDirectory, "extra & file %X%.txt"), "x");
+
+                    InstallOutcome outcome = Installation.Uninstall();
+                    Check("uninstall completes under " + prefix.TrimEnd('-'), outcome.Ok);
+                    Check("  and the program directory is gone",
+                        !Directory.Exists(InstallPaths.ProgramDirectory));
+                    Check("  without needing a restart or elevation",
+                        !outcome.Describe().Contains("restart")
+                        && !outcome.Describe().Contains("administrator"));
+                }
+                finally
+                {
+                    InstallPaths.RootOverride = savedRoot;
+                    try { Directory.Delete(root, true); } catch (Exception) { }
+                }
+            }
+
+            // The relaunch only ever applies to a program inside the
+            // installation it is removing.
+            Check("an uninstaller running from outside the installation does not relaunch",
+                !Installation.TryRelaunchForUninstall(
+                    Path.Combine(Path.GetTempPath(), "SomewhereElse.exe"), true));
+            Check("and neither does an empty path",
+                !Installation.TryRelaunchForUninstall("", true));
+        }
+
+        // -- a deliberately slow search, cancelled on purpose --------------------
+
+        /// <summary>
+        /// Cancellation and stale-result handling, driven by a fixture that
+        /// controls how long each probe takes.
+        ///
+        /// The timing is the fixture's, not the machine's: a test that waited
+        /// for a real cold search would be slow, flaky, and would prove
+        /// nothing on a fast machine.
+        /// </summary>
+        private static void DelayedDiscoveryTests()
+        {
+            Section("Delayed discovery: cancellation and stale results");
+
+            Func<string, int, DiscoveryCancel, ProcessResult> savedRunner = Discovery.WslRunner;
+            Func<List<WslDistribution>> savedLister = Discovery.DistributionLister;
+            Func<bool> savedAvailable = Discovery.WslAvailable;
+            Func<List<string>> savedRoots = Discovery.SearchRootProvider;
+
+            try
+            {
+                Discovery.WslAvailable = () => true;
+                Discovery.DistributionLister = () => new List<WslDistribution>
+                {
+                    new WslDistribution { Name = "Ubuntu", Version = 2, IsDefault = true },
+                };
+                Discovery.SearchRootProvider = () => new List<string>();
+
+                DiscoveryCancel cancel = new DiscoveryCancel();
+                int probes = 0;
+
+                // Each call takes a controlled 400ms, and honours the token the
+                // way the real runner does.
+                Discovery.WslRunner = (arguments, timeout, token) =>
+                {
+                    probes++;
+                    for (int slice = 0; slice < 8; slice++)
+                    {
+                        if (token != null && token.IsCancelled)
+                        {
+                            return new ProcessResult { ExitCode = -1, TimedOut = true };
+                        }
+                        System.Threading.Thread.Sleep(50);
+                    }
+                    return new ProcessResult { ExitCode = 0, StandardOutput = "/home/sam\n" };
+                };
+
+                // Cancel shortly after starting, from another thread, exactly
+                // as the Stop button does.
+                System.Threading.Thread canceller = new System.Threading.Thread(() =>
+                {
+                    System.Threading.Thread.Sleep(250);
+                    cancel.Cancel();
+                });
+                canceller.IsBackground = true;
+
+                DateTime started = DateTime.UtcNow;
+                canceller.Start();
+                DiscoveryReport report = Discovery.Run(
+                    new Configuration(), null, new DiscoveryLimits(), cancel, null);
+                TimeSpan elapsed = DateTime.UtcNow - started;
+
+                Check("a cancelled search reports itself cancelled", report.Cancelled);
+                Check("it stops promptly rather than running every probe to completion: "
+                    + ((int)elapsed.TotalMilliseconds) + "ms",
+                    elapsed < TimeSpan.FromSeconds(5));
+                Check("and it found nothing to act on", report.Ready.Count == 0);
+
+                // Stale-result protection: the window's own state machine is
+                // what decides, and a result from a superseded search changes
+                // nothing. (The companion harness covers this in depth.)
+                SetupState state = new SetupState();
+                int first = state.BeginSearch();
+                state.CancelSearch();
+                int second = state.BeginSearch();
+                Check("a superseded search's completion is refused",
+                    !state.CompleteSearch(first) && state.SearchRunning);
+                Check("while the current one is still accepted", state.CompleteSearch(second));
+            }
+            finally
+            {
+                Discovery.WslRunner = savedRunner;
+                Discovery.DistributionLister = savedLister;
+                Discovery.WslAvailable = savedAvailable;
+                Discovery.SearchRootProvider = savedRoots;
             }
         }
 

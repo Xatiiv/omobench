@@ -69,27 +69,23 @@ namespace OmoBench.Installer
         /// <summary>Replaced by tests only.</summary>
         internal static Func<Configuration, EnvironmentCheckResult> Validator = EnvironmentCheck.Run;
 
-        public const string SourceArchiveHost = "https://codeload.github.com/Xatiiv/omobench/tar.gz/";
-
-        /// <summary>
-        /// Where a managed source copy lives: under the user's local app data,
-        /// named by the revision, so two installer versions never fight over
-        /// one directory and an older one can simply be deleted.
-        /// </summary>
         /// <summary>
         /// Every destination the preparation writes to is redirectable, so a
         /// test can exercise the real thing against throwaway locations rather
-        /// than the places a person's own installation lives. Redirecting only
-        /// some of them would still write the rest to fixed paths under the
-        /// Linux home directory, which is exactly what makes a "safe" test
-        /// unsafe. All are null in normal use.
+        /// than the places a person's own installation lives. All are null in
+        /// normal use.
         /// </summary>
         internal static string SourceRootOverride = null;
 
         /// <summary>Replaces ~/.local/share/omobench as the environment root.</summary>
         internal static string EnvironmentRootOverride = null;
 
-        /// <summary>Replaces the download's scratch location.</summary>
+        /// <summary>
+        /// Where the embedded archive is written before it is unpacked. A
+        /// Windows directory: the installer writes the file, and WSL reads it
+        /// through /mnt, so nothing has to be created inside the distribution
+        /// before the source exists.
+        /// </summary>
         internal static string ArchiveDirectoryOverride = null;
 
         /// <summary>
@@ -98,6 +94,11 @@ namespace OmoBench.Installer
         /// </summary>
         public const string OwnershipMarkerName = ".omobench-managed";
 
+        /// <summary>
+        /// Where a managed source copy lives: under the user's local app data,
+        /// named by the revision, so two installer versions never fight over
+        /// one directory and an older one can simply be deleted.
+        /// </summary>
         public static string SourceDirectory(string revision)
         {
             string stamp = string.IsNullOrEmpty(revision) ? "unknown" : Safe(revision);
@@ -126,18 +127,21 @@ namespace OmoBench.Installer
             return EnvironmentRoot(home) + "/managed-env";
         }
 
-        /// <summary>Where the downloaded archive is written before unpacking.</summary>
-        public static string ArchivePath(string home)
-        {
-            string directory = string.IsNullOrEmpty(ArchiveDirectoryOverride)
-                ? EnvironmentRoot(home)
-                : ArchiveDirectoryOverride.TrimEnd('/');
-            return directory + "/omobench-source.tar.gz";
-        }
-
         public static string EnvironmentInterpreter(string home)
         {
             return EnvironmentDirectory(home) + "/bin/python";
+        }
+
+        /// <summary>
+        /// Where the embedded archive is written before unpacking, as a
+        /// Windows path.
+        /// </summary>
+        public static string ArchiveWindowsPath()
+        {
+            string directory = string.IsNullOrEmpty(ArchiveDirectoryOverride)
+                ? Path.Combine(Path.GetTempPath(), "omobench-runtime-source")
+                : ArchiveDirectoryOverride;
+            return Path.Combine(directory, "omobench-runtime-source.tar.gz");
         }
 
         private static string Safe(string revision)
@@ -149,17 +153,6 @@ namespace OmoBench.Installer
                 if (clean.Length >= 40) { break; }
             }
             return clean.Length == 0 ? "unknown" : clean.ToString();
-        }
-
-        // -- the programs this runs, all without a shell ----------------------
-
-        public static List<string> BuildDownloadProgram(string revision, string archiveWslPath)
-        {
-            return new List<string>
-            {
-                "curl", "--fail", "--silent", "--show-error", "--location",
-                "--output", archiveWslPath, SourceArchiveHost + Safe(revision),
-            };
         }
 
         public static List<string> BuildExtractProgram(string archiveWslPath, string destinationWslPath)
@@ -214,7 +207,7 @@ namespace OmoBench.Installer
         {
             PreparationResult result = new PreparationResult();
             PreparationStage locate = Add(result, "Locate the Linux environment");
-            PreparationStage fetch = Add(result, "Download the OmoBench source (pinned revision)");
+            PreparationStage fetch = Add(result, "Unpack the bundled OmoBench source (pinned revision)");
             PreparationStage create = Add(result, "Create an isolated Python environment");
             PreparationStage install = Add(result, "Install OmoBench and the pinned benchmark runner");
             PreparationStage verify = Add(result, "Check the finished environment");
@@ -274,43 +267,42 @@ namespace OmoBench.Installer
                 return Fail(result, fetch, "WSL cannot reach " + sourceWindows,
                     "The managed source must be on a local drive.");
             }
-            archiveWsl = ArchivePath(home);
-            Run(distribution, BuildMakeDirectoryProgram(
-                archiveWsl.Substring(0, archiveWsl.LastIndexOf('/'))), 30000, cancel);
-
             if (string.IsNullOrEmpty(build.Revision))
             {
                 return Fail(result, fetch, "This installer does not know which revision it was built from.",
                     "Use a released installer, or set up an existing checkout under Advanced settings.");
             }
 
-            ProcessResult download = Run(distribution, BuildDownloadProgram(build.Revision, archiveWsl), 300000, cancel);
-            if (Stopped(cancel, result, fetch)) { return result; }
-            if (download == null || download.TimedOut || download.ExitCode != 0)
+            // The source travels inside the installer, and is checked against
+            // the checksum recorded when it was built before anything unpacks
+            // it.
+            string archiveWindows = ArchiveWindowsPath();
+            string payloadFailure;
+            if (!RuntimePayload.TryWrite(archiveWindows, out payloadFailure))
             {
-                return Fail(result, fetch, "The source could not be downloaded.",
-                    "Revision " + build.ShortRevision + "\r\n"
-                    + "From " + SourceArchiveHost + build.ShortRevision + "\r\n"
-                    + Describe(download)
-                    + "\r\n\r\nThis is usually one of two things. Either this machine cannot reach the "
-                    + "internet, or that revision is not publicly downloadable -- a 404 is also what a "
-                    + "private repository returns to an anonymous request.\r\n\r\n"
-                    + "If you already have an OmoBench checkout, the companion's Setup window can use "
-                    + "it directly instead.");
+                return Fail(result, fetch, "The bundled OmoBench source could not be used.", payloadFailure);
             }
+            if (Stopped(cancel, result, fetch)) { return result; }
+
+            if (!CommandLine.TryToWslPath(archiveWindows, out archiveWsl))
+            {
+                return Fail(result, fetch, "WSL cannot reach " + archiveWindows,
+                    "The archive must be unpacked from a local drive.");
+            }
+
             ProcessResult extract = Run(distribution,
                 BuildExtractProgram(archiveWsl, sourceWsl), 300000, cancel);
+            TryDelete(archiveWindows);
             if (Stopped(cancel, result, fetch)) { return result; }
             if (extract == null || extract.TimedOut || extract.ExitCode != 0)
             {
-                return Fail(result, fetch, "The downloaded source could not be unpacked.", Describe(extract));
+                return Fail(result, fetch, "The bundled source could not be unpacked.", Describe(extract));
             }
             fetch.State = StageState.Done;
-            fetch.Message = "Revision " + build.ShortRevision + " in " + sourceWindows
+            fetch.Message = "Revision " + build.ShortRevision + " unpacked into " + sourceWindows
                 + (build.SourceClean ? "" :
-                    "\r\n         Note: this installer was built from a modified working tree, so the "
-                    + "source downloaded here is revision " + build.ShortRevision
-                    + ", not the code embedded in the installer.");
+                    "\r\n         Note: this installer was built from a modified working tree, so "
+                    + "this source is not revision " + build.ShortRevision + " as published.");
             Report(progress, result);
 
             // 3. An isolated environment, separate from anything already here.
@@ -338,13 +330,23 @@ namespace OmoBench.Installer
             // 4. Install, pinned.
             install.State = StageState.Running;
             Report(progress, result);
+            // The pinned runner pulls a large dependency set, and this is the
+            // one step that is mostly waiting on a download. Fifteen minutes
+            // was not enough on an ordinary connection -- a first-time install
+            // failed here having already done everything else correctly -- so
+            // the budget matches the work rather than an optimistic guess.
             ProcessResult pip = Run(distribution,
-                BuildInstallProgram(EnvironmentInterpreter(home), sourceWsl), 900000, cancel);
+                BuildInstallProgram(EnvironmentInterpreter(home), sourceWsl), 2700000, cancel);
             if (Stopped(cancel, result, install)) { return result; }
             if (pip == null || pip.TimedOut || pip.ExitCode != 0)
             {
                 return Fail(result, install, "OmoBench could not be installed into the environment.",
-                    Describe(pip));
+                    Describe(pip)
+                    + (pip != null && pip.TimedOut
+                        ? "\r\n\r\nThe benchmark runner's dependencies are a large download. On a slow "
+                          + "or interrupted connection this can run out of time; the work already done "
+                          + "is kept, so trying again resumes from pip's cache rather than starting over."
+                        : ""));
             }
             install.State = StageState.Done;
             install.Message = "Installed from the managed source with the pinned runner";
@@ -427,6 +429,17 @@ namespace OmoBench.Installer
             {
                 return windowsPath + "\r\n\r\n" + error.Message;
             }
+        }
+
+        /// <summary>
+        /// Remove the unpacked archive. Best effort: it is a copy of something
+        /// the installer still carries, so failing to delete it is untidy
+        /// rather than consequential.
+        /// </summary>
+        private static void TryDelete(string path)
+        {
+            try { if (File.Exists(path)) { File.Delete(path); } }
+            catch (Exception) { }
         }
 
         private static PreparationStage Add(PreparationResult result, string name)

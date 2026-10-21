@@ -423,7 +423,13 @@ namespace OmoBench.Installer
 
             if (self != null && InstallPaths.IsInsideProgramDirectory(self))
             {
-                ScheduleSelfDeletion(self, outcome);
+                // Running from inside what is being removed: the caller should
+                // have relaunched a copy elsewhere. Say so rather than
+                // pretending the folder is gone.
+                outcome.Warn("OmoBench has been removed, but its own uninstaller file is still in\r\n    "
+                    + InstallPaths.ProgramDirectory
+                    + "\r\nWindows does not let a running program delete itself. "
+                    + "You can delete that folder whenever you like.");
                 return;
             }
 
@@ -434,67 +440,96 @@ namespace OmoBench.Installer
             }
             catch (Exception error)
             {
-                outcome.Warn("Could not remove " + InstallPaths.ProgramDirectory + ": " + error.Message);
+                // Name what is still there, rather than reporting a clean
+                // removal that did not happen.
+                string[] remaining;
+                try { remaining = Directory.GetFiles(InstallPaths.ProgramDirectory); }
+                catch (Exception) { remaining = new string[0]; }
+                outcome.Warn("Could not completely remove " + InstallPaths.ProgramDirectory
+                    + ": " + error.Message
+                    + (remaining.Length == 0 ? "" :
+                        "\r\nStill present: " + string.Join(", ", remaining)
+                        + "\r\nThese are usually files still open in another program."));
             }
         }
 
-        private const int MoveFileDelayUntilReboot = 0x4;
+        /// <summary>
+        /// Hand the uninstall to a copy of this program running somewhere
+        /// else, so that nothing is left behind.
+        ///
+        /// A running executable cannot delete its own file, and the two
+        /// obvious ways round that are both wrong here: scheduling a delete
+        /// for the next restart needs administrator rights this per-user
+        /// uninstaller never asks for, and handing the path to cmd.exe puts a
+        /// profile-derived path through a shell, where an ampersand or a
+        /// percent sign stops being part of the name. Copying this program to
+        /// a fresh temporary directory and letting the copy finish the job
+        /// needs neither elevation nor a restart, and every path is passed as
+        /// an argument rather than as text to be parsed.
+        ///
+        /// Returns false when the relaunch could not be arranged, in which
+        /// case the caller does the cleanup in place and says what was left.
+        /// </summary>
+        public static bool TryRelaunchForUninstall(string self, bool silent)
+        {
+            try
+            {
+                // Only ever relaunch to remove an installation this program is
+                // actually part of.
+                if (string.IsNullOrEmpty(self) || !InstallPaths.IsInsideProgramDirectory(self))
+                {
+                    return false;
+                }
 
-        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true,
-            CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
-        private static extern bool MoveFileEx(string existingFileName, string newFileName, int flags);
+                string staging = Path.Combine(Path.GetTempPath(),
+                    "OmoBench-uninstall-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(staging);
+                string copy = Path.Combine(staging, InstallPaths.UninstallerFileName);
+                File.Copy(self, copy, true);
+
+                // The pid is passed inside one token, so the switch takes no
+                // separate value that could be confused with a path.
+                ProcessStartInfo start = new ProcessStartInfo
+                {
+                    FileName = copy,
+                    Arguments = "/uninstall /finalize:"
+                        + Process.GetCurrentProcess().Id.ToString(CultureInfo.InvariantCulture)
+                        + (silent ? " /silent" : ""),
+                    UseShellExecute = false,
+                    WorkingDirectory = staging,
+                };
+                Process.Start(start);
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
 
         /// <summary>
-        /// A running executable cannot delete its own file, so the last two
-        /// items are handed to Windows to remove at the next restart.
-        ///
-        /// This used to spawn cmd.exe with the directory path in the command
-        /// line. Even quoted, that path then went through a shell: it comes
-        /// from the user's profile, so a name containing an ampersand would
-        /// have been read as a command separator and a percent sign as a
-        /// variable reference -- turning a cleanup into something else
-        /// entirely. MoveFileEx takes the path as an argument, not as text to
-        /// be parsed, so no character in it can mean anything.
+        /// Run by the relaunched copy: wait for the original to let go, then
+        /// remove the installation.
         /// </summary>
-        private static void ScheduleSelfDeletion(string self, InstallOutcome outcome)
+        public static InstallOutcome FinalizeUninstall(int originalProcessId)
         {
-            string directory = InstallPaths.ProgramDirectory;
-            bool scheduledFile = false, scheduledDirectory = false;
+            WaitForExit(originalProcessId, 30000);
+            return Uninstall();
+        }
 
+        private static void WaitForExit(int processId, int timeoutMilliseconds)
+        {
+            if (processId <= 0) { return; }
             try
             {
-                scheduledFile = MoveFileEx(self, null, MoveFileDelayUntilReboot);
+                Process original = Process.GetProcessById(processId);
+                original.WaitForExit(timeoutMilliseconds);
+            }
+            catch (ArgumentException)
+            {
+                // Already gone, which is the state we were waiting for.
             }
             catch (Exception) { }
-
-            try
-            {
-                // An empty directory can be scheduled the same way; it is only
-                // removed if nothing remains inside it at restart.
-                scheduledDirectory = MoveFileEx(directory, null, MoveFileDelayUntilReboot);
-            }
-            catch (Exception) { }
-
-            if (scheduledFile && scheduledDirectory)
-            {
-                outcome.Step("The uninstaller is still running, so " + directory
-                    + " will be removed when you next restart Windows.");
-                return;
-            }
-
-            // Say what actually happened rather than implying success.
-            //
-            // Delaying a delete until restart is recorded in a machine-wide
-            // registry value, so it needs administrator rights -- which this
-            // per-user uninstaller deliberately never asks for. The usual
-            // outcome is therefore that everything is removed except the
-            // uninstaller's own file, which cannot delete itself while it is
-            // running. That is a leftover of one file, and it is said plainly
-            // rather than glossed over.
-            outcome.Warn("OmoBench has been removed, but its own uninstaller file is still in\r\n    "
-                + directory + "\r\nWindows does not let a running program delete itself, and removing "
-                + "it at restart would need administrator rights this uninstaller does not ask for. "
-                + "Nothing there is used any more -- you can delete that folder whenever you like.");
         }
     }
 }

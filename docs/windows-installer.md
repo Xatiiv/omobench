@@ -102,8 +102,8 @@ check decides.
 If there is nothing to reuse, **Prepare it for me** will, inside your WSL2
 distribution:
 
-1. download the OmoBench source at the exact revision the installer was built
-   from, into `%LOCALAPPDATA%\OmoBench\source\<revision>`;
+1. unpack the OmoBench source it carries — the exact revision the installer was
+   built from — into `%LOCALAPPDATA%\OmoBench\source\<revision>`;
 2. create a Python environment used only by OmoBench, at
    `~/.local/share/omobench/managed-env` inside Linux;
 3. install OmoBench and the pinned benchmark runner version into it;
@@ -119,6 +119,35 @@ managed locations above, and deleting those removes it.
 
 It does not download any model or run any benchmark. Those remain explicit
 actions inside the OmoBench panel, exactly as before.
+
+### Where the source comes from
+
+The OmoBench source travels **inside the installer**. It is not fetched from
+GitHub at install time, so there is nothing to sign in to, no account needed,
+and no dependency on the repository being readable by a stranger. Before it is
+unpacked, the archive is checked against the SHA-256 recorded when the
+installer was built; a truncated or altered payload is refused rather than
+installed.
+
+The archive is an explicit list of what the CLI, guided panel, packaging and
+validation actually read — the `cli` package, benchmark profiles, the model
+catalogue and download recipes, the result schema and the validator. Git
+history, the website, tests, caches, evidence and model files are not in it.
+
+**This is not an offline installer.** Python dependencies, including the pinned
+benchmark runner, are installed from PyPI, so preparing an environment needs a
+working internet connection.
+
+### Before this can be distributed publicly
+
+The repository is private, and the website's download is deliberately marked
+unavailable. Publishing the installer will need an **anonymously accessible
+location for the asset itself** — a public release, or another host a person
+can download from without an account. Nothing about the installer requires the
+*source* to be public any more, because it carries what it needs; the open
+question is only where the `.exe` is served from, and under what licence it is
+offered. The repository currently has no licence file, which will need settling
+before anything is distributed.
 
 ### If something is missing inside Linux
 
