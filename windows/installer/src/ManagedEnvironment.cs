@@ -345,8 +345,9 @@ namespace OmoBench.Installer
             fetch.State = StageState.Done;
             fetch.Message = "Revision " + build.ShortRevision + " unpacked into " + sourceWindows
                 + (build.SourceClean ? "" :
-                    "\r\n         Note: this installer was built from a modified working tree, so "
-                    + "this source is not revision " + build.ShortRevision + " as published.");
+                    "\r\n         Note: this source is revision " + build.ShortRevision
+                    + " exactly, but the installer and companion around it were built from a "
+                    + "modified working tree and are not.");
             Report(progress, result);
 
             // 3. An isolated environment, separate from anything already here.

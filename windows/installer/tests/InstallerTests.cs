@@ -1780,8 +1780,9 @@ namespace OmoBench.Installer.Tests
                 signed.SigningStatement().Contains("signed as"));
 
             // A build from a modified tree must not present itself as that
-            // revision: the revision is what the managed environment would
-            // download, and it is not what such a build contains.
+            // revision. The source it carries is exported from the revision
+            // and is that revision exactly; the two programs carrying it were
+            // compiled from the working tree and are not.
             BuildInfo modified = new BuildInfo
             {
                 Version = "0.1.0",

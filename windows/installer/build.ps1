@@ -16,7 +16,8 @@
     Nothing produced here is committed: the build directory is ignored.
 
 .PARAMETER Test
-    Also build and run the installer's own test harness.
+    Also run the payload provenance tests and build and run the installer's
+    own test harness.
 
 .PARAMETER Version
     Product version. Defaults to the contents of VERSION next to this script.
@@ -68,12 +69,14 @@ if ($SigningIdentity) {
 }
 $signed = $false
 
-# What the revision is, and whether it describes this binary.
+# What the revision is, and how much of this build it actually describes.
 #
-# `git rev-parse HEAD` answers "which commit is checked out", not "does the
-# working tree match it". A build from a modified tree would otherwise claim a
-# revision it does not contain -- and its managed environment would then
-# download that revision's source, which is not the source embedded here.
+# The runtime payload is exported from the revision, so it is that revision by
+# construction. The companion and the installer are not: they are compiled from
+# whatever is in the working tree. `git rev-parse HEAD` answers "which commit
+# is checked out", not "does the working tree match it", so a build from a
+# modified tree carries one revision's source inside two programs that are not
+# that revision -- and must say so rather than stamp source_clean.
 #
 # A git query that fails tells us nothing, so it must never be read as "clean".
 $sourceClean = $false
@@ -109,13 +112,17 @@ if ($Revision) {
 }
 
 if (-not $Revision) {
-    Write-Warning "No git revision available; the installer will not be able to fetch pinned sources."
+    # Not a warning any more. The payload is exported from the revision, so
+    # without one there is no payload to build and nothing to install.
+    throw ("No git revision is available, so the runtime payload cannot be exported. Build from a " +
+        "git checkout, or pass -Revision for the commit being built.")
 }
 if (-not $sourceClean) {
     Write-Warning ("This build is marked as not matching revision $Revision" +
         $(if ($gitAnswered) { ' (the working tree has uncommitted changes)' } else { ' (git could not be queried)' }) +
-        ". Its managed environment would download that revision's source, which is not necessarily " +
-        "what is embedded here. Commit, and build from a clean tree, before producing a build for anyone else.")
+        ". The runtime payload it carries is that revision exactly, but the companion and installer " +
+        "executables are compiled from the working tree and are not. Commit, and build from a clean " +
+        "tree, before producing a build for anyone else.")
 }
 
 $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
@@ -135,11 +142,11 @@ if (-not (Test-Path $companionExe)) { throw "The companion build produced no exe
 
 # 2. The runtime source archive that the installer carries.
 #
-# Built from the files git is tracking under an explicit allowlist, not from
-# whatever happens to be sitting in those directories. A working tree holds
-# caches, editable-install metadata, local evidence and half-finished work; a
-# release payload must be the committed source and nothing else, and "it was
-# in the folder" is not a reason to ship something.
+# Exported from the revision by git, under an explicit allowlist -- never
+# copied out of the working tree. A working tree holds caches,
+# editable-install metadata, local evidence, half-finished work and, with
+# core.autocrlf=true, text files whose bytes no longer match the blobs they
+# came from. See build-payload.ps1 for why the last of those is not cosmetic.
 #
 # The allowlist is derived from what the installed CLI, guided panel,
 # packaging and validation actually read at run time -- not a snapshot of the
@@ -166,129 +173,29 @@ $runtimeAllowList = @(
     'results/README.md'
 )
 
-# The paths a working installation actually reads. Parsed from the installer's
-# own RuntimeManifest.cs so there is exactly one list: the build checks the
-# archive it produced against it, and the installer checks the unpacked copy
-# against it at install time. A payload that satisfies one but not the other
-# would be the whole point of the check defeated.
-$manifestSource = Join-Path $root 'src\RuntimeManifest.cs'
-if (-not (Test-Path $manifestSource)) { throw "Missing $manifestSource; cannot determine required payload paths." }
-$requiredPaths = @()
-$insideRequired = $false
-foreach ($line in (Get-Content -LiteralPath $manifestSource)) {
-    if ($line -match 'required-begin') { $insideRequired = $true; continue }
-    if ($line -match 'required-end') { $insideRequired = $false; continue }
-    if ($insideRequired -and $line -match '"([^"]+)"') { $requiredPaths += $Matches[1] }
-}
-if ($requiredPaths.Count -lt 10) {
-    throw ("Only $($requiredPaths.Count) required payload paths were found in $manifestSource. " +
-        "The build cannot validate a payload it has no expectations for.")
-}
-
-# Tracked files only. git is the authority on what is committed source; a
-# directory walk is not.
-if (-not $gitAnswered) {
-    throw ("git could not be queried, so the runtime payload cannot be derived from tracked files. " +
-        "Build from a git checkout: a payload taken from a directory walk would ship whatever is " +
-        "lying about in the working tree.")
-}
-$tracked = @(& git -C $repository ls-files -- $runtimeAllowList)
-if ($LASTEXITCODE -ne 0) { throw "git ls-files failed while listing the runtime payload." }
-
-# Even inside an allowed tree, some tracked things are not runtime source.
-$payloadRelative = @($tracked |
-    ForEach-Object { $_.Trim() } |
-    Where-Object { $_ } |
-    Where-Object {
-        $_ -notmatch '(^|/)tests/' -and
-        $_ -notmatch '(^|/)__pycache__/' -and
-        $_ -notmatch '\.egg-info/' -and
-        $_ -notmatch '\.pyc$' -and
-        $_ -notmatch '\.pyo$'
-    })
-
-$missingRequired = @($requiredPaths | Where-Object { $payloadRelative -notcontains $_ })
-if ($missingRequired.Count -gt 0) {
-    throw ("The runtime payload would be missing files OmoBench needs at run time:`n    " +
-        ($missingRequired -join "`n    ") +
-        "`nRefusing to build a payload that would fail at install time.")
-}
-if ($payloadRelative.Count -lt 20) {
-    throw ("The runtime source archive would contain only $($payloadRelative.Count) files, which cannot " +
-        "be a working OmoBench. Refusing to build a payload that would fail at install time.")
-}
-
-$staging = Join-Path $OutputDirectory 'runtime-staging'
-if (Test-Path $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
-$payloadRoot = Join-Path $staging 'omobench'
-New-Item -ItemType Directory -Force -Path $payloadRoot | Out-Null
-
-$separator = [System.IO.Path]::DirectorySeparatorChar
-foreach ($relative in $payloadRelative) {
-    $native = $relative.Replace('/', $separator)
-    $source = Join-Path $repository $native
-    if (-not (Test-Path -LiteralPath $source)) {
-        throw "git lists $relative as tracked, but it is not present in the working tree."
-    }
-    $destination = Join-Path $payloadRoot $native
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
-    Copy-Item -LiteralPath $source -Destination $destination -Force
-}
-
-# A manifest of what was staged, in sha256sum's format, so the installer can
-# check the unpacked copy against it and a person can check it by hand.
-$manifestLines = foreach ($relative in ($payloadRelative | Sort-Object)) {
-    $native = $relative.Replace('/', $separator)
-    $hash = (Get-FileHash -LiteralPath (Join-Path $payloadRoot $native) -Algorithm SHA256).Hash.ToLowerInvariant()
-    "$hash  $relative"
-}
-$manifestPath = Join-Path $payloadRoot 'MANIFEST.sha256'
-Set-Content -Path $manifestPath -Value $manifestLines -Encoding ascii
-
-$payloadFiles = @(Get-ChildItem -LiteralPath $payloadRoot -Recurse -Force -File)
-Write-Host ("Runtime source payload: {0} tracked files, {1:N0} bytes" -f $payloadRelative.Count,
-    (($payloadFiles | Measure-Object -Sum Length).Sum))
-
-# A release must carry committed source. An archive built from a modified tree
-# would install code that exists nowhere else, under a revision that claims
-# otherwise.
+# A release must carry committed source, and now always does: the payload is
+# exported from the revision rather than copied out of the working tree. What a
+# modified tree still affects is the two executables, which are compiled from
+# the working tree -- so such a build is not that revision, and says so.
 if (-not $sourceClean) {
-    Write-Warning ("The runtime source archive is being built from a modified working tree. " +
-        "Release builds require a clean checkout; this archive must not be published.")
+    Write-Warning ("The companion and installer executables are being compiled from a modified " +
+        "working tree. The runtime payload inside them is still revision $Revision exactly, but the " +
+        "programs around it are not. Release builds require a clean checkout; this build must not " +
+        "be published.")
 }
 
 $runtimeArchive = Join-Path $OutputDirectory 'omobench-runtime-source.tar.gz'
-if (Test-Path $runtimeArchive) { Remove-Item -LiteralPath $runtimeArchive -Force }
-$tar = Join-Path $env:WINDIR 'System32\tar.exe'
-if (-not (Test-Path $tar)) { throw "tar.exe was not found; Windows 10 1803 or later is required to build." }
-& $tar -czf $runtimeArchive -C $staging omobench
-if ($LASTEXITCODE -ne 0) { throw "Could not create the runtime source archive." }
-Remove-Item -LiteralPath $staging -Recurse -Force
+$payload = & (Join-Path $root 'build-payload.ps1') `
+    -Repository $repository `
+    -Revision $Revision `
+    -Destination $runtimeArchive `
+    -StagingDirectory (Join-Path $OutputDirectory 'runtime-staging') `
+    -AllowList $runtimeAllowList `
+    -RequiredPathsFile (Join-Path $root 'src\RuntimeManifest.cs')
+if (-not $payload -or -not $payload.Sha256) { throw "The runtime payload build produced no result." }
 
-# What the archive actually contains, read back out of the archive itself.
-# Everything above describes intent; this is the only step that knows what was
-# produced. An earlier version of this script staged an empty tree and built a
-# perfectly valid 332-byte archive of nothing.
-$archiveEntries = @(& $tar -tzf $runtimeArchive)
-if ($LASTEXITCODE -ne 0) { throw "The runtime source archive could not be read back." }
-$archivePaths = @($archiveEntries |
-    ForEach-Object { $_.Trim().Replace('\', '/') } |
-    Where-Object { $_ -and -not $_.EndsWith('/') } |
-    ForEach-Object { if ($_.StartsWith('omobench/')) { $_.Substring(9) } else { $_ } })
-
-$archiveMissing = @(@($requiredPaths + 'MANIFEST.sha256') | Where-Object { $archivePaths -notcontains $_ })
-if ($archiveMissing.Count -gt 0) {
-    throw ("The runtime source archive that was just built is missing required files:`n    " +
-        ($archiveMissing -join "`n    "))
-}
-if ($archivePaths.Count -ne ($payloadRelative.Count + 1)) {
-    throw ("The archive holds $($archivePaths.Count) files but $($payloadRelative.Count + 1) were staged. " +
-        "Refusing to embed an archive whose contents are not what was prepared.")
-}
-Write-Host "Runtime source archive contents verified: $($archivePaths.Count) files, including every required path."
-
-$runtimeChecksum = (Get-FileHash -Path $runtimeArchive -Algorithm SHA256).Hash.ToLowerInvariant()
-$runtimeBytes = (Get-Item $runtimeArchive).Length
+$runtimeChecksum = $payload.Sha256
+$runtimeBytes = $payload.Bytes
 Write-Host ("Runtime source archive: {0:N0} bytes, sha256 {1}" -f $runtimeBytes, $runtimeChecksum)
 
 # 3. Stamp the identity in. Generated, never committed.
@@ -392,6 +299,16 @@ if ($signed) {
 
 # 5. The installer's own tests.
 if ($Test) {
+    # The payload builder first, against its own throwaway repository: it is
+    # the one part of this that cannot be covered from inside the C# harness,
+    # because what it has to get right is what git hands it.
+    Write-Host ''
+    Write-Host 'Running the runtime payload provenance tests'
+    & (Join-Path $root 'tests\payload-provenance.ps1')
+    if ($LASTEXITCODE -ne 0) {
+        throw "The runtime payload provenance tests failed with exit code $LASTEXITCODE."
+    }
+
     $testSources = Get-ChildItem -Path (Join-Path $root 'tests') -Filter *.cs | Sort-Object Name
     if (-not $testSources) { throw "No test sources found under $root\tests." }
 

@@ -25,9 +25,13 @@ namespace OmoBench.Installer
 
         /// <summary>
         /// False when this was built from a working tree with uncommitted
-        /// changes. The revision then describes the checkout it was built in,
-        /// not this binary -- and the managed environment would fetch that
-        /// revision's source, which is not what is embedded here.
+        /// changes.
+        ///
+        /// The runtime source inside the installer is exported from the
+        /// revision, so it is always that revision exactly. These two
+        /// executables are not: they are compiled from the working tree, so
+        /// on a dirty build the revision describes the source they carry but
+        /// not the programs carrying it.
         /// </summary>
         public bool SourceClean = true;
 
@@ -71,7 +75,9 @@ namespace OmoBench.Installer
         {
             return "Version " + (Version ?? "unknown")
                 + "\r\nSource revision " + (string.IsNullOrEmpty(Revision) ? "unknown" : Revision)
-                + (SourceClean ? "" : "  (built from a modified working tree -- not this exact revision)")
+                + (SourceClean ? "" :
+                    "  (the bundled source is this revision; these programs were built from a "
+                    + "modified working tree)")
                 + "\r\nBuilt " + (BuiltAt ?? "unknown")
                 + "\r\n" + SigningStatement();
         }
