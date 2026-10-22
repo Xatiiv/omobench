@@ -32,17 +32,17 @@ namespace OmoBench.Installer
         private readonly Button _close = new Button();
 
         private Step _step = Step.Welcome;
-        private DiscoveryCancel _cancel;
-        private bool _working;
 
         /// <summary>The background check or preparation currently running.</summary>
         private Thread _worker;
 
         /// <summary>
-        /// Incremented whenever a new check starts. A result carrying an older
-        /// number describes a question that has since been replaced.
+        /// Whether work is in flight, and whether a result arriving from the
+        /// background still describes what this window is doing. It is the
+        /// only record of either, so a stale completion cannot clear a flag
+        /// the newer operation is relying on.
         /// </summary>
-        private int _generation;
+        private readonly WizardState _wizard = new WizardState();
         private Configuration _configuration = new Configuration();
         private SystemReport _system;
 
@@ -135,15 +135,14 @@ namespace OmoBench.Installer
             switch (_step)
             {
                 case Step.Environment:
-                    if (_working) { CancelWork(); } else { ShowEnvironment(true); }
+                    if (_wizard.Working) { CancelWork(); } else { ShowEnvironment(true); }
                     break;
             }
         }
 
         private void CancelWork()
         {
-            DiscoveryCancel cancel = _cancel;
-            if (cancel != null) { cancel.Cancel(); }
+            _wizard.Cancel();
             _secondary.Enabled = false;
         }
 
@@ -252,11 +251,8 @@ namespace OmoBench.Installer
             _subheading.Text = "Looking at what this machine already has…";
             _detail.Text = "";
 
-            _working = true;
-            _generation++;
-            int generation = _generation;
-            _cancel = new DiscoveryCancel();
-            DiscoveryCancel cancel = _cancel;
+            DiscoveryCancel cancel = new DiscoveryCancel();
+            int generation = _wizard.Begin(cancel);
             Configuration current = _configuration;
 
             _worker = new Thread(() =>
@@ -311,10 +307,13 @@ namespace OmoBench.Installer
 
         private void ApplyEnvironment(int generation, EnvironmentAnswer answer)
         {
-            _working = false;
-            if (generation != _generation)
+            // Nothing above this line. A stale or cancelled completion must
+            // not clear the working flag, touch the buttons, save anything or
+            // announce a result: by now those may belong to a newer operation,
+            // or to an instruction the person has withdrawn.
+            if (!_wizard.TryAccept(generation))
             {
-                return;     // a newer check replaced this one
+                return;
             }
 
             _secondary.Text = "Check again";
@@ -426,8 +425,6 @@ namespace OmoBench.Installer
 
         private void PrepareEnvironment()
         {
-            _working = true;
-            _cancel = new DiscoveryCancel();
             _primary.Enabled = false;
             _secondary.Text = "Stop";
             _secondary.Enabled = true;
@@ -438,17 +435,15 @@ namespace OmoBench.Installer
 
             string distribution = FirstWsl2Name();
             BuildInfo build = _build;
-            DiscoveryCancel cancel = _cancel;
-
-            _generation++;
-            int generation = _generation;
+            DiscoveryCancel cancel = new DiscoveryCancel();
+            int generation = _wizard.Begin(cancel);
             _worker = new Thread(() =>
             {
                 PreparationResult result = ManagedEnvironment.Prepare(
                     distribution, build, cancel, snapshot => Post(() => RenderStages(snapshot)));
                 Post(() =>
                 {
-                    if (generation == _generation) { FinishPreparation(result); }
+                    if (_wizard.TryAccept(generation)) { FinishPreparation(result); }
                 });
             });
             _worker.IsBackground = true;
@@ -467,7 +462,6 @@ namespace OmoBench.Installer
 
         private void FinishPreparation(PreparationResult result)
         {
-            _working = false;
             _close.Enabled = true;
             _secondary.Text = "Check again";
             _secondary.Enabled = true;
@@ -588,7 +582,7 @@ namespace OmoBench.Installer
         /// </summary>
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            if (_working)
+            if (_wizard.Working)
             {
                 DialogResult choice = MessageBox.Show(this,
                     "Setup is still working.\n\nStop it and close?",
@@ -625,7 +619,6 @@ namespace OmoBench.Installer
                         }
                     }
                 }
-                _working = false;
             }
             base.OnFormClosing(e);
         }

@@ -136,12 +136,45 @@ namespace OmoBench.Installer
         /// Where the embedded archive is written before unpacking, as a
         /// Windows path.
         /// </summary>
-        public static string ArchiveWindowsPath()
+        public static string ArchiveDirectory()
         {
-            string directory = string.IsNullOrEmpty(ArchiveDirectoryOverride)
+            return string.IsNullOrEmpty(ArchiveDirectoryOverride)
                 ? Path.Combine(Path.GetTempPath(), "omobench-runtime-source")
                 : ArchiveDirectoryOverride;
-            return Path.Combine(directory, "omobench-runtime-source.tar.gz");
+        }
+
+        /// <summary>
+        /// A fresh archive path for one attempt.
+        ///
+        /// Unique per attempt on purpose: a fixed name is shared state between
+        /// a run that is still going and one that has just started, and
+        /// between this user and anyone else writing to the same temporary
+        /// directory. Each attempt unpacks the file it wrote itself.
+        /// </summary>
+        public static string NewArchivePath()
+        {
+            return Path.Combine(ArchiveDirectory(),
+                "omobench-runtime-" + Guid.NewGuid().ToString("N") + ".tar.gz");
+        }
+
+        public static List<string> BuildExistsProgram(string wslPath)
+        {
+            return new List<string> { "test", "-e", wslPath };
+        }
+
+        public static List<string> BuildListDirectoryProgram(string wslPath)
+        {
+            return new List<string> { "ls", "-A", wslPath };
+        }
+
+        public static List<string> BuildTouchProgram(string wslPath)
+        {
+            return new List<string> { "touch", wslPath };
+        }
+
+        public static string LinuxOwnershipMarker(string home)
+        {
+            return EnvironmentRoot(home) + "/" + OwnershipMarkerName;
         }
 
         private static string Safe(string revision)
@@ -276,7 +309,7 @@ namespace OmoBench.Installer
             // The source travels inside the installer, and is checked against
             // the checksum recorded when it was built before anything unpacks
             // it.
-            string archiveWindows = ArchiveWindowsPath();
+            string archiveWindows = NewArchivePath();
             string payloadFailure;
             if (!RuntimePayload.TryWrite(archiveWindows, out payloadFailure))
             {
@@ -298,6 +331,17 @@ namespace OmoBench.Installer
             {
                 return Fail(result, fetch, "The bundled source could not be unpacked.", Describe(extract));
             }
+            // What came out of the archive, not just what went into it. A
+            // payload built from an allowlist that matched less than it should
+            // have is still a valid, correctly checksummed archive; the only
+            // way to know it carries a working OmoBench is to look.
+            string contentsFailure;
+            if (!RuntimeManifest.Validate(sourceWindows, out contentsFailure))
+            {
+                return Fail(result, fetch, "The bundled OmoBench source is incomplete.", contentsFailure);
+            }
+            if (Stopped(cancel, result, fetch)) { return result; }
+
             fetch.State = StageState.Done;
             fetch.Message = "Revision " + build.ShortRevision + " unpacked into " + sourceWindows
                 + (build.SourceClean ? "" :
@@ -309,6 +353,18 @@ namespace OmoBench.Installer
             create.State = StageState.Running;
             Report(progress, result);
             string environment = EnvironmentDirectory(home);
+
+            // The Windows source directory was already ownership-checked; the
+            // Linux side needs the same guarantee before a venv is created or
+            // pip is pointed at it. Writing into a directory somebody else
+            // made, because its name matched, is the same mistake wherever the
+            // filesystem lives.
+            string linuxOwnership = ClaimLinuxRoot(distribution, home, cancel);
+            if (Stopped(cancel, result, create)) { return result; }
+            if (linuxOwnership != null)
+            {
+                return Fail(result, create, "The managed Linux location is already in use.", linuxOwnership);
+            }
             Run(distribution, BuildMakeDirectoryProgram(environment.Substring(0, environment.LastIndexOf('/'))),
                 30000, cancel);
             ProcessResult venv = Run(distribution,
@@ -393,7 +449,58 @@ namespace OmoBench.Installer
         }
 
         /// <summary>
-        /// Take ownership of a directory, or explain why it cannot be taken.
+        /// Take ownership of the managed Linux root, or explain why not.
+        ///
+        /// Returns null when it is ours to use: absent, already marked by a
+        /// previous attempt (so a retry continues), or empty. Anything else is
+        /// somebody's data and is left exactly as it is -- nothing is moved,
+        /// emptied or overwritten to make room.
+        /// </summary>
+        internal static string ClaimLinuxRoot(string distribution, string home, DiscoveryCancel cancel)
+        {
+            string root = EnvironmentRoot(home);
+            string marker = LinuxOwnershipMarker(home);
+
+            ProcessResult rootExists = Run(distribution, BuildExistsProgram(root), 20000, cancel);
+            if (rootExists == null || rootExists.TimedOut)
+            {
+                return root + "\r\n\r\nWhether that directory exists could not be determined, so it "
+                    + "was left alone.";
+            }
+
+            if (rootExists.ExitCode == 0)
+            {
+                ProcessResult owned = Run(distribution, BuildExistsProgram(marker), 20000, cancel);
+                if (owned != null && !owned.TimedOut && owned.ExitCode == 0)
+                {
+                    return null;    // a previous attempt's working area; retry is fine
+                }
+
+                ProcessResult listing = Run(distribution, BuildListDirectoryProgram(root), 20000, cancel);
+                if (listing == null || listing.TimedOut || listing.ExitCode != 0)
+                {
+                    return root + "\r\n\r\nIts contents could not be read, so it was left alone.";
+                }
+                if (!string.IsNullOrWhiteSpace(listing.StandardOutput))
+                {
+                    return root + "\r\n\r\nThis directory inside " + distribution + " already contains "
+                        + "files and was not created by OmoBench, so it will not be written into. "
+                        + "Move or remove it if you no longer need what is in it, and try again.";
+                }
+            }
+
+            Run(distribution, BuildMakeDirectoryProgram(root), 20000, cancel);
+            ProcessResult marked = Run(distribution, BuildTouchProgram(marker), 20000, cancel);
+            if (marked == null || marked.TimedOut || marked.ExitCode != 0)
+            {
+                return root + "\r\n\r\nThat directory could not be created inside " + distribution + ".";
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Take ownership of a Windows directory, or explain why it cannot be
+        /// taken.
         ///
         /// Returns null when the directory is ours to use -- newly created,
         /// already marked by a previous preparation, or empty. Otherwise it

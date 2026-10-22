@@ -135,7 +135,13 @@ if (-not (Test-Path $companionExe)) { throw "The companion build produced no exe
 
 # 2. The runtime source archive that the installer carries.
 #
-# An explicit allowlist, derived from what the installed CLI, guided panel,
+# Built from the files git is tracking under an explicit allowlist, not from
+# whatever happens to be sitting in those directories. A working tree holds
+# caches, editable-install metadata, local evidence and half-finished work; a
+# release payload must be the committed source and nothing else, and "it was
+# in the folder" is not a reason to ship something.
+#
+# The allowlist is derived from what the installed CLI, guided panel,
 # packaging and validation actually read at run time -- not a snapshot of the
 # repository. Everything here was found by following the code:
 #
@@ -160,48 +166,87 @@ $runtimeAllowList = @(
     'results/README.md'
 )
 
+# The paths a working installation actually reads. Parsed from the installer's
+# own RuntimeManifest.cs so there is exactly one list: the build checks the
+# archive it produced against it, and the installer checks the unpacked copy
+# against it at install time. A payload that satisfies one but not the other
+# would be the whole point of the check defeated.
+$manifestSource = Join-Path $root 'src\RuntimeManifest.cs'
+if (-not (Test-Path $manifestSource)) { throw "Missing $manifestSource; cannot determine required payload paths." }
+$requiredPaths = @()
+$insideRequired = $false
+foreach ($line in (Get-Content -LiteralPath $manifestSource)) {
+    if ($line -match 'required-begin') { $insideRequired = $true; continue }
+    if ($line -match 'required-end') { $insideRequired = $false; continue }
+    if ($insideRequired -and $line -match '"([^"]+)"') { $requiredPaths += $Matches[1] }
+}
+if ($requiredPaths.Count -lt 10) {
+    throw ("Only $($requiredPaths.Count) required payload paths were found in $manifestSource. " +
+        "The build cannot validate a payload it has no expectations for.")
+}
+
+# Tracked files only. git is the authority on what is committed source; a
+# directory walk is not.
+if (-not $gitAnswered) {
+    throw ("git could not be queried, so the runtime payload cannot be derived from tracked files. " +
+        "Build from a git checkout: a payload taken from a directory walk would ship whatever is " +
+        "lying about in the working tree.")
+}
+$tracked = @(& git -C $repository ls-files -- $runtimeAllowList)
+if ($LASTEXITCODE -ne 0) { throw "git ls-files failed while listing the runtime payload." }
+
+# Even inside an allowed tree, some tracked things are not runtime source.
+$payloadRelative = @($tracked |
+    ForEach-Object { $_.Trim() } |
+    Where-Object { $_ } |
+    Where-Object {
+        $_ -notmatch '(^|/)tests/' -and
+        $_ -notmatch '(^|/)__pycache__/' -and
+        $_ -notmatch '\.egg-info/' -and
+        $_ -notmatch '\.pyc$' -and
+        $_ -notmatch '\.pyo$'
+    })
+
+$missingRequired = @($requiredPaths | Where-Object { $payloadRelative -notcontains $_ })
+if ($missingRequired.Count -gt 0) {
+    throw ("The runtime payload would be missing files OmoBench needs at run time:`n    " +
+        ($missingRequired -join "`n    ") +
+        "`nRefusing to build a payload that would fail at install time.")
+}
+if ($payloadRelative.Count -lt 20) {
+    throw ("The runtime source archive would contain only $($payloadRelative.Count) files, which cannot " +
+        "be a working OmoBench. Refusing to build a payload that would fail at install time.")
+}
+
 $staging = Join-Path $OutputDirectory 'runtime-staging'
 if (Test-Path $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
 $payloadRoot = Join-Path $staging 'omobench'
 New-Item -ItemType Directory -Force -Path $payloadRoot | Out-Null
 
-foreach ($relative in $runtimeAllowList) {
-    $source = Join-Path $repository ($relative -replace '/', '\')
-    if (-not (Test-Path $source)) { throw "Runtime source allowlist entry is missing: $relative" }
-    $destination = Join-Path $payloadRoot ($relative -replace '/', '\')
-    $parent = Split-Path -Parent $destination
-    New-Item -ItemType Directory -Force -Path $parent | Out-Null
-    if ((Get-Item $source).PSIsContainer) {
-        Copy-Item -LiteralPath $source -Destination $destination -Recurse -Force
-    } else {
-        Copy-Item -LiteralPath $source -Destination $destination -Force
+$separator = [System.IO.Path]::DirectorySeparatorChar
+foreach ($relative in $payloadRelative) {
+    $native = $relative.Replace('/', $separator)
+    $source = Join-Path $repository $native
+    if (-not (Test-Path -LiteralPath $source)) {
+        throw "git lists $relative as tracked, but it is not present in the working tree."
     }
+    $destination = Join-Path $payloadRoot $native
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+    Copy-Item -LiteralPath $source -Destination $destination -Force
 }
 
-# Strip anything that should never travel, even from inside an allowed tree:
-# caches, test suites, and the egg-info a local editable install leaves behind.
-#
-# Note the filtering is done with Where-Object. Get-ChildItem's -Include is
-# silently ignored alongside -LiteralPath, which makes it match everything --
-# an earlier version of this used it and deleted the entire payload.
-foreach ($junk in @('__pycache__', '.pytest_cache', '.mypy_cache', 'tests')) {
-    Get-ChildItem -LiteralPath $payloadRoot -Recurse -Force -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -eq $junk } |
-        ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+# A manifest of what was staged, in sha256sum's format, so the installer can
+# check the unpacked copy against it and a person can check it by hand.
+$manifestLines = foreach ($relative in ($payloadRelative | Sort-Object)) {
+    $native = $relative.Replace('/', $separator)
+    $hash = (Get-FileHash -LiteralPath (Join-Path $payloadRoot $native) -Algorithm SHA256).Hash.ToLowerInvariant()
+    "$hash  $relative"
 }
-Get-ChildItem -LiteralPath $payloadRoot -Recurse -Force -Directory -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -like '*.egg-info' } |
-    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
-Get-ChildItem -LiteralPath $payloadRoot -Recurse -Force -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.Extension -eq '.pyc' -or $_.Extension -eq '.pyo' } |
-    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+$manifestPath = Join-Path $payloadRoot 'MANIFEST.sha256'
+Set-Content -Path $manifestPath -Value $manifestLines -Encoding ascii
 
 $payloadFiles = @(Get-ChildItem -LiteralPath $payloadRoot -Recurse -Force -File)
-if ($payloadFiles.Count -lt 20) {
-    throw ("The runtime source archive would contain only $($payloadFiles.Count) files, which cannot " +
-        "be a working OmoBench. Refusing to build a payload that would fail at install time.")
-}
-Write-Host ("Runtime source payload: {0} files, {1:N0} bytes" -f $payloadFiles.Count,
+Write-Host ("Runtime source payload: {0} tracked files, {1:N0} bytes" -f $payloadRelative.Count,
     (($payloadFiles | Measure-Object -Sum Length).Sum))
 
 # A release must carry committed source. An archive built from a modified tree
@@ -219,6 +264,28 @@ if (-not (Test-Path $tar)) { throw "tar.exe was not found; Windows 10 1803 or la
 & $tar -czf $runtimeArchive -C $staging omobench
 if ($LASTEXITCODE -ne 0) { throw "Could not create the runtime source archive." }
 Remove-Item -LiteralPath $staging -Recurse -Force
+
+# What the archive actually contains, read back out of the archive itself.
+# Everything above describes intent; this is the only step that knows what was
+# produced. An earlier version of this script staged an empty tree and built a
+# perfectly valid 332-byte archive of nothing.
+$archiveEntries = @(& $tar -tzf $runtimeArchive)
+if ($LASTEXITCODE -ne 0) { throw "The runtime source archive could not be read back." }
+$archivePaths = @($archiveEntries |
+    ForEach-Object { $_.Trim().Replace('\', '/') } |
+    Where-Object { $_ -and -not $_.EndsWith('/') } |
+    ForEach-Object { if ($_.StartsWith('omobench/')) { $_.Substring(9) } else { $_ } })
+
+$archiveMissing = @(@($requiredPaths + 'MANIFEST.sha256') | Where-Object { $archivePaths -notcontains $_ })
+if ($archiveMissing.Count -gt 0) {
+    throw ("The runtime source archive that was just built is missing required files:`n    " +
+        ($archiveMissing -join "`n    "))
+}
+if ($archivePaths.Count -ne ($payloadRelative.Count + 1)) {
+    throw ("The archive holds $($archivePaths.Count) files but $($payloadRelative.Count + 1) were staged. " +
+        "Refusing to embed an archive whose contents are not what was prepared.")
+}
+Write-Host "Runtime source archive contents verified: $($archivePaths.Count) files, including every required path."
 
 $runtimeChecksum = (Get-FileHash -Path $runtimeArchive -Algorithm SHA256).Hash.ToLowerInvariant()
 $runtimeBytes = (Get-Item $runtimeArchive).Length

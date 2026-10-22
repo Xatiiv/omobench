@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using Microsoft.Win32;
 using OmoBench.Companion;
 
 namespace OmoBench.Installer.Tests
@@ -20,17 +21,197 @@ namespace OmoBench.Installer.Tests
         private static int _passed;
         private static readonly List<string> Failures = new List<string>();
 
+        /// <summary>Every registry key this suite is allowed to write.</summary>
+        private const string TestRegistryRoot = @"Software\OmoBench-tests";
+
+        private static List<Installation.CompanionProcess> NoCompanions()
+        {
+            return new List<Installation.CompanionProcess>();
+        }
+
+        /// <summary>
+        /// What the real installation looked like before the suite ran.
+        ///
+        /// The isolation above is the fix; this is the proof. It reads the
+        /// fixed registry locations and the real program directory directly --
+        /// never through the overridden properties -- so a test that quietly
+        /// escaped its sandbox is reported rather than discovered later by the
+        /// person whose Apps &amp; features entry went missing.
+        /// </summary>
+        private sealed class Sentinel
+        {
+            private readonly string _uninstallEntry;
+            private readonly string _protocolEntry;
+            private readonly string _programDirectory;
+            private readonly string _programContents;
+            private readonly int _companions;
+
+            private Sentinel(string uninstallEntry, string protocolEntry,
+                string programDirectory, string programContents, int companions)
+            {
+                _uninstallEntry = uninstallEntry;
+                _protocolEntry = protocolEntry;
+                _programDirectory = programDirectory;
+                _programContents = programContents;
+                _companions = companions;
+            }
+
+            public static Sentinel Capture()
+            {
+                string programDirectory = InstallPaths.ProgramDirectory;
+                return new Sentinel(
+                    DescribeKey(InstallPaths.DefaultUninstallKeyPath),
+                    DescribeKey(ProtocolRegistration.DefaultKeyPath),
+                    programDirectory,
+                    DescribeDirectory(programDirectory),
+                    CountCompanionProcesses());
+            }
+
+            public void Verify()
+            {
+                Section("Sentinels: the real installation was not touched");
+
+                Check("the real Apps & features entry is exactly as it was"
+                    + (_uninstallEntry == "(absent)" ? " (it was absent, and still is)" : ""),
+                    DescribeKey(InstallPaths.DefaultUninstallKeyPath) == _uninstallEntry);
+                Check("the real omobench:// registration is exactly as it was"
+                    + (_protocolEntry == "(absent)" ? " (it was absent, and still is)" : ""),
+                    DescribeKey(ProtocolRegistration.DefaultKeyPath) == _protocolEntry);
+                Check("the real program directory is exactly as it was",
+                    DescribeDirectory(_programDirectory) == _programContents);
+                Check("no OmoBench companion process was closed",
+                    CountCompanionProcesses() >= _companions);
+                Check("and the suite left none of its own registry keys behind",
+                    !TestRegistryRootExists());
+            }
+
+            private static bool TestRegistryRootExists()
+            {
+                try
+                {
+                    using (RegistryKey key = Registry.CurrentUser.OpenSubKey(TestRegistryRoot))
+                    {
+                        return key != null;
+                    }
+                }
+                catch (Exception) { return false; }
+            }
+
+            /// <summary>Read-only: the suite never asks a real process anything.</summary>
+            private static int CountCompanionProcesses()
+            {
+                try
+                {
+                    return System.Diagnostics.Process.GetProcessesByName("OmoBenchCompanion").Length;
+                }
+                catch (Exception) { return 0; }
+            }
+
+            private static string DescribeKey(string path)
+            {
+                try
+                {
+                    using (RegistryKey key = Registry.CurrentUser.OpenSubKey(path))
+                    {
+                        if (key == null) { return "(absent)"; }
+                        return Describe(key, path);
+                    }
+                }
+                catch (Exception error) { return "(unreadable: " + error.Message + ")"; }
+            }
+
+            private static string Describe(RegistryKey key, string path)
+            {
+                System.Text.StringBuilder text = new System.Text.StringBuilder();
+                string[] values = key.GetValueNames();
+                Array.Sort(values, StringComparer.OrdinalIgnoreCase);
+                foreach (string name in values)
+                {
+                    object value = key.GetValue(name);
+                    text.Append(path).Append('|').Append(name).Append('=')
+                        .Append(value == null ? "" : value.ToString()).Append('\n');
+                }
+                string[] children = key.GetSubKeyNames();
+                Array.Sort(children, StringComparer.OrdinalIgnoreCase);
+                foreach (string child in children)
+                {
+                    using (RegistryKey sub = key.OpenSubKey(child))
+                    {
+                        if (sub != null) { text.Append(Describe(sub, path + "\\" + child)); }
+                    }
+                }
+                return text.ToString();
+            }
+
+            private static string DescribeDirectory(string path)
+            {
+                try
+                {
+                    if (!Directory.Exists(path)) { return "(absent)"; }
+                    string[] files = Directory.GetFileSystemEntries(path, "*", SearchOption.AllDirectories);
+                    Array.Sort(files, StringComparer.OrdinalIgnoreCase);
+                    System.Text.StringBuilder text = new System.Text.StringBuilder();
+                    foreach (string file in files)
+                    {
+                        text.Append(file);
+                        try
+                        {
+                            if (File.Exists(file)) { text.Append('|').Append(new FileInfo(file).Length); }
+                        }
+                        catch (Exception) { }
+                        text.Append('\n');
+                    }
+                    return text.ToString();
+                }
+                catch (Exception error) { return "(unreadable: " + error.Message + ")"; }
+            }
+        }
+
         private static int Main()
         {
-            InstallPathTests();
-            SupportDetectionTests();
-            ManagedEnvironmentCommandTests();
-            ManagedEnvironmentStageTests();
-            ReviewRegressionTests();
-            RuntimePayloadTests();
-            UninstallCompletionTests();
-            DelayedDiscoveryTests();
-            BuildIdentityTests();
+            // Isolation is arranged before a single test runs, and proved
+            // afterwards. Three things in this suite used to reach the real
+            // machine: the Apps & features entry and the omobench://
+            // registration are at fixed registry paths that RootOverride does
+            // not move, and the upgrade tests enumerated and sent close
+            // requests to whatever OmoBench was actually running.
+            Sentinel sentinel = Sentinel.Capture();
+
+            string savedUninstallKey = InstallPaths.UninstallKeyPathOverride;
+            string savedProtocolKey = ProtocolRegistration.KeyPathOverride;
+            Func<List<Installation.CompanionProcess>> savedEnumerator = Installation.CompanionEnumerator;
+            string isolation = TestRegistryRoot + @"\" + Guid.NewGuid().ToString("N");
+
+            try
+            {
+                InstallPaths.UninstallKeyPathOverride = isolation + @"\Uninstall\OmoBench";
+                ProtocolRegistration.KeyPathOverride = isolation + @"\Classes\omobench";
+                Installation.CompanionEnumerator = NoCompanions;
+
+                InstallPathTests();
+                SupportDetectionTests();
+                ManagedEnvironmentCommandTests();
+                ManagedEnvironmentStageTests();
+                LinuxOwnershipTests();
+                ReviewRegressionTests();
+                RuntimePayloadTests();
+                PayloadContentsTests();
+                UninstallCompletionTests();
+                UninstallCoordinationTests();
+                DelayedDiscoveryTests();
+                WizardCompletionTests();
+                BuildIdentityTests();
+            }
+            finally
+            {
+                InstallPaths.UninstallKeyPathOverride = savedUninstallKey;
+                ProtocolRegistration.KeyPathOverride = savedProtocolKey;
+                Installation.CompanionEnumerator = savedEnumerator;
+                try { Registry.CurrentUser.DeleteSubKeyTree(TestRegistryRoot, false); }
+                catch (Exception) { }
+            }
+
+            sentinel.Verify();
 
             Console.WriteLine();
             Console.WriteLine(_passed + " passed, " + Failures.Count + " failed");
@@ -51,7 +232,15 @@ namespace OmoBench.Installer.Tests
             Check("it is not under Program Files",
                 InstallPaths.ProgramDirectory.IndexOf("Program Files", StringComparison.OrdinalIgnoreCase) < 0);
             Check("the uninstall entry is per user",
-                InstallPaths.UninstallKeyPath.StartsWith(@"Software\Microsoft\Windows", StringComparison.Ordinal));
+                InstallPaths.DefaultUninstallKeyPath.StartsWith(
+                    @"Software\Microsoft\Windows", StringComparison.Ordinal));
+
+            // And this suite is not pointed at it, nor at the real handler.
+            Check("the tests write their uninstall entry somewhere else entirely",
+                InstallPaths.UninstallKeyPath.StartsWith(TestRegistryRoot, StringComparison.Ordinal));
+            Check("and their omobench:// registration too",
+                ProtocolRegistration.KeyPath.StartsWith(TestRegistryRoot, StringComparison.Ordinal)
+                && ProtocolRegistration.KeyPath != ProtocolRegistration.DefaultKeyPath);
 
             // The registration must name the installed copy, never wherever
             // the installer was run from.
@@ -278,6 +467,22 @@ namespace OmoBench.Installer.Tests
             public bool Cancelled;
             public DiscoveryCancel Cancel;
 
+            /// <summary>
+            /// Where the "tar" command puts its result. Unpacking is the one
+            /// step whose effects the next steps depend on, so a fixture that
+            /// did nothing here would be testing a preparation that never has
+            /// any source -- which the real validation would, correctly,
+            /// refuse.
+            /// </summary>
+            public string UnpackInto;
+
+            /// <summary>
+            /// Unpack the real archive the installer wrote, with tar.exe,
+            /// rather than planting a known-good tree. Used by the payload
+            /// regression tests, which are about what is actually inside it.
+            /// </summary>
+            public bool UnpackForReal;
+
             public ProcessResult Run(string arguments, int timeout, DiscoveryCancel cancel)
             {
                 Commands.Add(arguments);
@@ -295,6 +500,17 @@ namespace OmoBench.Installer.Tests
                     return SystemPython == null ? Bad("not found") : Ok(SystemPython);
                 }
                 if (FailOn != null && arguments.Contains(FailOn)) { return Bad("simulated failure"); }
+                if (arguments.Contains(" tar ") && UnpackInto != null)
+                {
+                    if (UnpackForReal)
+                    {
+                        if (!ExtractNewestArchive(UnpackInto)) { return Bad("could not unpack"); }
+                    }
+                    else
+                    {
+                        PlantCompletePayload(UnpackInto);
+                    }
+                }
                 return Ok("");
             }
 
@@ -307,6 +523,90 @@ namespace OmoBench.Installer.Tests
             {
                 return new ProcessResult { ExitCode = 1, StandardError = error };
             }
+        }
+
+        /// <summary>
+        /// A complete payload, as a correct build produces one: every required
+        /// path, a few extras, and a manifest covering all of them.
+        /// </summary>
+        private static void PlantCompletePayload(string root)
+        {
+            List<string> written = new List<string>();
+            foreach (string required in RuntimeManifest.RequiredPaths)
+            {
+                WritePayloadFile(root, required, "contents of " + required);
+                written.Add(required);
+            }
+            foreach (string extra in new string[]
+                { "results/README.md", "benchmarks/profiles/chat-small-extended-v1.yaml", "cli/src/omobench/telemetry.py" })
+            {
+                if (!written.Contains(extra))
+                {
+                    WritePayloadFile(root, extra, "contents of " + extra);
+                    written.Add(extra);
+                }
+            }
+            WriteManifest(root, written);
+        }
+
+        private static void WritePayloadFile(string root, string relative, string contents)
+        {
+            string path = Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar));
+            Directory.CreateDirectory(Path.GetDirectoryName(path));
+            File.WriteAllText(path, contents);
+        }
+
+        private static void WriteManifest(string root, IEnumerable<string> relativePaths)
+        {
+            System.Text.StringBuilder manifest = new System.Text.StringBuilder();
+            foreach (string relative in relativePaths)
+            {
+                string path = Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar));
+                manifest.Append(RuntimePayload.Sha256(File.ReadAllBytes(path)))
+                    .Append("  ").Append(relative).Append("\n");
+            }
+            File.WriteAllText(Path.Combine(root, RuntimeManifest.FileName), manifest.ToString());
+        }
+
+        /// <summary>
+        /// Unpack the archive the installer just wrote, the way the real tar
+        /// command would: strip the leading directory and write into the
+        /// destination.
+        /// </summary>
+        private static bool ExtractNewestArchive(string destination)
+        {
+            try
+            {
+                string[] archives = Directory.GetFiles(ManagedEnvironment.ArchiveDirectory(), "*.tar.gz");
+                if (archives.Length == 0) { return false; }
+                Array.Sort(archives, (left, right) =>
+                    File.GetLastWriteTimeUtc(right).CompareTo(File.GetLastWriteTimeUtc(left)));
+                Directory.CreateDirectory(destination);
+                return RunTar("-xzf \"" + archives[0] + "\" -C \"" + destination + "\" --strip-components=1");
+            }
+            catch (Exception) { return false; }
+        }
+
+        private static bool RunTar(string arguments)
+        {
+            System.Diagnostics.Process process = new System.Diagnostics.Process
+            {
+                StartInfo = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.System), "tar.exe"),
+                    Arguments = arguments,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardError = true,
+                    RedirectStandardOutput = true,
+                },
+            };
+            process.Start();
+            process.StandardOutput.ReadToEnd();
+            process.StandardError.ReadToEnd();
+            process.WaitForExit(60000);
+            return process.ExitCode == 0;
         }
 
         private static void ManagedEnvironmentStageTests()
@@ -331,10 +631,14 @@ namespace OmoBench.Installer.Tests
                 BuiltAt = "2026-10-21T00:00:00Z",
             };
 
+            // Where the fixture's "tar" leaves a complete payload, so the
+            // contents check that runs next sees what a correct build ships.
+            string unpacked = ManagedEnvironment.SourceDirectory(build.Revision);
+
             try
             {
                 // The happy path, with the real check standing in as passing.
-                FakeWsl good = new FakeWsl();
+                FakeWsl good = new FakeWsl { UnpackInto = unpacked };
                 ManagedEnvironment.WslRunner = good.Run;
                 ManagedEnvironment.Validator = configuration => new EnvironmentCheckResult
                 {
@@ -371,7 +675,7 @@ namespace OmoBench.Installer.Tests
                 ManagedEnvironment.Validator = configuration => new EnvironmentCheckResult { Ok = true, Summary = "ok" };
 
                 // A missing python3 is explained rather than retried blindly.
-                FakeWsl noPython = new FakeWsl { SystemPython = null };
+                FakeWsl noPython = new FakeWsl { SystemPython = null, UnpackInto = unpacked };
                 ManagedEnvironment.WslRunner = noPython.Run;
                 PreparationResult missingPython = ManagedEnvironment.Prepare("Ubuntu", build, null, null);
                 Check("a distribution without python3 fails at the first stage",
@@ -381,7 +685,7 @@ namespace OmoBench.Installer.Tests
                     && (missingPython.Detail ?? "").Contains("Linux password"));
 
                 // A failed venv points at the usual Ubuntu cause.
-                FakeWsl noVenv = new FakeWsl { FailOn = "-m venv" };
+                FakeWsl noVenv = new FakeWsl { FailOn = "-m venv", UnpackInto = unpacked };
                 ManagedEnvironment.WslRunner = noVenv.Run;
                 PreparationResult venvFailed = ManagedEnvironment.Prepare("Ubuntu", build, null, null);
                 Check("a failed environment creation stops at that stage",
@@ -402,7 +706,7 @@ namespace OmoBench.Installer.Tests
 
                 // Cancellation stops promptly and says nothing more changed.
                 DiscoveryCancel cancel = new DiscoveryCancel();
-                FakeWsl stopping = new FakeWsl { Cancelled = true, Cancel = cancel };
+                FakeWsl stopping = new FakeWsl { Cancelled = true, Cancel = cancel, UnpackInto = unpacked };
                 ManagedEnvironment.WslRunner = stopping.Run;
                 PreparationResult cancelled = ManagedEnvironment.Prepare("Ubuntu", build, cancel, null);
                 Check("cancelling stops the preparation", cancelled.Cancelled && !cancelled.Ok);
@@ -410,7 +714,7 @@ namespace OmoBench.Installer.Tests
                     (cancelled.Summary ?? "").Contains("Nothing further was changed"));
 
                 // An installer with no revision cannot fetch pinned sources.
-                ManagedEnvironment.WslRunner = new FakeWsl().Run;
+                ManagedEnvironment.WslRunner = new FakeWsl { UnpackInto = unpacked }.Run;
                 PreparationResult unstamped = ManagedEnvironment.Prepare(
                     "Ubuntu", new BuildInfo { Version = "0.0.0", Revision = "" }, null, null);
                 Check("an unstamped build refuses rather than guessing a revision",
@@ -418,7 +722,7 @@ namespace OmoBench.Installer.Tests
 
                 // Progress is reported as it goes.
                 int updates = 0;
-                ManagedEnvironment.WslRunner = new FakeWsl().Run;
+                ManagedEnvironment.WslRunner = new FakeWsl { UnpackInto = unpacked }.Run;
                 ManagedEnvironment.Prepare("Ubuntu", build, null, snapshot => updates++);
                 Check("progress is reported stage by stage", updates >= 5);
             }
@@ -431,17 +735,90 @@ namespace OmoBench.Installer.Tests
             }
         }
 
+        /// <summary>
+        /// A companion that exists only here: it counts the close requests it
+        /// receives and decides for itself whether to go.
+        /// </summary>
+        private sealed class FakeCompanion
+        {
+            public int Id;
+            public int CloseRequests;
+
+            /// <summary>Polls after being asked before it goes. Never, by default.</summary>
+            public int ExitAfterPolls = -1;
+
+            /// <summary>Stands in for a process we are not allowed to inspect.</summary>
+            public bool ExitThrows;
+
+            private int _polls;
+
+            public List<Installation.CompanionProcess> Enumerate()
+            {
+                List<Installation.CompanionProcess> running = new List<Installation.CompanionProcess>();
+                running.Add(new Installation.CompanionProcess
+                {
+                    Id = Id,
+                    HasExited = () =>
+                    {
+                        if (ExitThrows) { throw new InvalidOperationException("access denied"); }
+                        _polls++;
+                        return ExitAfterPolls >= 0 && CloseRequests > 0 && _polls >= ExitAfterPolls;
+                    },
+                    RequestClose = () => { CloseRequests++; },
+                });
+                return running;
+            }
+        }
+
         // -- review findings: upgrade safety, redirection, ownership ------------
 
         private static void ReviewRegressionTests()
         {
             Section("Review findings");
 
-            // 1. Upgrade coordination never terminates anything.
-            Check("with no installed companion running, closing trivially succeeds",
-                Installation.TryCloseInstalledCompanions(0));
-            Check("only companions running from the install location are considered",
-                Installation.RunningInstalledCompanions().Count == 0);
+            // 1. Upgrade coordination asks, waits, and never terminates
+            //    anything -- against processes this test invented. It used to
+            //    enumerate the machine's real ones and send them close
+            //    requests.
+            Func<List<Installation.CompanionProcess>> savedEnumerator = Installation.CompanionEnumerator;
+            try
+            {
+                Check("with no companion running, closing trivially succeeds",
+                    Installation.TryCloseInstalledCompanions(0));
+                Check("and nothing is reported as running",
+                    Installation.RunningInstalledCompanions().Count == 0);
+
+                FakeCompanion obliging = new FakeCompanion { Id = 4101, ExitAfterPolls = 2 };
+                Installation.CompanionEnumerator = obliging.Enumerate;
+                Check("a companion that closes when asked lets the work proceed",
+                    Installation.TryCloseInstalledCompanions(5000));
+                Check("it was asked once, politely",
+                    obliging.CloseRequests == 1);
+
+                FakeCompanion stubborn = new FakeCompanion { Id = 4102 };   // never exits
+                Installation.CompanionEnumerator = stubborn.Enumerate;
+                Check("a companion that declines is not forced",
+                    !Installation.TryCloseInstalledCompanions(600));
+                Check("and declining is an answer, asked for only once",
+                    stubborn.CloseRequests == 1);
+
+                // There is no second, harsher option anywhere in the API: a
+                // companion can be asked to close and nothing else.
+                Check("coordination offers no way to terminate a companion",
+                    typeof(Installation.CompanionProcess).GetField("Kill") == null
+                    && !HasMember(typeof(Installation), "KillInstalledCompanions"));
+
+                // A process that cannot be asked whether it has gone is not
+                // treated as gone.
+                FakeCompanion unknowable = new FakeCompanion { Id = 4103, ExitThrows = true };
+                Installation.CompanionEnumerator = unknowable.Enumerate;
+                Check("a companion whose state cannot be read counts as still running",
+                    Installation.RunningInstalledCompanions().Count == 1);
+            }
+            finally
+            {
+                Installation.CompanionEnumerator = savedEnumerator;
+            }
 
             // 2. Uninstall removes what it owns, through paths that no shell
             //    ever sees -- including names a shell would have mangled.
@@ -484,8 +861,18 @@ namespace OmoBench.Installer.Tests
                     ManagedEnvironment.EnvironmentInterpreter("/home/sam")
                         == "/tmp/omobench-test-env/managed-env/bin/python");
                 Check("and where the bundled archive is written",
-                    ManagedEnvironment.ArchiveWindowsPath()
-                        == Path.Combine("/tmp/omobench-test-dl", "omobench-runtime-source.tar.gz"));
+                    ManagedEnvironment.ArchiveDirectory() == "/tmp/omobench-test-dl");
+
+                // Each attempt writes its own file. A fixed name is shared
+                // state between a run that is still going and one that has
+                // just started.
+                string firstArchive = ManagedEnvironment.NewArchivePath();
+                string secondArchive = ManagedEnvironment.NewArchivePath();
+                Check("every attempt gets its own archive path",
+                    firstArchive != secondArchive);
+                Check("and both are inside the archive directory",
+                    firstArchive.StartsWith("/tmp/omobench-test-dl", StringComparison.Ordinal)
+                    && secondArchive.StartsWith("/tmp/omobench-test-dl", StringComparison.Ordinal));
 
                 ManagedEnvironment.EnvironmentRootOverride = null;
                 ManagedEnvironment.ArchiveDirectoryOverride = null;
@@ -493,7 +880,7 @@ namespace OmoBench.Installer.Tests
                     ManagedEnvironment.EnvironmentDirectory("/home/sam")
                         == "/home/sam/.local/share/omobench/managed-env");
                 Check("and the archive defaults to a temporary Windows location",
-                    ManagedEnvironment.ArchiveWindowsPath().StartsWith(
+                    ManagedEnvironment.NewArchivePath().StartsWith(
                         Path.GetTempPath(), StringComparison.OrdinalIgnoreCase));
             }
             finally
@@ -572,7 +959,11 @@ namespace OmoBench.Installer.Tests
             try
             {
                 ManagedEnvironment.SourceRootOverride = lateSandbox;
-                FakeWsl fake = new FakeWsl();
+                FakeWsl fake = new FakeWsl
+                {
+                    UnpackInto = ManagedEnvironment.SourceDirectory(
+                        "b81e907dec8398778cce46c225d4abb0695b1f80"),
+                };
                 ManagedEnvironment.WslRunner = fake.Run;
                 DiscoveryCancel cancel = new DiscoveryCancel();
                 // The check passes, but the person cancelled while it ran.
@@ -807,16 +1198,6 @@ namespace OmoBench.Installer.Tests
                     elapsed < TimeSpan.FromSeconds(5));
                 Check("and it found nothing to act on", report.Ready.Count == 0);
 
-                // Stale-result protection: the window's own state machine is
-                // what decides, and a result from a superseded search changes
-                // nothing. (The companion harness covers this in depth.)
-                SetupState state = new SetupState();
-                int first = state.BeginSearch();
-                state.CancelSearch();
-                int second = state.BeginSearch();
-                Check("a superseded search's completion is refused",
-                    !state.CompleteSearch(first) && state.SearchRunning);
-                Check("while the current one is still accepted", state.CompleteSearch(second));
             }
             finally
             {
@@ -825,6 +1206,552 @@ namespace OmoBench.Installer.Tests
                 Discovery.WslAvailable = savedAvailable;
                 Discovery.SearchRootProvider = savedRoots;
             }
+        }
+
+        // -- the Linux side is somebody's home directory --------------------------
+
+        /// <summary>
+        /// A distribution whose filesystem answers questions about one
+        /// directory. Nothing here reaches a real WSL installation.
+        /// </summary>
+        private sealed class LinuxFixture
+        {
+            public readonly List<string> Commands = new List<string>();
+            public bool RootExists;
+            public bool MarkerExists;
+            public string Listing = "";
+            public bool TouchFails;
+            public bool ExistsUnanswerable;
+
+            public ProcessResult Run(string arguments, int timeout, DiscoveryCancel cancel)
+            {
+                Commands.Add(arguments);
+                if (arguments.Contains(" test -e "))
+                {
+                    if (ExistsUnanswerable) { return new ProcessResult { ExitCode = -1, TimedOut = true }; }
+                    bool marker = arguments.Contains(ManagedEnvironment.OwnershipMarkerName);
+                    bool present = marker ? MarkerExists : RootExists;
+                    return new ProcessResult { ExitCode = present ? 0 : 1 };
+                }
+                if (arguments.Contains(" ls -A "))
+                {
+                    return new ProcessResult { ExitCode = 0, StandardOutput = Listing };
+                }
+                if (arguments.Contains(" touch "))
+                {
+                    if (TouchFails)
+                    {
+                        return new ProcessResult { ExitCode = 1, StandardError = "read-only file system" };
+                    }
+                    MarkerExists = true;
+                    RootExists = true;
+                    return new ProcessResult { ExitCode = 0 };
+                }
+                return new ProcessResult { ExitCode = 0 };
+            }
+        }
+
+        private static bool Ran(List<string> commands, string fragment)
+        {
+            foreach (string command in commands)
+            {
+                if (command.Contains(fragment)) { return true; }
+            }
+            return false;
+        }
+
+        private static void LinuxOwnershipTests()
+        {
+            Section("The managed Linux location is claimed before it is used");
+
+            Func<string, int, DiscoveryCancel, ProcessResult> savedRunner = ManagedEnvironment.WslRunner;
+            string savedEnvironmentRoot = ManagedEnvironment.EnvironmentRootOverride;
+            string savedSourceRoot = ManagedEnvironment.SourceRootOverride;
+            string savedArchive = ManagedEnvironment.ArchiveDirectoryOverride;
+
+            try
+            {
+                ManagedEnvironment.EnvironmentRootOverride = "/home/sam/.local/share/omobench-test";
+
+                // Nothing there yet: created and marked, so a later attempt
+                // can tell its own working area from somebody's data.
+                LinuxFixture fresh = new LinuxFixture();
+                ManagedEnvironment.WslRunner = fresh.Run;
+                Check("an absent Linux location is claimed",
+                    ManagedEnvironment.ClaimLinuxRoot("Ubuntu", "/home/sam", null) == null);
+                Check("and marked as ours", fresh.MarkerExists && Ran(fresh.Commands, " touch "));
+
+                // A previous attempt's working area: a retry continues into it.
+                LinuxFixture ours = new LinuxFixture { RootExists = true, MarkerExists = true };
+                ManagedEnvironment.WslRunner = ours.Run;
+                Check("an environment a previous attempt created can be retried into",
+                    ManagedEnvironment.ClaimLinuxRoot("Ubuntu", "/home/sam", null) == null);
+                Check("without re-reading or re-marking what is already ours",
+                    !Ran(ours.Commands, " ls -A ") && !Ran(ours.Commands, " touch "));
+
+                // Somebody else's directory, which happens to share a name.
+                LinuxFixture theirs = new LinuxFixture
+                {
+                    RootExists = true,
+                    Listing = "notes.md\nvenv\n",
+                };
+                ManagedEnvironment.WslRunner = theirs.Run;
+                string refusal = ManagedEnvironment.ClaimLinuxRoot("Ubuntu", "/home/sam", null);
+                Check("a Linux directory with somebody's files in it is refused", refusal != null);
+                Check("the refusal names it and says what to do",
+                    refusal != null
+                    && refusal.Contains("/home/sam/.local/share/omobench-test")
+                    && refusal.Contains("will not be written into"));
+                Check("and nothing of theirs was written, moved or marked",
+                    !Ran(theirs.Commands, " touch ")
+                    && !Ran(theirs.Commands, " mkdir ")
+                    && !Ran(theirs.Commands, " rm "));
+
+                // An empty directory is fair game.
+                LinuxFixture empty = new LinuxFixture { RootExists = true, Listing = "" };
+                ManagedEnvironment.WslRunner = empty.Run;
+                Check("an empty Linux directory is claimed",
+                    ManagedEnvironment.ClaimLinuxRoot("Ubuntu", "/home/sam", null) == null);
+
+                // A question that cannot be answered is not an answer.
+                LinuxFixture silent = new LinuxFixture { ExistsUnanswerable = true };
+                ManagedEnvironment.WslRunner = silent.Run;
+                string unknown = ManagedEnvironment.ClaimLinuxRoot("Ubuntu", "/home/sam", null);
+                Check("a location whose existence cannot be determined is left alone",
+                    unknown != null && unknown.Contains("left alone"));
+                Check("and nothing was created there on the strength of a guess",
+                    !Ran(silent.Commands, " touch "));
+
+                // A directory that cannot be created is reported, not assumed.
+                LinuxFixture readOnly = new LinuxFixture { TouchFails = true };
+                ManagedEnvironment.WslRunner = readOnly.Run;
+                Check("a location that cannot be created is reported",
+                    ManagedEnvironment.ClaimLinuxRoot("Ubuntu", "/home/sam", null) != null);
+
+                // And the whole preparation refuses before a venv exists or
+                // pip has been pointed anywhere.
+                string sandbox = Path.Combine(Path.GetTempPath(),
+                    "omobench-linux-claim-" + Guid.NewGuid().ToString("N"));
+                string archives = Path.Combine(sandbox, "archives");
+                ManagedEnvironment.SourceRootOverride = Path.Combine(sandbox, "source");
+                ManagedEnvironment.ArchiveDirectoryOverride = archives;
+                BuildInfo build = new BuildInfo
+                {
+                    Version = "0.1.0",
+                    Revision = "b81e907dec8398778cce46c225d4abb0695b1f80",
+                };
+                try
+                {
+                    OccupiedLinux occupied = new OccupiedLinux
+                    {
+                        UnpackInto = ManagedEnvironment.SourceDirectory(build.Revision),
+                    };
+                    ManagedEnvironment.WslRunner = occupied.Run;
+                    PreparationResult refused = ManagedEnvironment.Prepare("Ubuntu", build, null, null);
+                    Check("preparation refuses an occupied Linux location",
+                        !refused.Ok && refused.Stages[2].State == StageState.Failed);
+                    Check("and says which location is in use",
+                        (refused.Summary ?? "").Contains("already in use"));
+                    Check("no environment was created and nothing was installed",
+                        !Ran(occupied.Commands, "-m venv")
+                        && !Ran(occupied.Commands, "-m pip")
+                        && refused.Stages[3].State == StageState.Pending);
+                }
+                finally
+                {
+                    try { Directory.Delete(sandbox, true); } catch (Exception) { }
+                }
+            }
+            finally
+            {
+                ManagedEnvironment.WslRunner = savedRunner;
+                ManagedEnvironment.EnvironmentRootOverride = savedEnvironmentRoot;
+                ManagedEnvironment.SourceRootOverride = savedSourceRoot;
+                ManagedEnvironment.ArchiveDirectoryOverride = savedArchive;
+            }
+        }
+
+        /// <summary>
+        /// A distribution that is ready for OmoBench in every respect except
+        /// that the managed location already belongs to somebody.
+        /// </summary>
+        private sealed class OccupiedLinux
+        {
+            public readonly List<string> Commands = new List<string>();
+            public string UnpackInto;
+
+            public ProcessResult Run(string arguments, int timeout, DiscoveryCancel cancel)
+            {
+                Commands.Add(arguments);
+                if (arguments.Contains(" printenv HOME"))
+                {
+                    return new ProcessResult { ExitCode = 0, StandardOutput = "/home/sam\n" };
+                }
+                if (arguments.Contains(" which python3"))
+                {
+                    return new ProcessResult { ExitCode = 0, StandardOutput = "/usr/bin/python3\n" };
+                }
+                if (arguments.Contains(" tar "))
+                {
+                    if (UnpackInto != null) { PlantCompletePayload(UnpackInto); }
+                    return new ProcessResult { ExitCode = 0 };
+                }
+                if (arguments.Contains(" test -e "))
+                {
+                    // The root is there; the ownership marker is not.
+                    return new ProcessResult
+                    {
+                        ExitCode = arguments.Contains(ManagedEnvironment.OwnershipMarkerName) ? 1 : 0,
+                    };
+                }
+                if (arguments.Contains(" ls -A "))
+                {
+                    return new ProcessResult { ExitCode = 0, StandardOutput = "my-own-work\n" };
+                }
+                return new ProcessResult { ExitCode = 0 };
+            }
+        }
+
+        // -- what is actually inside the payload ---------------------------------
+
+        private static void PayloadContentsTests()
+        {
+            Section("Payload contents: required files, not just a file count");
+
+            string sandbox = Path.Combine(Path.GetTempPath(),
+                "omobench-contents-" + Guid.NewGuid().ToString("N"));
+            Func<Stream> savedOpener = RuntimePayload.Opener;
+            string savedSha = RuntimePayload.ExpectedSha256;
+            long savedBytes = RuntimePayload.ExpectedBytes;
+            Func<string, int, DiscoveryCancel, ProcessResult> savedRunner = ManagedEnvironment.WslRunner;
+            Func<Configuration, EnvironmentCheckResult> savedValidator = ManagedEnvironment.Validator;
+            string savedSourceRoot = ManagedEnvironment.SourceRootOverride;
+            string savedArchiveRoot = ManagedEnvironment.ArchiveDirectoryOverride;
+
+            try
+            {
+                // 1. The archive this installer actually carries, unpacked the
+                //    way the installer unpacks it, checked the way the
+                //    installer checks it.
+                string realArchive = Path.Combine(sandbox, "real.tar.gz");
+                string realUnpacked = Path.Combine(sandbox, "real-unpacked");
+                string payloadFailure;
+                bool wrote = RuntimePayload.TryWrite(realArchive, out payloadFailure);
+                Check("the embedded payload is written for inspection: " + (payloadFailure ?? "ok"), wrote);
+
+                if (wrote)
+                {
+                    Directory.CreateDirectory(realUnpacked);
+                    bool unpacked = RunTar("-xzf \"" + realArchive + "\" -C \"" + realUnpacked
+                        + "\" --strip-components=1");
+                    Check("the embedded payload is a real archive that unpacks", unpacked);
+
+                    string contentsFailure;
+                    Check("and its contents satisfy the installer's own check: "
+                        + (RuntimeManifest.Validate(realUnpacked, out contentsFailure)
+                            ? "ok" : contentsFailure),
+                        RuntimeManifest.Validate(realUnpacked, out contentsFailure));
+
+                    string[] unpackedFiles = Directory.GetFiles(
+                        realUnpacked, "*", SearchOption.AllDirectories);
+                    Check("it carries a working OmoBench rather than a token few files: "
+                        + unpackedFiles.Length + " files", unpackedFiles.Length > 20);
+                    Check("including the results validator",
+                        File.Exists(Path.Combine(realUnpacked, @"tools\validate_results.py")));
+                    Check("and the panel's web assets",
+                        File.Exists(Path.Combine(realUnpacked, @"cli\src\omobench\web\index.html")));
+
+                    // Tampering with an unpacked file is caught by the manifest.
+                    File.AppendAllText(
+                        Path.Combine(realUnpacked, @"tools\validate_results.py"), "\n# changed\n");
+                    string tampered;
+                    Check("a file changed after unpacking fails the manifest",
+                        !RuntimeManifest.Validate(realUnpacked, out tampered)
+                        && tampered.Contains("does not match its own manifest"));
+                }
+
+                // 2. The regression this check exists for: a payload with
+                //    plenty of files that is still not OmoBench. The byte
+                //    count and the checksum both pass; it is the contents that
+                //    do not.
+                string deficientRoot = Path.Combine(sandbox, "deficient", "omobench");
+                List<string> planted = new List<string>();
+                foreach (string required in RuntimeManifest.RequiredPaths)
+                {
+                    if (required == "tools/validate_results.py"
+                        || required == "cli/src/omobench/web/index.html")
+                    {
+                        continue;    // the two the build was supposed to carry
+                    }
+                    WritePayloadFile(deficientRoot, required, "contents of " + required);
+                    planted.Add(required);
+                }
+                for (int extra = 0; extra < 6; extra++)
+                {
+                    string filler = "results/sample-" + extra + ".md";
+                    WritePayloadFile(deficientRoot, filler, "filler " + extra);
+                    planted.Add(filler);
+                }
+                WriteManifest(deficientRoot, planted);
+
+                Check("the regression payload is large enough to pass a file count: "
+                    + (planted.Count + 1) + " files", planted.Count + 1 > 20);
+
+                string deficientArchive = Path.Combine(sandbox, "deficient.tar.gz");
+                Check("the regression payload is packed into a real archive",
+                    RunTar("-czf \"" + deficientArchive + "\" -C \""
+                        + Path.Combine(sandbox, "deficient") + "\" omobench"));
+
+                byte[] deficientBytes = File.ReadAllBytes(deficientArchive);
+                RuntimePayload.Opener = () => new MemoryStream(deficientBytes);
+                RuntimePayload.ExpectedSha256 = RuntimePayload.Sha256(deficientBytes);
+                RuntimePayload.ExpectedBytes = deficientBytes.Length;
+
+                string regressionSandbox = Path.Combine(sandbox, "regression");
+                ManagedEnvironment.SourceRootOverride = Path.Combine(regressionSandbox, "source");
+                ManagedEnvironment.ArchiveDirectoryOverride = Path.Combine(regressionSandbox, "archives");
+                ManagedEnvironment.Validator = configuration =>
+                    new EnvironmentCheckResult { Ok = true, Summary = "should never be reached" };
+
+                BuildInfo build = new BuildInfo
+                {
+                    Version = "0.1.0",
+                    Revision = "b81e907dec8398778cce46c225d4abb0695b1f80",
+                };
+                FakeWsl distribution = new FakeWsl
+                {
+                    UnpackInto = ManagedEnvironment.SourceDirectory(build.Revision),
+                    UnpackForReal = true,
+                };
+                ManagedEnvironment.WslRunner = distribution.Run;
+
+                PreparationResult result = ManagedEnvironment.Prepare("Ubuntu", build, null, null);
+
+                Check("an incomplete payload is not reported as ready", !result.Ok);
+                Check("it fails at the source stage, before anything is installed",
+                    result.Stages[1].State == StageState.Failed
+                    && result.Stages[2].State == StageState.Pending
+                    && result.Stages[3].State == StageState.Pending);
+                Check("no Python environment was created and no pip was run",
+                    !Ran(distribution.Commands, "-m venv") && !Ran(distribution.Commands, "-m pip"));
+                Check("and it names the files that are missing",
+                    (result.Detail ?? "").Contains("tools/validate_results.py")
+                    && (result.Detail ?? "").Contains("cli/src/omobench/web/index.html"));
+                Check("no configuration is handed back to be saved",
+                    result.Configuration == null);
+
+                // 3. A manifest is data, and is read as data.
+                string parseFailure;
+                Check("a manifest naming a path outside the source is refused",
+                    RuntimeManifest.Parse(
+                        new string('a', 64) + "  ../../../etc/passwd", out parseFailure) == null
+                    && parseFailure.Contains("outside"));
+                Check("a line that is not \"checksum path\" is refused",
+                    RuntimeManifest.Parse("not a manifest line", out parseFailure) == null);
+                Check("an empty manifest is refused",
+                    RuntimeManifest.Parse("   \n\n", out parseFailure) == null);
+                Check("a well-formed manifest parses",
+                    RuntimeManifest.Parse(
+                        new string('b', 64) + "  cli/pyproject.toml", out parseFailure) != null);
+                Check("an archive listing is checked against the required paths",
+                    RuntimeManifest.MissingFrom(new string[] { "omobench/cli/pyproject.toml" }).Count
+                        == RuntimeManifest.RequiredPaths.Length - 1);
+
+                // An unpacked copy with no manifest at all is refused rather
+                // than trusted.
+                string bare = Path.Combine(sandbox, "bare");
+                Directory.CreateDirectory(bare);
+                string bareFailure;
+                Check("an unpacked copy with no manifest is refused",
+                    !RuntimeManifest.Validate(bare, out bareFailure)
+                    && bareFailure.Contains(RuntimeManifest.FileName));
+            }
+            finally
+            {
+                RuntimePayload.Opener = savedOpener;
+                RuntimePayload.ExpectedSha256 = savedSha;
+                RuntimePayload.ExpectedBytes = savedBytes;
+                ManagedEnvironment.WslRunner = savedRunner;
+                ManagedEnvironment.Validator = savedValidator;
+                ManagedEnvironment.SourceRootOverride = savedSourceRoot;
+                ManagedEnvironment.ArchiveDirectoryOverride = savedArchiveRoot;
+                try { Directory.Delete(sandbox, true); } catch (Exception) { }
+            }
+        }
+
+        // -- uninstall coordinates before it removes anything --------------------
+
+        private static void UninstallCoordinationTests()
+        {
+            Section("Uninstall: coordination, refusal and accurate outcomes");
+
+            string savedRoot = InstallPaths.RootOverride;
+            Func<List<Installation.CompanionProcess>> savedEnumerator = Installation.CompanionEnumerator;
+            int savedWait = Installation.CloseWaitMilliseconds;
+            string sandbox = Path.Combine(Path.GetTempPath(),
+                "omobench-uninstall-" + Guid.NewGuid().ToString("N"));
+
+            try
+            {
+                InstallPaths.RootOverride = sandbox;
+                // The real wait gives a person time to answer a question about
+                // a running benchmark; the fixture answers immediately.
+                Installation.CloseWaitMilliseconds = 600;
+                BuildInfo build = new BuildInfo { Version = "0.1.0", Revision = "abc123" };
+
+                // A complete, entirely test-owned installation: files under a
+                // throwaway root, registry entries under the test's own keys.
+                InstallOutcome installed = Installation.Install(
+                    System.Text.Encoding.UTF8.GetBytes("not really a program"), null, build);
+                Check("a sandboxed install succeeds", installed.Ok);
+                Check("  it wrote an Apps & features entry", UninstallEntryExists());
+                Check("  and registered omobench:// at the test-owned location",
+                    ProtocolRegistration.RegisteredCommand() != null);
+
+                // The companion is open and declines to close. Nothing may be
+                // removed -- not the files, and not the two entries a person
+                // would need to try again.
+                FakeCompanion open = new FakeCompanion { Id = 5001 };
+                Installation.CompanionEnumerator = open.Enumerate;
+                InstallOutcome postponed = Installation.Uninstall();
+                Check("an uninstall is postponed while the companion is open", !postponed.Ok);
+                Check("  it was asked, not terminated", open.CloseRequests == 1);
+                Check("  and says nothing was removed",
+                    (postponed.Summary ?? "").Contains("nothing was removed"));
+                Check("  the program is still there", File.Exists(InstallPaths.CompanionPath));
+                Check("  its Apps & features entry is still there", UninstallEntryExists());
+                Check("  and its omobench:// registration is still there",
+                    ProtocolRegistration.RegisteredCommand() != null);
+
+                // The companion has gone, but a required file cannot be
+                // deleted: an incomplete removal, reported as one, with the
+                // entry to retry from left in place.
+                Installation.CompanionEnumerator = NoCompanions;
+                using (FileStream held = new FileStream(InstallPaths.CompanionPath,
+                    FileMode.Open, FileAccess.Read, FileShare.None))
+                {
+                    InstallOutcome blocked = Installation.Uninstall();
+                    Check("a required file that cannot be deleted is a failed uninstall",
+                        !blocked.Ok);
+                    Check("  it names what is still present",
+                        blocked.Describe().Contains(InstallPaths.CompanionPath));
+                    Check("  the Apps & features entry is kept so it can be retried",
+                        UninstallEntryExists());
+                    Check("  and so is the omobench:// registration",
+                        ProtocolRegistration.RegisteredCommand() != null);
+                    Check("  it does not claim OmoBench was removed",
+                        !blocked.Describe().Contains("has been removed"));
+                    GC.KeepAlive(held);
+                }
+
+                // Now nothing is in the way.
+                InstallOutcome removed = Installation.Uninstall();
+                Check("the retry succeeds once the file is free", removed.Ok);
+                Check("  the program is gone", !File.Exists(InstallPaths.CompanionPath));
+                Check("  the Apps & features entry is gone", !UninstallEntryExists());
+                Check("  the omobench:// registration is gone",
+                    ProtocolRegistration.RegisteredCommand() == null);
+                Check("  and it says what was left alone",
+                    removed.Describe().Contains("were not touched"));
+            }
+            finally
+            {
+                InstallPaths.RootOverride = savedRoot;
+                Installation.CompanionEnumerator = savedEnumerator;
+                Installation.CloseWaitMilliseconds = savedWait;
+                try { Directory.Delete(sandbox, true); } catch (Exception) { }
+                try { Registry.CurrentUser.DeleteSubKeyTree(InstallPaths.UninstallKeyPath, false); }
+                catch (Exception) { }
+                try { Registry.CurrentUser.DeleteSubKeyTree(ProtocolRegistration.KeyPath, false); }
+                catch (Exception) { }
+            }
+        }
+
+        private static bool UninstallEntryExists()
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(InstallPaths.UninstallKeyPath))
+                {
+                    return key != null;
+                }
+            }
+            catch (Exception) { return false; }
+        }
+
+        // -- the installer's own completion logic --------------------------------
+
+        /// <summary>
+        /// Whether a finished piece of background work still describes what
+        /// the installer window is doing.
+        ///
+        /// This is <see cref="WizardState"/>, which is what
+        /// <see cref="InstallerForm"/> actually uses. The previous version of
+        /// this test drove the companion's SetupState instead -- a similar
+        /// class in a different window -- so the installer's own logic, the
+        /// code that runs when somebody installs OmoBench, had no test at all.
+        /// </summary>
+        private static void WizardCompletionTests()
+        {
+            Section("Installer completion: stale results and late cancellation");
+
+            // A result from a check that has since been replaced.
+            WizardState superseded = new WizardState();
+            int first = superseded.Begin(new DiscoveryCancel());
+            int second = superseded.Begin(new DiscoveryCancel());
+            Check("a superseded completion is refused", !superseded.TryAccept(first));
+            Check("and it does not clear the newer operation's working flag",
+                superseded.Working);
+            Check("the newer completion is accepted", superseded.TryAccept(second));
+            Check("and only then is the window idle", !superseded.Working);
+
+            // The same, but the stale result arrives while the newer operation
+            // is still running: nothing it would change may be changed.
+            WizardState overlapping = new WizardState();
+            int older = overlapping.Begin(new DiscoveryCancel());
+            int newer = overlapping.Begin(new DiscoveryCancel());
+            Check("a stale result arriving mid-operation changes nothing",
+                !overlapping.TryAccept(older) && overlapping.Working
+                && overlapping.Generation == newer);
+
+            // Success, queued for the UI thread -- and then the person presses
+            // Stop before it is applied. The work succeeded; the instruction
+            // was withdrawn, so nothing is saved and nothing is announced.
+            WizardState withdrawn = new WizardState();
+            int queued = withdrawn.Begin(new DiscoveryCancel());
+            withdrawn.Cancel();
+            Check("a success queued before Stop is refused once Stop is pressed",
+                !withdrawn.TryAccept(queued));
+            Check("and the window is not left believing work is still running",
+                !withdrawn.Working);
+
+            // The same withdrawal, expressed through the token alone -- which
+            // is how a cancellation reaches the background work itself.
+            WizardState tokenCancelled = new WizardState();
+            DiscoveryCancel token = new DiscoveryCancel();
+            int generation = tokenCancelled.Begin(token);
+            token.Cancel();
+            Check("a cancelled token refuses its own operation's success",
+                !tokenCancelled.TryAccept(generation));
+            Check("and that operation is over, not still in flight",
+                !tokenCancelled.Working);
+
+            // Cancelling also stops the work, not just its result.
+            WizardState stopping = new WizardState();
+            DiscoveryCancel stopToken = new DiscoveryCancel();
+            stopping.Begin(stopToken);
+            stopping.Cancel();
+            Check("cancelling cancels the token the background work is watching",
+                stopToken.IsCancelled);
+
+            // And the window keeps no second copy of any of this. Two records
+            // of "is work running" is how a stale result cleared a flag that
+            // belonged to a newer one in the first place.
+            Check("the installer window keeps no completion state of its own",
+                typeof(InstallerForm).GetField("_working",
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance) == null
+                && typeof(InstallerForm).GetField("_generation",
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance) == null);
         }
 
         // -- identity and honesty about signing ---------------------------------

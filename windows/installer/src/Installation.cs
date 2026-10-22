@@ -96,6 +96,31 @@ namespace OmoBench.Installer
         }
 
         /// <summary>
+        /// One running companion, reduced to what coordination needs: who it
+        /// is, whether it has gone, and how to ask it to close.
+        ///
+        /// Introduced so tests can supply their own. Enumerating real
+        /// processes from a test meant the suite reached out and touched the
+        /// application actually installed on the machine.
+        /// </summary>
+        public sealed class CompanionProcess
+        {
+            public int Id;
+            public Func<bool> HasExited;
+            public Action RequestClose;
+        }
+
+        /// <summary>Finds companions to coordinate with. Replaced by tests only.</summary>
+        internal static Func<List<CompanionProcess>> CompanionEnumerator = EnumerateInstalledCompanions;
+
+        /// <summary>
+        /// How long an uninstall waits for the companion to close. Long
+        /// enough for a person to answer a question about a running benchmark.
+        /// Shortened by tests only.
+        /// </summary>
+        internal static int CloseWaitMilliseconds = 30000;
+
+        /// <summary>
         /// Companions running *from this installation*, which are the only
         /// ones whose program file this installer is about to replace.
         ///
@@ -108,9 +133,32 @@ namespace OmoBench.Installer
         /// properly when told to close; killing it would bypass that question
         /// and orphan the work it was told to protect.
         /// </summary>
-        public static List<Process> RunningInstalledCompanions()
+        public static List<CompanionProcess> RunningInstalledCompanions()
         {
-            List<Process> running = new List<Process>();
+            List<CompanionProcess> found;
+            try { found = CompanionEnumerator() ?? new List<CompanionProcess>(); }
+            catch (Exception) { return new List<CompanionProcess>(); }
+
+            // An enumeration is a snapshot. Asking each one whether it has
+            // actually gone is what makes waiting for a close request mean
+            // something -- and a process we cannot ask is treated as still
+            // running, because "probably gone" is not an answer worth
+            // deleting a program on.
+            List<CompanionProcess> running = new List<CompanionProcess>();
+            foreach (CompanionProcess process in found)
+            {
+                if (process == null) { continue; }
+                bool exited;
+                try { exited = process.HasExited != null && process.HasExited(); }
+                catch (Exception) { exited = false; }
+                if (!exited) { running.Add(process); }
+            }
+            return running;
+        }
+
+        private static List<CompanionProcess> EnumerateInstalledCompanions()
+        {
+            List<CompanionProcess> running = new List<CompanionProcess>();
             string installed;
             try { installed = Path.GetFullPath(InstallPaths.CompanionPath); }
             catch (Exception) { return running; }
@@ -129,13 +177,26 @@ namespace OmoBench.Installer
                     // to this installation, so it is left alone.
                     continue;
                 }
-                if (path != null && string.Equals(
+                if (path == null || !string.Equals(
                         Path.GetFullPath(path), installed, StringComparison.OrdinalIgnoreCase))
                 {
-                    running.Add(process);
+                    continue;
                 }
+                Process captured = process;
+                running.Add(new CompanionProcess
+                {
+                    Id = SafeId(captured),
+                    HasExited = () => { try { return captured.HasExited; } catch (Exception) { return true; } },
+                    RequestClose = () => { try { captured.CloseMainWindow(); } catch (Exception) { } },
+                });
             }
             return running;
+        }
+
+        private static int SafeId(Process process)
+        {
+            try { return process.Id; }
+            catch (Exception) { return 0; }
         }
 
         /// <summary>
@@ -149,15 +210,15 @@ namespace OmoBench.Installer
         /// </summary>
         public static bool TryCloseInstalledCompanions(int waitMilliseconds)
         {
-            List<Process> running = RunningInstalledCompanions();
+            List<CompanionProcess> running = RunningInstalledCompanions();
             if (running.Count == 0)
             {
                 return true;
             }
 
-            foreach (Process process in running)
+            foreach (CompanionProcess process in running)
             {
-                try { process.CloseMainWindow(); }
+                try { process.RequestClose(); }
                 catch (Exception) { }
             }
 
@@ -343,6 +404,63 @@ namespace OmoBench.Installer
         {
             InstallOutcome outcome = new InstallOutcome();
 
+            // Ask first, and remove nothing until it has gone. Unregistering
+            // the handler or deleting the Start menu entry underneath a
+            // running companion would leave the person with a half-removed
+            // program they can no longer launch -- and if it is protecting a
+            // benchmark, that question is still theirs to answer.
+            if (!TryCloseInstalledCompanions(CloseWaitMilliseconds))
+            {
+                outcome.Ok = false;
+                outcome.Summary = "OmoBench is still running, so nothing was removed.";
+                outcome.Step("The OmoBench companion was asked to close and is still open. That "
+                    + "usually means a benchmark is running and it asked you about it, or you chose "
+                    + "to keep it open.");
+                outcome.Step("Nothing was changed: the program, its Start menu entry, its "
+                    + "Apps & features entry and its omobench:// registration are all still in place. "
+                    + "Close the companion when you are ready and uninstall again.");
+                return outcome;
+            }
+
+            // Files first. The Apps & features entry and the omobench://
+            // registration are how a person reaches this program -- and how
+            // they would reach the uninstaller again -- so they are removed
+            // only once the files they point at are actually gone.
+            try
+            {
+                RemoveProgramFiles(outcome);
+            }
+            catch (Exception error)
+            {
+                outcome.Warn("Some program files could not be removed: " + error.Message);
+            }
+
+            // The companion executable and the manifest beside it are what make
+            // this an installation. If either is still there, the removal did
+            // not happen, whatever else succeeded -- and saying otherwise
+            // leaves a person with a program they were told was gone and no
+            // entry to retry from.
+            List<string> stillPresent = new List<string>();
+            foreach (string required in new string[] { InstallPaths.CompanionPath, InstallPaths.ManifestPath })
+            {
+                try { if (File.Exists(required)) { stillPresent.Add(required); } }
+                catch (Exception) { stillPresent.Add(required); }
+            }
+
+            if (stillPresent.Count > 0)
+            {
+                outcome.Ok = false;
+                outcome.Summary = "OmoBench could not be completely removed.";
+                foreach (string remaining in stillPresent)
+                {
+                    outcome.Step("Still present: " + remaining);
+                }
+                outcome.Step("This usually means the program is still open. Its Apps & features entry "
+                    + "and omobench:// registration have been left in place, so close it and "
+                    + "uninstall again from there.");
+                return outcome;
+            }
+
             try
             {
                 outcome.Step(ProtocolRegistration.Unregister(InstallPaths.CompanionPath).Replace("\n", " "));
@@ -373,15 +491,6 @@ namespace OmoBench.Installer
             catch (Exception error)
             {
                 outcome.Warn("Could not remove the Apps & features entry: " + error.Message);
-            }
-
-            try
-            {
-                RemoveProgramFiles(outcome);
-            }
-            catch (Exception error)
-            {
-                outcome.Warn("Some program files could not be removed: " + error.Message);
             }
 
             outcome.Ok = true;
@@ -513,23 +622,48 @@ namespace OmoBench.Installer
         /// </summary>
         public static InstallOutcome FinalizeUninstall(int originalProcessId)
         {
-            WaitForExit(originalProcessId, 30000);
+            if (!WaitForExit(originalProcessId, 30000))
+            {
+                // The original is still holding its own file. Deleting around
+                // it would report a clean removal that did not happen.
+                InstallOutcome waiting = new InstallOutcome();
+                waiting.Ok = false;
+                waiting.Summary = "The previous uninstaller has not exited, so nothing was removed.";
+                waiting.Step("Nothing was changed. Close any OmoBench window that is still open and "
+                    + "run the uninstaller again from Apps & features.");
+                return waiting;
+            }
             return Uninstall();
         }
 
-        private static void WaitForExit(int processId, int timeoutMilliseconds)
+        /// <summary>
+        /// Wait for a process to exit. Returns false when it is still running,
+        /// or when we could not tell -- never "probably gone".
+        /// </summary>
+        private static bool WaitForExit(int processId, int timeoutMilliseconds)
         {
-            if (processId <= 0) { return; }
+            if (processId <= 0) { return true; }
+            Process original;
             try
             {
-                Process original = Process.GetProcessById(processId);
-                original.WaitForExit(timeoutMilliseconds);
+                original = Process.GetProcessById(processId);
             }
             catch (ArgumentException)
             {
-                // Already gone, which is the state we were waiting for.
+                return true;    // already gone, which is what we waited for
             }
-            catch (Exception) { }
+            catch (Exception)
+            {
+                return false;   // cannot tell; do not assume
+            }
+            try
+            {
+                return original.WaitForExit(timeoutMilliseconds);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
         }
     }
 }

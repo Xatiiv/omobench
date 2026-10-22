@@ -24,9 +24,33 @@ namespace OmoBench.Installer
         public const string CompanionFileName = "OmoBenchCompanion.exe";
         public const string UninstallerFileName = "OmoBenchUninstall.exe";
 
-        /// <summary>Identifies this product's uninstall entry for this user.</summary>
-        public const string UninstallKeyPath =
+        /// <summary>
+        /// The real Apps &amp; features entry: the one a person's installation
+        /// uses, and the one the tests must leave alone.
+        /// </summary>
+        public const string DefaultUninstallKeyPath =
             @"Software\Microsoft\Windows\CurrentVersion\Uninstall\OmoBench";
+
+        /// <summary>
+        /// Redirects the uninstall entry, so a test can create and delete one
+        /// without touching the entry a real installation depends on.
+        ///
+        /// RootOverride only moves files; the registry location was fixed, so
+        /// an uninstall test ran against the live Apps &amp; features entry and
+        /// would have deleted it. Null in normal use.
+        /// </summary>
+        internal static string UninstallKeyPathOverride = null;
+
+        /// <summary>Identifies this product's uninstall entry for this user.</summary>
+        public static string UninstallKeyPath
+        {
+            get
+            {
+                return string.IsNullOrEmpty(UninstallKeyPathOverride)
+                    ? DefaultUninstallKeyPath
+                    : UninstallKeyPathOverride;
+            }
+        }
 
         /// <summary>
         /// Overrides every location below, so a test can install into a
