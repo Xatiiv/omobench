@@ -130,8 +130,37 @@ namespace OmoBench.Installer
             }
         }
 
+        /// <summary>
+        /// One process that might be an installed companion.
+        ///
+        /// Every question about it can fail: what it is running, whether it
+        /// has gone, whether it will accept a close request. The enumeration
+        /// is written in terms of these three so a test can make any of them
+        /// fail without a real process to fail against.
+        /// </summary>
+        public sealed class CompanionCandidate
+        {
+            public int Id;
+
+            /// <summary>The executable it is running. May throw, or be null.</summary>
+            public Func<string> ExecutablePath;
+
+            public Func<bool> HasExited;
+            public Action RequestClose;
+        }
+
+        /// <summary>The process name an installed companion runs under.</summary>
+        public const string CompanionProcessName = "OmoBenchCompanion";
+
+        /// <summary>
+        /// Lists the processes that might be installed companions. Replaced
+        /// by tests only -- this is the half of the enumeration that talks to
+        /// the operating system.
+        /// </summary>
+        internal static Func<List<CompanionCandidate>> CandidateLister = ListCandidateProcesses;
+
         /// <summary>Finds companions to coordinate with. Replaced by tests only.</summary>
-        internal static Func<List<CompanionProcess>> CompanionEnumerator = EnumerateInstalledCompanions;
+        internal static Func<CompanionScan> CompanionEnumerator = EnumerateInstalledCompanions;
 
         /// <summary>
         /// How long an uninstall waits for the companion to close. Long
@@ -155,8 +184,7 @@ namespace OmoBench.Installer
         /// </summary>
         public static CompanionScan ScanInstalledCompanions()
         {
-            CompanionScan scan = new CompanionScan();
-            List<CompanionProcess> found;
+            CompanionScan found;
             try { found = CompanionEnumerator(); }
             catch (Exception)
             {
@@ -164,21 +192,18 @@ namespace OmoBench.Installer
                 // here is how a failed enumeration used to become permission
                 // to replace or delete the program -- without anyone ever
                 // having looked.
-                scan.Answered = false;
-                return scan;
+                return Unanswered();
             }
-            if (found == null)
-            {
-                scan.Answered = false;
-                return scan;
-            }
+            if (found == null) { return Unanswered(); }
 
             // An enumeration is a snapshot. Asking each one whether it has
             // actually gone is what makes waiting for a close request mean
             // something -- and a process we cannot ask is treated as still
             // running, because "probably gone" is not an answer worth
             // deleting a program on.
-            foreach (CompanionProcess process in found)
+            CompanionScan scan = new CompanionScan();
+            scan.Answered = found.Answered;
+            foreach (CompanionProcess process in found.Running)
             {
                 if (process == null) { continue; }
                 bool exited;
@@ -189,62 +214,123 @@ namespace OmoBench.Installer
             return scan;
         }
 
+        private static CompanionScan Unanswered()
+        {
+            CompanionScan scan = new CompanionScan();
+            scan.Answered = false;
+            return scan;
+        }
+
         public static List<CompanionProcess> RunningInstalledCompanions()
         {
             return ScanInstalledCompanions().Running;
         }
 
-        internal static List<CompanionProcess> EnumerateInstalledCompanions()
+        private static List<CompanionCandidate> ListCandidateProcesses()
         {
-            List<CompanionProcess> running = new List<CompanionProcess>();
-            string installed;
-            try { installed = Path.GetFullPath(InstallPaths.CompanionPath); }
-            catch (Exception) { return running; }
-
-            Process[] candidates;
-            try { candidates = Process.GetProcessesByName("OmoBenchCompanion"); }
-            catch (Exception) { return running; }
-
-            foreach (Process process in candidates)
+            List<CompanionCandidate> candidates = new List<CompanionCandidate>();
+            foreach (Process process in Process.GetProcessesByName(CompanionProcessName))
             {
-                string path = null;
-                try { path = process.MainModule == null ? null : process.MainModule.FileName; }
-                catch (Exception)
-                {
-                    // A process we cannot inspect is not one we can attribute
-                    // to this installation, so it is left alone.
-                    continue;
-                }
-                if (path == null || !string.Equals(
-                        Path.GetFullPath(path), installed, StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-                running.Add(Adapt(process));
+                candidates.Add(Describe(process));
             }
-            return running;
+            return candidates;
         }
 
         /// <summary>
-        /// One real process, as coordination sees it.
+        /// One real process, as the enumeration sees it.
         ///
-        /// HasExited deliberately does not swallow: a query that fails has
-        /// not established that the process has gone, and returning true
-        /// claimed exactly that. The caller treats a failed query as still
-        /// running, which is the only safe reading when the next step is
-        /// replacing or deleting the program.
+        /// None of these deliberately swallow: a query that fails has not
+        /// established anything, and answering it anyway is how an unreadable
+        /// process became "it has exited" and an unreadable path became "not
+        /// ours". The caller decides what a failure means.
         /// </summary>
-        internal static CompanionProcess Adapt(Process process)
+        internal static CompanionCandidate Describe(Process process)
         {
             Process captured = process;
-            return new CompanionProcess
+            return new CompanionCandidate
             {
                 Id = SafeId(captured),
+                ExecutablePath = () => captured.MainModule == null ? null : captured.MainModule.FileName,
                 HasExited = () => captured.HasExited,
                 RequestClose = () => { try { captured.CloseMainWindow(); } catch (Exception) { } },
             };
         }
 
+        /// <summary>
+        /// Which processes are this installation's companion -- and whether
+        /// that could be established at all.
+        ///
+        /// Three outcomes, kept apart on purpose. A process whose executable
+        /// is a different file is confirmed to be somebody else's program and
+        /// is excluded. A process running the installed executable is this
+        /// installation's, and can be asked to close. Anything the enumeration
+        /// could not read -- the process list, a process's executable, the
+        /// installed path to compare against -- leaves the answer open: it is
+        /// named like the companion and might be this one, so it is neither
+        /// excluded nor signalled, and the scan reports that nothing was
+        /// established.
+        ///
+        /// Every one of those failures used to end in the same place: an empty
+        /// list, which coordination read as "none are running", which is
+        /// permission to replace the program file or delete it. The only thing
+        /// that may be ignored outright is a process confirmed to have exited,
+        /// and a question that failed is not that confirmation.
+        /// </summary>
+        internal static CompanionScan EnumerateInstalledCompanions()
+        {
+            CompanionScan scan = new CompanionScan();
+
+            string installed;
+            try { installed = Path.GetFullPath(InstallPaths.CompanionPath); }
+            catch (Exception)
+            {
+                // Without the path to compare against, nothing can be
+                // attributed to this installation either way.
+                scan.Answered = false;
+                return scan;
+            }
+
+            List<CompanionCandidate> candidates;
+            try { candidates = CandidateLister(); }
+            catch (Exception) { scan.Answered = false; return scan; }
+            if (candidates == null) { scan.Answered = false; return scan; }
+
+            foreach (CompanionCandidate candidate in candidates)
+            {
+                if (candidate == null) { scan.Answered = false; continue; }
+
+                // A process that has definitely gone is nobody's business.
+                // Only a definite answer counts here: a liveness query that
+                // failed has not established an exit, and falls through to be
+                // identified like any other.
+                bool exited = false;
+                try { exited = candidate.HasExited != null && candidate.HasExited(); }
+                catch (Exception) { exited = false; }
+                if (exited) { continue; }
+
+                string path;
+                try { path = candidate.ExecutablePath == null ? null : candidate.ExecutablePath(); }
+                catch (Exception) { path = null; }
+                if (string.IsNullOrEmpty(path)) { scan.Answered = false; continue; }
+
+                string full;
+                try { full = Path.GetFullPath(path); }
+                catch (Exception) { scan.Answered = false; continue; }
+
+                if (!string.Equals(full, installed, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;   // confirmed to be a different program
+                }
+
+                scan.Running.Add(new CompanionProcess
+                {
+                    Id = candidate.Id,
+                    HasExited = candidate.HasExited,
+                    RequestClose = candidate.RequestClose,
+                });
+            }
+            return scan;
+        }
         private static int SafeId(Process process)
         {
             try { return process.Id; }

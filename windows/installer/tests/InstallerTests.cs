@@ -24,9 +24,9 @@ namespace OmoBench.Installer.Tests
         /// <summary>Every registry key this suite is allowed to write.</summary>
         private const string TestRegistryRoot = @"Software\OmoBench-tests";
 
-        private static List<Installation.CompanionProcess> NoCompanions()
+        private static Installation.CompanionScan NoCompanions()
         {
-            return new List<Installation.CompanionProcess>();
+            return new Installation.CompanionScan();
         }
 
         /// <summary>
@@ -223,7 +223,7 @@ namespace OmoBench.Installer.Tests
             string savedProtocolKey = ProtocolRegistration.KeyPathOverride;
             string savedRuntimeDirectory = Configuration.RuntimeDirectoryOverride;
             string savedConfigurationFile = Configuration.FilePathOverride;
-            Func<List<Installation.CompanionProcess>> savedEnumerator = Installation.CompanionEnumerator;
+            Func<Installation.CompanionScan> savedEnumerator = Installation.CompanionEnumerator;
             string isolation = TestRegistryRoot + @"\" + Guid.NewGuid().ToString("N");
             string sandbox = Path.Combine(Path.GetTempPath(),
                 "omobench-suite-" + Guid.NewGuid().ToString("N"));
@@ -249,6 +249,7 @@ namespace OmoBench.Installer.Tests
                 UninstallCompletionTests();
                 UninstallCoordinationTests();
                 CompanionProcessTests();
+                EnumerationTests();
                 DelayedDiscoveryTests();
                 WizardCompletionTests();
                 BuildIdentityTests();
@@ -806,10 +807,10 @@ namespace OmoBench.Installer.Tests
 
             private int _polls;
 
-            public List<Installation.CompanionProcess> Enumerate()
+            public Installation.CompanionScan Enumerate()
             {
-                List<Installation.CompanionProcess> running = new List<Installation.CompanionProcess>();
-                running.Add(new Installation.CompanionProcess
+                Installation.CompanionScan running = new Installation.CompanionScan();
+                running.Running.Add(new Installation.CompanionProcess
                 {
                     Id = Id,
                     HasExited = () =>
@@ -834,7 +835,7 @@ namespace OmoBench.Installer.Tests
             //    anything -- against processes this test invented. It used to
             //    enumerate the machine's real ones and send them close
             //    requests.
-            Func<List<Installation.CompanionProcess>> savedEnumerator = Installation.CompanionEnumerator;
+            Func<Installation.CompanionScan> savedEnumerator = Installation.CompanionEnumerator;
             try
             {
                 Check("with no companion running, closing trivially succeeds",
@@ -1713,7 +1714,7 @@ namespace OmoBench.Installer.Tests
             Section("Uninstall: coordination, refusal and accurate outcomes");
 
             string savedRoot = InstallPaths.RootOverride;
-            Func<List<Installation.CompanionProcess>> savedEnumerator = Installation.CompanionEnumerator;
+            Func<Installation.CompanionScan> savedEnumerator = Installation.CompanionEnumerator;
             int savedWait = Installation.CloseWaitMilliseconds;
             string sandbox = Path.Combine(Path.GetTempPath(),
                 "omobench-uninstall-" + Guid.NewGuid().ToString("N"));
@@ -1879,6 +1880,229 @@ namespace OmoBench.Installer.Tests
             catch (Exception) { return false; }
         }
 
+        // -- what the enumeration itself establishes -----------------------------
+
+        /// <summary>
+        /// One candidate process, invented here. The three things the
+        /// enumeration asks about it -- what it is running, whether it has
+        /// gone, and a close request -- can each be made to fail.
+        /// </summary>
+        private sealed class FakeCandidate
+        {
+            public int Id;
+            public string Path;
+            public bool PathThrows;
+            public bool PathIsNull;
+            public bool Exited;
+            public bool ExitThrows;
+            public int CloseRequests;
+
+            public Installation.CompanionCandidate AsCandidate()
+            {
+                return new Installation.CompanionCandidate
+                {
+                    Id = Id,
+                    ExecutablePath = () =>
+                    {
+                        if (PathThrows)
+                        {
+                            throw new System.ComponentModel.Win32Exception("access is denied");
+                        }
+                        return PathIsNull ? null : Path;
+                    },
+                    HasExited = () =>
+                    {
+                        if (ExitThrows) { throw new InvalidOperationException("no such process"); }
+                        return Exited;
+                    },
+                    RequestClose = () => { CloseRequests++; },
+                };
+            }
+        }
+
+        private static void EnumerationTests()
+        {
+            Section("Enumeration: what was established, and what was not");
+
+            string savedRoot = InstallPaths.RootOverride;
+            Func<List<Installation.CompanionCandidate>> savedLister = Installation.CandidateLister;
+            Func<Installation.CompanionScan> savedEnumerator = Installation.CompanionEnumerator;
+            int savedWait = Installation.CloseWaitMilliseconds;
+            string sandbox = Path.Combine(Path.GetTempPath(),
+                "omobench-enumeration-" + Guid.NewGuid().ToString("N"));
+
+            try
+            {
+                InstallPaths.RootOverride = sandbox;
+                Installation.CloseWaitMilliseconds = 300;
+                // The production enumeration, with only the half that talks to
+                // the operating system replaced.
+                Installation.CompanionEnumerator = Installation.EnumerateInstalledCompanions;
+
+                // 1. The process list could not be read at all.
+                Installation.CandidateLister = () =>
+                {
+                    throw new InvalidOperationException("the process list could not be read");
+                };
+                Installation.CompanionScan failed = Installation.ScanInstalledCompanions();
+                Check("a process list that could not be read is not an answer", !failed.Answered);
+                Check("  and is not read as \"none are running\"", failed.AnyPossiblyRunning);
+                Check("  so closing reports failure", !Installation.TryCloseInstalledCompanions(200));
+
+                Installation.CandidateLister = () => null;
+                Check("neither is no list at all",
+                    !Installation.ScanInstalledCompanions().Answered);
+
+                // 2. An answer: nothing named like the companion is running.
+                Installation.CandidateLister = () => new List<Installation.CompanionCandidate>();
+                Installation.CompanionScan empty = Installation.ScanInstalledCompanions();
+                Check("an empty process list is an answer", empty.Answered);
+                Check("  with nothing running", empty.Running.Count == 0);
+                Check("  so there is nothing to wait for",
+                    Installation.TryCloseInstalledCompanions(0));
+
+                // 3. A process of the same name, confirmed to be a different
+                //    program. Excluded, and the answer stands.
+                FakeCandidate elsewhere = new FakeCandidate
+                {
+                    Id = 7001,
+                    Path = Path.Combine(Path.GetTempPath(), "dev-checkout", "OmoBenchCompanion.exe"),
+                };
+                Installation.CandidateLister = () =>
+                    new List<Installation.CompanionCandidate> { elsewhere.AsCandidate() };
+                Installation.CompanionScan unrelated = Installation.ScanInstalledCompanions();
+                Check("a companion running from somewhere else is not this installation's",
+                    unrelated.Answered && unrelated.Running.Count == 0);
+                Check("  and closing does not wait for it",
+                    Installation.TryCloseInstalledCompanions(0));
+                Check("  nor ask it to close", elsewhere.CloseRequests == 0);
+
+                // 4. This installation's companion, identified.
+                FakeCandidate ours = new FakeCandidate { Id = 7002, Path = InstallPaths.CompanionPath };
+                Installation.CandidateLister = () =>
+                    new List<Installation.CompanionCandidate> { ours.AsCandidate() };
+                Installation.CompanionScan mine = Installation.ScanInstalledCompanions();
+                Check("a companion running from this installation is found",
+                    mine.Answered && mine.Running.Count == 1);
+                Check("  and it is asked to close, once",
+                    !Installation.TryCloseInstalledCompanions(200) && ours.CloseRequests == 1);
+
+                // 5. A process whose executable cannot be read. It is named
+                //    like the companion and might be this installation's; a
+                //    failed inspection does not establish that it is not.
+                FakeCandidate unreadable = new FakeCandidate { Id = 7003, PathThrows = true };
+                Installation.CandidateLister = () =>
+                    new List<Installation.CompanionCandidate> { unreadable.AsCandidate() };
+                Installation.CompanionScan opaque = Installation.ScanInstalledCompanions();
+                Check("a process whose executable cannot be read leaves the question open",
+                    !opaque.Answered);
+                Check("  it is not claimed as this installation's",
+                    opaque.Running.Count == 0);
+                Check("  closing reports failure rather than success",
+                    !Installation.TryCloseInstalledCompanions(200));
+                Check("  and nothing was asked to close, because nothing was identified",
+                    unreadable.CloseRequests == 0);
+
+                // 6. The same for an executable path that comes back empty.
+                FakeCandidate nameless = new FakeCandidate { Id = 7004, PathIsNull = true };
+                Installation.CandidateLister = () =>
+                    new List<Installation.CompanionCandidate> { nameless.AsCandidate() };
+                Check("an executable path of nothing is not an identification",
+                    !Installation.ScanInstalledCompanions().Answered);
+
+                // 7. A process confirmed to have exited is nobody's business,
+                //    whatever else cannot be read about it.
+                FakeCandidate gone = new FakeCandidate { Id = 7005, Exited = true, PathThrows = true };
+                Installation.CandidateLister = () =>
+                    new List<Installation.CompanionCandidate> { gone.AsCandidate() };
+                Installation.CompanionScan departed = Installation.ScanInstalledCompanions();
+                Check("a process confirmed to have exited is ignored",
+                    departed.Answered && departed.Running.Count == 0);
+                Check("  so closing succeeds", Installation.TryCloseInstalledCompanions(0));
+
+                // But a failed liveness query is not a confirmed exit.
+                FakeCandidate maybe = new FakeCandidate { Id = 7006, ExitThrows = true, PathThrows = true };
+                Installation.CandidateLister = () =>
+                    new List<Installation.CompanionCandidate> { maybe.AsCandidate() };
+                Check("a liveness query that failed does not prove the process has gone",
+                    !Installation.ScanInstalledCompanions().Answered);
+
+                // 8. One unreadable process alongside one that is plainly
+                //    somebody else's: the unreadable one still decides.
+                FakeCandidate mixedUnreadable = new FakeCandidate { Id = 7007, PathThrows = true };
+                FakeCandidate mixedElsewhere = new FakeCandidate
+                {
+                    Id = 7008,
+                    Path = Path.Combine(Path.GetTempPath(), "other", "OmoBenchCompanion.exe"),
+                };
+                Installation.CandidateLister = () => new List<Installation.CompanionCandidate>
+                {
+                    mixedElsewhere.AsCandidate(), mixedUnreadable.AsCandidate(),
+                };
+                Installation.CompanionScan mixed = Installation.ScanInstalledCompanions();
+                Check("one process that could not be identified leaves the whole answer open",
+                    !mixed.Answered && mixed.Running.Count == 0);
+                Check("  and neither of them was asked to close",
+                    mixedUnreadable.CloseRequests == 0 && mixedElsewhere.CloseRequests == 0);
+
+                // 9. And all of that reaches the decisions it exists for.
+                FakeCandidate blocker = new FakeCandidate { Id = 7009, PathThrows = true };
+                Installation.CandidateLister = () =>
+                    new List<Installation.CompanionCandidate> { blocker.AsCandidate() };
+
+                Directory.CreateDirectory(InstallPaths.ProgramDirectory);
+                File.WriteAllText(InstallPaths.CompanionPath, "companion");
+                File.WriteAllText(InstallPaths.ManifestPath, "{}");
+                File.WriteAllText(InstallPaths.UninstallerPath, "uninstaller");
+                ProtocolRegistration.Register(InstallPaths.CompanionPath);
+                string registeredBefore = ProtocolRegistration.RegisteredCommand();
+
+                string configurationFile = Path.Combine(sandbox, "companion.config");
+                string savedConfigurationPath = Configuration.FilePathOverride;
+                Configuration.FilePathOverride = configurationFile;
+                new Configuration
+                {
+                    Distribution = "Ubuntu",
+                    CheckoutWindowsPath = @"C:\somewhere\omobench",
+                    PythonWslPath = "/home/sam/.venvs/x/bin/python",
+                    Port = 9123,
+                }.Save();
+                string configurationBefore = File.ReadAllText(configurationFile);
+
+                try
+                {
+                    InstallOutcome postponed = Installation.Uninstall();
+                    Check("an uninstall postpones while a process cannot be identified",
+                        !postponed.Ok);
+                    Check("  and says nothing was removed",
+                        (postponed.Summary ?? "").Contains("nothing was removed"));
+                    Check("  the installed files are all still there",
+                        File.Exists(InstallPaths.CompanionPath)
+                        && File.Exists(InstallPaths.ManifestPath)
+                        && File.Exists(InstallPaths.UninstallerPath));
+                    Check("  the omobench:// registration is untouched",
+                        ProtocolRegistration.RegisteredCommand() == registeredBefore);
+                    Check("  the saved configuration is untouched",
+                        File.ReadAllText(configurationFile) == configurationBefore);
+                    Check("  and the unidentified process was never signalled",
+                        blocker.CloseRequests == 0);
+                }
+                finally
+                {
+                    Configuration.FilePathOverride = savedConfigurationPath;
+                }
+            }
+            finally
+            {
+                InstallPaths.RootOverride = savedRoot;
+                Installation.CandidateLister = savedLister;
+                Installation.CompanionEnumerator = savedEnumerator;
+                Installation.CloseWaitMilliseconds = savedWait;
+                try { Directory.Delete(sandbox, true); } catch (Exception) { }
+                try { Registry.CurrentUser.DeleteSubKeyTree(ProtocolRegistration.KeyPath, false); }
+                catch (Exception) { }
+            }
+        }
         // -- coordinating with a real process ------------------------------------
 
         /// <summary>
@@ -1895,7 +2119,7 @@ namespace OmoBench.Installer.Tests
             Section("Companion coordination: the real adapter, and failed questions");
 
             string savedRoot = InstallPaths.RootOverride;
-            Func<List<Installation.CompanionProcess>> savedEnumerator = Installation.CompanionEnumerator;
+            Func<Installation.CompanionScan> savedEnumerator = Installation.CompanionEnumerator;
             int savedWait = Installation.CloseWaitMilliseconds;
             string sandbox = Path.Combine(Path.GetTempPath(),
                 "omobench-coordination-" + Guid.NewGuid().ToString("N"));
@@ -1920,18 +2144,31 @@ namespace OmoBench.Installer.Tests
                 // which is what an access-denied query does too.
                 using (System.Diagnostics.Process unanswerable = new System.Diagnostics.Process())
                 {
-                    Installation.CompanionProcess adapted = Installation.Adapt(unanswerable);
-                    bool threw = false;
-                    try { adapted.HasExited(); }
-                    catch (Exception) { threw = true; }
+                    Installation.CompanionCandidate described = Installation.Describe(unanswerable);
+                    bool exitedThrew = false;
+                    try { described.HasExited(); }
+                    catch (Exception) { exitedThrew = true; }
                     Check("the adapter does not answer \"it has exited\" for a question that failed",
-                        threw);
+                        exitedThrew);
+
+                    bool pathThrew = false;
+                    try { described.ExecutablePath(); }
+                    catch (Exception) { pathThrew = true; }
+                    Check("nor does it answer \"it is not ours\" for a path it could not read",
+                        pathThrew);
 
                     // And the caller reads that as still running, because it is
                     // the only safe reading when the next step is deleting the
                     // program.
-                    Installation.CompanionEnumerator = () =>
-                        new List<Installation.CompanionProcess> { adapted };
+                    Installation.CompanionProcess adapted = new Installation.CompanionProcess
+                    {
+                        Id = described.Id,
+                        HasExited = described.HasExited,
+                        RequestClose = described.RequestClose,
+                    };
+                    Installation.CompanionScan single = new Installation.CompanionScan();
+                    single.Running.Add(adapted);
+                    Installation.CompanionEnumerator = () => single;
                     Check("a companion whose state cannot be read counts as still running",
                         Installation.RunningInstalledCompanions().Count == 1);
                     Check("and closing is not reported as successful",
