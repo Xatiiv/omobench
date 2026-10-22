@@ -3,6 +3,19 @@ using OmoBench.Companion;
 
 namespace OmoBench.Installer
 {
+    /// <summary>What a completion arriving from background work may do.</summary>
+    public enum Completion
+    {
+        /// <summary>A replaced operation, or one already finished. Change nothing.</summary>
+        Stale,
+
+        /// <summary>This operation, but it was called off. Finish stopping; announce nothing.</summary>
+        Cancelled,
+
+        /// <summary>This operation, wanted. Apply it.</summary>
+        Accepted,
+    }
+
     /// <summary>
     /// Whether a result arriving from the installer's background work still
     /// describes what the window is doing.
@@ -12,20 +25,33 @@ namespace OmoBench.Installer
     /// <see cref="SetupState"/>, which the installer does not use -- so the
     /// code that actually ran had no test at all.
     ///
-    /// Two things make a queued result obsolete, and both have to be checked
-    /// in the same place. A newer operation may have replaced it; or the
-    /// person may have cancelled after the work finished but before the window
-    /// got round to applying it. In that second case the work succeeded, and
-    /// acting on it would save a configuration and announce success for
-    /// something that was called off.
+    /// The distinction this class exists to keep is between *cancellation
+    /// requested* and *work finished*. Treating Stop as the end of the
+    /// operation was wrong twice over: the window disabled Stop, threw the
+    /// eventual completion away as stale, and so never ran the code that puts
+    /// the buttons back -- leaving a wizard with nothing enabled; and it
+    /// cleared the working flag while the worker was still running, so closing
+    /// the window skipped the wait that exists to let that worker stop at a
+    /// checkpoint of its own choosing.
+    ///
+    /// So a cancelled operation is still the current operation, and still
+    /// owes the window a completion. What cancellation changes is what that
+    /// completion is allowed to do: finish stopping and restore the controls,
+    /// never save a configuration or announce success.
     /// </summary>
     public sealed class WizardState
     {
-        /// <summary>Incremented for every new operation.</summary>
+        /// <summary>Incremented only when a new operation starts.</summary>
         public int Generation { get; private set; }
 
-        /// <summary>True while background work is in flight.</summary>
+        /// <summary>
+        /// True from the moment work starts until its completion is handled.
+        /// Cancelling does not clear it: the worker is still running.
+        /// </summary>
         public bool Working { get; private set; }
+
+        /// <summary>True once Stop has been pressed and before it has finished.</summary>
+        public bool CancellationRequested { get; private set; }
 
         private DiscoveryCancel _cancel;
 
@@ -34,47 +60,56 @@ namespace OmoBench.Installer
         {
             Generation++;
             Working = true;
+            CancellationRequested = false;
             _cancel = cancel;
             return Generation;
         }
 
         /// <summary>
-        /// Stop the current operation. Anything it later delivers is refused.
+        /// Ask the current operation to stop. The token is cancelled so the
+        /// work itself winds up; the operation stays current and stays
+        /// working until it reports back.
         /// </summary>
         public void Cancel()
         {
+            if (!Working) { return; }
+            CancellationRequested = true;
             DiscoveryCancel cancel = _cancel;
             if (cancel != null) { cancel.Cancel(); }
-            Generation++;
-            Working = false;
-        }
-
-        /// <summary>True when this operation was cancelled while it ran.</summary>
-        public bool WasCancelled
-        {
-            get { return _cancel != null && _cancel.IsCancelled; }
         }
 
         /// <summary>
-        /// May a completion carrying this generation be applied?
-        ///
-        /// Nothing is changed unless the answer is yes -- not the working
-        /// flag, not the buttons, not the status. Clearing state before the
-        /// check let a result from a replaced operation reach into a newer
-        /// one and re-enable its controls.
+        /// Whether a progress update carrying this generation still describes
+        /// what the window is doing. Queued updates outlive the work that
+        /// produced them, and one from a replaced operation would otherwise
+        /// redraw a newer operation's stages.
         /// </summary>
-        public bool TryAccept(int generation)
+        public bool IsCurrent(int generation)
         {
-            if (generation != Generation)
+            return Working && generation == Generation;
+        }
+
+        /// <summary>
+        /// Hand in a completion, and learn what it may do.
+        ///
+        /// Nothing is changed for a stale one -- not the working flag, which
+        /// by then belongs to a newer operation. The current operation ends
+        /// here whether or not its result is wanted, because the work really
+        /// has finished; a window that goes on believing otherwise waits for a
+        /// worker that will never report again.
+        /// </summary>
+        public Completion Complete(int generation)
+        {
+            if (!Working || generation != Generation)
             {
-                // Somebody else's operation is in flight. Change nothing at
-                // all -- including the working flag, which now belongs to it.
-                return false;
+                return Completion.Stale;
             }
 
-            // This operation has ended, whether or not its result is wanted.
             Working = false;
-            return !WasCancelled;
+            bool cancelled = CancellationRequested
+                || (_cancel != null && _cancel.IsCancelled);
+            CancellationRequested = false;
+            return cancelled ? Completion.Cancelled : Completion.Accepted;
         }
     }
 }

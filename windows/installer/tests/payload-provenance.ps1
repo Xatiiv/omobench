@@ -261,6 +261,57 @@ try {
     }
     Check 'and every checksum in it is the checksum of the file that shipped' ($manifestWrong -eq 0)
 
+    # -- the same directory, spelled differently -----------------------------
+
+    Section 'A differently spelled staging path is still the same directory'
+
+    $referenceManifest = [System.IO.File]::ReadAllBytes($manifestPath)
+
+    function BuildAndCompare([string]$label, [hashtable]$arguments) {
+        $built = $null
+        try {
+            $built = & $builder @arguments
+        } catch {
+            Check "$label builds" $false
+            Write-Host "    $($_.Exception.Message)"
+            return
+        }
+        Check "$label builds with the whole file set" `
+            ($null -ne $built -and $built.FileCount -eq $payloadFiles.Count)
+        $into = Join-Path $WorkDirectory ("spelling-" + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force -Path $into | Out-Null
+        & $tar -xzf $arguments.Destination -C $into --strip-components=1
+        $manifest = [System.IO.File]::ReadAllBytes((Join-Path $into 'MANIFEST.sha256'))
+        Check "$label ships exactly the same contents" `
+            (@(Compare-Object $referenceManifest $manifest -SyncWindow 0).Count -eq 0)
+    }
+
+    # A trailing separator: the same directory, two characters longer.
+    BuildAndCompare 'a staging path with a trailing separator' `
+        (With $common @{ StagingDirectory = ($staging + [System.IO.Path]::DirectorySeparatorChar) })
+
+    # A path that goes down and back up again.
+    BuildAndCompare 'a staging path containing a . and a .. segment' `
+        (With $common @{ StagingDirectory = (Join-Path (Join-Path $staging 'sub') '..') })
+
+    # And the 8.3 short name, which is what broke this on CI: there TEMP is
+    # C:\Users\RUNNER~1\... while enumeration reports C:\Users\runneradmin\...,
+    # three characters longer, so every path came back with two characters of
+    # the staging directory still attached to it.
+    $shortWork = $null
+    try {
+        $fileSystem = New-Object -ComObject Scripting.FileSystemObject
+        $shortWork = $fileSystem.GetFolder($WorkDirectory).ShortPath
+    } catch { $shortWork = $null }
+
+    if ($shortWork -and $shortWork -ne $WorkDirectory) {
+        Write-Host "  (8.3 form of the work directory: $shortWork)"
+        BuildAndCompare 'a staging path given in its 8.3 short form' `
+            (With $common @{ StagingDirectory = (Join-Path $shortWork 'out\staging-short') })
+    } else {
+        Check 'the 8.3 short form of the work directory is available to test with' $false
+        Write-Host '    8.3 name creation appears to be disabled on this volume.'
+    }
     # -- nothing may produce a payload that looks fine but is not ------------
 
     Section 'A failure cannot look like a payload'

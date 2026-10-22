@@ -169,10 +169,28 @@ Remove-Item -LiteralPath $exportTar -Force
 # Exactly the files that were asked for: no fewer, in case the export or the
 # unpacking stopped early and said nothing, and no more, in case a pathspec
 # matched something unintended.
+#
+# The relative paths come from the provider rather than from arithmetic on the
+# staging path. Taking Substring($payloadRoot.Length + 1) assumes the path
+# handed in is spelled exactly as the provider spells it back, and that is not
+# always true: on a GitHub Windows runner TEMP is the 8.3 form
+# C:\Users\RUNNER~1\... while enumeration reports C:\Users\runneradmin\...,
+# three characters longer, so every path came back with two characters of the
+# staging directory still attached. Resolve-Path -Relative compares like with
+# like, whatever either end is called.
 $separator = [System.IO.Path]::DirectorySeparatorChar
-$staged = @(Get-ChildItem -LiteralPath $payloadRoot -Recurse -Force -File |
-    ForEach-Object { $_.FullName.Substring($payloadRoot.Length + 1).Replace($separator, '/') } |
-    Sort-Object)
+Push-Location -LiteralPath $payloadRoot
+try {
+    $staged = @(Get-ChildItem -LiteralPath $payloadRoot -Recurse -Force -File |
+        ForEach-Object {
+            $relative = Resolve-Path -LiteralPath $_.FullName -Relative
+            if ($relative.StartsWith('.' + $separator)) { $relative = $relative.Substring(2) }
+            $relative.Replace($separator, '/')
+        } |
+        Sort-Object)
+} finally {
+    Pop-Location
+}
 $absent = @($payloadRelative | Where-Object { $staged -notcontains $_ })
 $unexpected = @($staged | Where-Object { $payloadRelative -notcontains $_ })
 if ($absent.Count -gt 0 -or $unexpected.Count -gt 0) {

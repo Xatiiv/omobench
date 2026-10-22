@@ -44,26 +44,44 @@ namespace OmoBench.Installer.Tests
             private readonly string _protocolEntry;
             private readonly string _programDirectory;
             private readonly string _programContents;
+            private readonly string _runtimeDirectory;
+            private readonly string _runtimeContents;
+            private readonly string _logPath;
+            private readonly string _log;
             private readonly int _companions;
 
             private Sentinel(string uninstallEntry, string protocolEntry,
-                string programDirectory, string programContents, int companions)
+                string programDirectory, string programContents,
+                string runtimeDirectory, string runtimeContents,
+                string logPath, string log, int companions)
             {
                 _uninstallEntry = uninstallEntry;
                 _protocolEntry = protocolEntry;
                 _programDirectory = programDirectory;
                 _programContents = programContents;
+                _runtimeDirectory = runtimeDirectory;
+                _runtimeContents = runtimeContents;
+                _logPath = logPath;
+                _log = log;
                 _companions = companions;
             }
 
             public static Sentinel Capture()
             {
+                // Captured before any override is set, so these are the real
+                // locations whatever the suite does to the properties later.
                 string programDirectory = InstallPaths.ProgramDirectory;
+                string runtimeDirectory = Configuration.RuntimeDirectoryPath;
+                string logPath = Diagnostics.LogPath;
                 return new Sentinel(
                     DescribeKey(InstallPaths.DefaultUninstallKeyPath),
                     DescribeKey(ProtocolRegistration.DefaultKeyPath),
                     programDirectory,
                     DescribeDirectory(programDirectory),
+                    runtimeDirectory,
+                    DescribeDirectory(runtimeDirectory),
+                    logPath,
+                    DescribeFile(logPath),
                     CountCompanionProcesses());
             }
 
@@ -79,6 +97,11 @@ namespace OmoBench.Installer.Tests
                     DescribeKey(ProtocolRegistration.DefaultKeyPath) == _protocolEntry);
                 Check("the real program directory is exactly as it was",
                     DescribeDirectory(_programDirectory) == _programContents);
+                Check("the real diagnostic log is exactly as it was"
+                    + (_log == "(absent)" ? " (it was absent, and still is)" : ""),
+                    DescribeFile(_logPath) == _log);
+                Check("and the rest of the real runtime directory with it",
+                    DescribeDirectory(_runtimeDirectory) == _runtimeContents);
                 Check("no OmoBench companion process was closed",
                     CountCompanionProcesses() >= _companions);
                 Check("and the suite left none of its own registry keys behind",
@@ -143,6 +166,23 @@ namespace OmoBench.Installer.Tests
                 return text.ToString();
             }
 
+            /// <summary>
+            /// Length and last-write time, so an append or a rotation shows up
+            /// even when the file is there both times.
+            /// </summary>
+            private static string DescribeFile(string path)
+            {
+                try
+                {
+                    if (string.IsNullOrEmpty(path) || !File.Exists(path)) { return "(absent)"; }
+                    FileInfo file = new FileInfo(path);
+                    return file.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                        + "|" + file.LastWriteTimeUtc.Ticks.ToString(
+                            System.Globalization.CultureInfo.InvariantCulture);
+                }
+                catch (Exception error) { return "(unreadable: " + error.Message + ")"; }
+            }
+
             private static string DescribeDirectory(string path)
             {
                 try
@@ -170,22 +210,32 @@ namespace OmoBench.Installer.Tests
         private static int Main()
         {
             // Isolation is arranged before a single test runs, and proved
-            // afterwards. Three things in this suite used to reach the real
+            // afterwards. Four things in this suite used to reach the real
             // machine: the Apps & features entry and the omobench://
             // registration are at fixed registry paths that RootOverride does
-            // not move, and the upgrade tests enumerated and sent close
-            // requests to whatever OmoBench was actually running.
+            // not move; the upgrade tests enumerated and sent close requests
+            // to whatever OmoBench was actually running; and the register and
+            // unregister tests call Diagnostics.Write, which appends to -- and
+            // rotates, and so can delete -- the real companion.log.
             Sentinel sentinel = Sentinel.Capture();
 
             string savedUninstallKey = InstallPaths.UninstallKeyPathOverride;
             string savedProtocolKey = ProtocolRegistration.KeyPathOverride;
+            string savedRuntimeDirectory = Configuration.RuntimeDirectoryOverride;
+            string savedConfigurationFile = Configuration.FilePathOverride;
             Func<List<Installation.CompanionProcess>> savedEnumerator = Installation.CompanionEnumerator;
             string isolation = TestRegistryRoot + @"\" + Guid.NewGuid().ToString("N");
+            string sandbox = Path.Combine(Path.GetTempPath(),
+                "omobench-suite-" + Guid.NewGuid().ToString("N"));
 
             try
             {
                 InstallPaths.UninstallKeyPathOverride = isolation + @"\Uninstall\OmoBench";
                 ProtocolRegistration.KeyPathOverride = isolation + @"\Classes\omobench";
+                // The diagnostic log and the panel's runtime directory both
+                // live here, so nothing the suite logs touches the real ones.
+                Configuration.RuntimeDirectoryOverride = Path.Combine(sandbox, "runtime");
+                Configuration.FilePathOverride = Path.Combine(sandbox, "companion.config");
                 Installation.CompanionEnumerator = NoCompanions;
 
                 InstallPathTests();
@@ -198,6 +248,7 @@ namespace OmoBench.Installer.Tests
                 PayloadContentsTests();
                 UninstallCompletionTests();
                 UninstallCoordinationTests();
+                CompanionProcessTests();
                 DelayedDiscoveryTests();
                 WizardCompletionTests();
                 BuildIdentityTests();
@@ -206,9 +257,12 @@ namespace OmoBench.Installer.Tests
             {
                 InstallPaths.UninstallKeyPathOverride = savedUninstallKey;
                 ProtocolRegistration.KeyPathOverride = savedProtocolKey;
+                Configuration.RuntimeDirectoryOverride = savedRuntimeDirectory;
+                Configuration.FilePathOverride = savedConfigurationFile;
                 Installation.CompanionEnumerator = savedEnumerator;
                 try { Registry.CurrentUser.DeleteSubKeyTree(TestRegistryRoot, false); }
                 catch (Exception) { }
+                try { Directory.Delete(sandbox, true); } catch (Exception) { }
             }
 
             sentinel.Verify();
@@ -1223,6 +1277,16 @@ namespace OmoBench.Installer.Tests
             public bool TouchFails;
             public bool ExistsUnanswerable;
 
+            /// <summary>
+            /// What `test -e` exits with instead of answering. 0 and 1 are the
+            /// only two answers test gives; 127 is "command not found" and 2 a
+            /// usage error, and neither means the directory is absent.
+            /// </summary>
+            public int ExistsExitCode = -1;
+
+            /// <summary>Only the marker probe fails this way, not the root one.</summary>
+            public int MarkerExitCode = -1;
+
             public ProcessResult Run(string arguments, int timeout, DiscoveryCancel cancel)
             {
                 Commands.Add(arguments);
@@ -1230,6 +1294,14 @@ namespace OmoBench.Installer.Tests
                 {
                     if (ExistsUnanswerable) { return new ProcessResult { ExitCode = -1, TimedOut = true }; }
                     bool marker = arguments.Contains(ManagedEnvironment.OwnershipMarkerName);
+                    if (marker && MarkerExitCode >= 0)
+                    {
+                        return new ProcessResult { ExitCode = MarkerExitCode, StandardError = "failed" };
+                    }
+                    if (!marker && ExistsExitCode >= 0)
+                    {
+                        return new ProcessResult { ExitCode = ExistsExitCode, StandardError = "failed" };
+                    }
                     bool present = marker ? MarkerExists : RootExists;
                     return new ProcessResult { ExitCode = present ? 0 : 1 };
                 }
@@ -1322,6 +1394,34 @@ namespace OmoBench.Installer.Tests
                 Check("and nothing was created there on the strength of a guess",
                     !Ran(silent.Commands, " touch "));
 
+                // A probe that failed rather than answered. test says 0 or 1
+                // and nothing else, so anything else is the question going
+                // wrong -- and used to be read as "absent, go ahead".
+                foreach (int code in new int[] { 2, 126, 127, 255 })
+                {
+                    LinuxFixture broken = new LinuxFixture { ExistsExitCode = code };
+                    ManagedEnvironment.WslRunner = broken.Run;
+                    string answer = ManagedEnvironment.ClaimLinuxRoot("Ubuntu", "/home/sam", null);
+                    Check("exit " + code + " from the existence probe is not an answer",
+                        answer != null && answer.Contains("could not be determined"));
+                    Check("  and nothing was created on the strength of it",
+                        !Ran(broken.Commands, " touch ") && !Ran(broken.Commands, " mkdir "));
+                }
+
+                // The same for the probe that decides whether the directory is
+                // ours: not knowing is not permission to write into it.
+                foreach (int code in new int[] { 2, 127 })
+                {
+                    LinuxFixture unsure = new LinuxFixture { RootExists = true, MarkerExitCode = code };
+                    ManagedEnvironment.WslRunner = unsure.Run;
+                    string answer = ManagedEnvironment.ClaimLinuxRoot("Ubuntu", "/home/sam", null);
+                    Check("exit " + code + " from the ownership probe leaves the directory alone",
+                        answer != null && answer.Contains("could not be determined"));
+                    Check("  and its contents were not even listed",
+                        !Ran(unsure.Commands, " ls -A ")
+                        && !Ran(unsure.Commands, " touch ") && !Ran(unsure.Commands, " mkdir "));
+                }
+
                 // A directory that cannot be created is reported, not assumed.
                 LinuxFixture readOnly = new LinuxFixture { TouchFails = true };
                 ManagedEnvironment.WslRunner = readOnly.Run;
@@ -1356,6 +1456,26 @@ namespace OmoBench.Installer.Tests
                         !Ran(occupied.Commands, "-m venv")
                         && !Ran(occupied.Commands, "-m pip")
                         && refused.Stages[3].State == StageState.Pending);
+
+                    // And the same when the probe fails rather than answers.
+                    foreach (int code in new int[] { 2, 127 })
+                    {
+                        OccupiedLinux broken = new OccupiedLinux
+                        {
+                            UnpackInto = ManagedEnvironment.SourceDirectory(build.Revision),
+                            ExistsExitCode = code,
+                        };
+                        ManagedEnvironment.WslRunner = broken.Run;
+                        PreparationResult stopped = ManagedEnvironment.Prepare("Ubuntu", build, null, null);
+                        Check("preparation refuses when the probe exits " + code,
+                            !stopped.Ok && stopped.Stages[2].State == StageState.Failed);
+                        Check("  with no mkdir, touch, venv or pip after it",
+                            !Ran(broken.Commands, " mkdir ") && !Ran(broken.Commands, " touch ")
+                            && !Ran(broken.Commands, "-m venv") && !Ran(broken.Commands, "-m pip"));
+                        Check("  and nothing was installed",
+                            stopped.Stages[3].State == StageState.Pending
+                            && stopped.Configuration == null);
+                    }
                 }
                 finally
                 {
@@ -1380,6 +1500,9 @@ namespace OmoBench.Installer.Tests
             public readonly List<string> Commands = new List<string>();
             public string UnpackInto;
 
+            /// <summary>What the existence probe exits with instead of answering.</summary>
+            public int ExistsExitCode = -1;
+
             public ProcessResult Run(string arguments, int timeout, DiscoveryCancel cancel)
             {
                 Commands.Add(arguments);
@@ -1398,6 +1521,10 @@ namespace OmoBench.Installer.Tests
                 }
                 if (arguments.Contains(" test -e "))
                 {
+                    if (ExistsExitCode >= 0)
+                    {
+                        return new ProcessResult { ExitCode = ExistsExitCode, StandardError = "failed" };
+                    }
                     // The root is there; the ownership marker is not.
                     return new ProcessResult
                     {
@@ -1600,13 +1727,21 @@ namespace OmoBench.Installer.Tests
                 BuildInfo build = new BuildInfo { Version = "0.1.0", Revision = "abc123" };
 
                 // A complete, entirely test-owned installation: files under a
-                // throwaway root, registry entries under the test's own keys.
+                // throwaway root, registry entries under the test's own keys,
+                // and an uninstaller beside the companion -- which is what the
+                // Apps & features entry points at, and what a retry needs.
+                string stand = Path.Combine(sandbox, "stand-in-installer.exe");
+                Directory.CreateDirectory(sandbox);
+                File.WriteAllText(stand, "not really an installer");
                 InstallOutcome installed = Installation.Install(
-                    System.Text.Encoding.UTF8.GetBytes("not really a program"), null, build);
+                    System.Text.Encoding.UTF8.GetBytes("not really a program"), stand, build);
                 Check("a sandboxed install succeeds", installed.Ok);
                 Check("  it wrote an Apps & features entry", UninstallEntryExists());
+                Check("  it placed an uninstaller", File.Exists(InstallPaths.UninstallerPath));
                 Check("  and registered omobench:// at the test-owned location",
                     ProtocolRegistration.RegisteredCommand() != null);
+                Check("  the Apps & features entry points at that uninstaller",
+                    SamePathValue(RegisteredUninstallTarget(), InstallPaths.UninstallerPath));
 
                 // The companion is open and declines to close. Nothing may be
                 // removed -- not the files, and not the two entries a person
@@ -1641,13 +1776,42 @@ namespace OmoBench.Installer.Tests
                         ProtocolRegistration.RegisteredCommand() != null);
                     Check("  it does not claim OmoBench was removed",
                         !blocked.Describe().Contains("has been removed"));
+
+                    // The point of keeping the entry is that it still reaches
+                    // a program that exists. Deleting the uninstaller first
+                    // and then failing on the companion left the entry aimed
+                    // at nothing at all.
+                    string target = RegisteredUninstallTarget();
+                    Check("  the retry target named in the registry still exists on disk: "
+                        + (target ?? "(none)"),
+                        target != null && File.Exists(target));
+                    Check("  and it is the uninstaller, not something else",
+                        SamePathValue(target, InstallPaths.UninstallerPath));
                     GC.KeepAlive(held);
+                }
+
+                // The companion is free now, but the uninstaller itself is
+                // held open. Everything else goes; the leftover is reported
+                // rather than waved through, and the entry stays so the person
+                // can finish later.
+                using (FileStream heldUninstaller = new FileStream(InstallPaths.UninstallerPath,
+                    FileMode.Open, FileAccess.Read, FileShare.None))
+                {
+                    InstallOutcome partial = Installation.Uninstall();
+                    Check("a locked uninstaller is not reported as a clean removal", !partial.Ok);
+                    Check("  it names the file that is still there",
+                        partial.Describe().Contains(InstallPaths.UninstallerFileName));
+                    Check("  the companion went anyway", !File.Exists(InstallPaths.CompanionPath));
+                    Check("  and the Apps & features entry is kept to finish from",
+                        UninstallEntryExists());
+                    GC.KeepAlive(heldUninstaller);
                 }
 
                 // Now nothing is in the way.
                 InstallOutcome removed = Installation.Uninstall();
-                Check("the retry succeeds once the file is free", removed.Ok);
+                Check("the retry succeeds once the files are free", removed.Ok);
                 Check("  the program is gone", !File.Exists(InstallPaths.CompanionPath));
+                Check("  so is the uninstaller", !File.Exists(InstallPaths.UninstallerPath));
                 Check("  the Apps & features entry is gone", !UninstallEntryExists());
                 Check("  the omobench:// registration is gone",
                     ProtocolRegistration.RegisteredCommand() == null);
@@ -1667,6 +1831,42 @@ namespace OmoBench.Installer.Tests
             }
         }
 
+        /// <summary>
+        /// The program the Apps &amp; features entry would actually run, read
+        /// back out of the registry the way Windows reads it.
+        /// </summary>
+        private static string RegisteredUninstallTarget()
+        {
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(InstallPaths.UninstallKeyPath))
+                {
+                    if (key == null) { return null; }
+                    string command = key.GetValue("UninstallString") as string;
+                    if (string.IsNullOrEmpty(command)) { return null; }
+                    if (command[0] == '"')
+                    {
+                        int closing = command.IndexOf('"', 1);
+                        return closing < 0 ? null : command.Substring(1, closing - 1);
+                    }
+                    int space = command.IndexOf(' ');
+                    return space < 0 ? command : command.Substring(0, space);
+                }
+            }
+            catch (Exception) { return null; }
+        }
+
+        private static bool SamePathValue(string left, string right)
+        {
+            if (left == null || right == null) { return false; }
+            try
+            {
+                return string.Equals(Path.GetFullPath(left), Path.GetFullPath(right),
+                    StringComparison.OrdinalIgnoreCase);
+            }
+            catch (Exception) { return false; }
+        }
+
         private static bool UninstallEntryExists()
         {
             try
@@ -1679,70 +1879,199 @@ namespace OmoBench.Installer.Tests
             catch (Exception) { return false; }
         }
 
+        // -- coordinating with a real process ------------------------------------
+
+        /// <summary>
+        /// The production adapter and enumerator, not only the fixture that
+        /// stands in for them.
+        ///
+        /// Everything here is read-only or uses a process this test owns: the
+        /// enumerator is pointed at a throwaway install location, so it
+        /// matches nothing on the machine, and the adapter is exercised
+        /// against a Process object that was never started.
+        /// </summary>
+        private static void CompanionProcessTests()
+        {
+            Section("Companion coordination: the real adapter, and failed questions");
+
+            string savedRoot = InstallPaths.RootOverride;
+            Func<List<Installation.CompanionProcess>> savedEnumerator = Installation.CompanionEnumerator;
+            int savedWait = Installation.CloseWaitMilliseconds;
+            string sandbox = Path.Combine(Path.GetTempPath(),
+                "omobench-coordination-" + Guid.NewGuid().ToString("N"));
+
+            try
+            {
+                InstallPaths.RootOverride = sandbox;
+                Installation.CloseWaitMilliseconds = 400;
+
+                // The production enumerator, against an install location
+                // nothing is running from. It looks at the machine's process
+                // list and matches by executable path, so this finds nothing
+                // and touches nothing.
+                Installation.CompanionEnumerator = Installation.EnumerateInstalledCompanions;
+                Installation.CompanionScan real = Installation.ScanInstalledCompanions();
+                Check("the production enumerator answers for an empty install location",
+                    real.Answered && real.Running.Count == 0);
+                Check("so closing trivially succeeds", Installation.TryCloseInstalledCompanions(0));
+
+                // The production adapter around a Process that cannot answer.
+                // A Process object with nothing behind it throws on HasExited,
+                // which is what an access-denied query does too.
+                using (System.Diagnostics.Process unanswerable = new System.Diagnostics.Process())
+                {
+                    Installation.CompanionProcess adapted = Installation.Adapt(unanswerable);
+                    bool threw = false;
+                    try { adapted.HasExited(); }
+                    catch (Exception) { threw = true; }
+                    Check("the adapter does not answer \"it has exited\" for a question that failed",
+                        threw);
+
+                    // And the caller reads that as still running, because it is
+                    // the only safe reading when the next step is deleting the
+                    // program.
+                    Installation.CompanionEnumerator = () =>
+                        new List<Installation.CompanionProcess> { adapted };
+                    Check("a companion whose state cannot be read counts as still running",
+                        Installation.RunningInstalledCompanions().Count == 1);
+                    Check("and closing is not reported as successful",
+                        !Installation.TryCloseInstalledCompanions(300));
+
+                    // RequestClose on the same process cannot deliver anything
+                    // either, and must not throw its way out of coordination.
+                    bool requestThrew = false;
+                    try { adapted.RequestClose(); }
+                    catch (Exception) { requestThrew = true; }
+                    Check("asking it to close fails quietly rather than crashing the uninstall",
+                        !requestThrew);
+                }
+
+                // Enumeration itself failing is the case that used to become
+                // "nothing is running" -- and so permission to delete.
+                int closeRequests = 0;
+                Installation.CompanionEnumerator = () =>
+                {
+                    closeRequests++;    // nothing may reach a process from here
+                    throw new InvalidOperationException("the process list could not be read");
+                };
+                Installation.CompanionScan failed = Installation.ScanInstalledCompanions();
+                Check("a failed enumeration is not an answer", !failed.Answered);
+                Check("and it is not read as \"none are running\"", failed.AnyPossiblyRunning);
+                Check("closing reports failure rather than success",
+                    !Installation.TryCloseInstalledCompanions(300));
+
+                // Which postpones the uninstall, with nothing removed.
+                Directory.CreateDirectory(InstallPaths.ProgramDirectory);
+                File.WriteAllText(InstallPaths.CompanionPath, "companion");
+                File.WriteAllText(InstallPaths.ManifestPath, "{}");
+                InstallOutcome postponed = Installation.Uninstall();
+                Check("an uninstall postpones when the question cannot be answered", !postponed.Ok);
+                Check("  and the program is still there", File.Exists(InstallPaths.CompanionPath));
+                Check("  and it says nothing was removed",
+                    (postponed.Summary ?? "").Contains("nothing was removed"));
+
+                // An enumerator that returns nothing at all is a different
+                // thing from one that could not look.
+                Installation.CompanionEnumerator = () => null;
+                Check("a null answer is treated as no answer",
+                    !Installation.ScanInstalledCompanions().Answered);
+            }
+            finally
+            {
+                InstallPaths.RootOverride = savedRoot;
+                Installation.CompanionEnumerator = savedEnumerator;
+                Installation.CloseWaitMilliseconds = savedWait;
+                try { Directory.Delete(sandbox, true); } catch (Exception) { }
+            }
+        }
         // -- the installer's own completion logic --------------------------------
 
         /// <summary>
         /// Whether a finished piece of background work still describes what
-        /// the installer window is doing.
+        /// the installer window is doing, and what it is allowed to do about
+        /// it.
         ///
         /// This is <see cref="WizardState"/>, which is what
-        /// <see cref="InstallerForm"/> actually uses. The previous version of
+        /// <see cref="InstallerForm"/> actually uses. An earlier version of
         /// this test drove the companion's SetupState instead -- a similar
-        /// class in a different window -- so the installer's own logic, the
-        /// code that runs when somebody installs OmoBench, had no test at all.
+        /// class in a different window -- so the installer's own logic had no
+        /// test at all.
         /// </summary>
         private static void WizardCompletionTests()
         {
-            Section("Installer completion: stale results and late cancellation");
+            Section("Installer completion: stale results, cancellation and the way back");
 
             // A result from a check that has since been replaced.
             WizardState superseded = new WizardState();
             int first = superseded.Begin(new DiscoveryCancel());
             int second = superseded.Begin(new DiscoveryCancel());
-            Check("a superseded completion is refused", !superseded.TryAccept(first));
+            Check("a superseded completion is refused",
+                superseded.Complete(first) == Completion.Stale);
             Check("and it does not clear the newer operation's working flag",
                 superseded.Working);
-            Check("the newer completion is accepted", superseded.TryAccept(second));
+            Check("the newer completion is accepted",
+                superseded.Complete(second) == Completion.Accepted);
             Check("and only then is the window idle", !superseded.Working);
+            Check("a second completion for the same operation is refused too",
+                superseded.Complete(second) == Completion.Stale);
 
-            // The same, but the stale result arrives while the newer operation
-            // is still running: nothing it would change may be changed.
-            WizardState overlapping = new WizardState();
-            int older = overlapping.Begin(new DiscoveryCancel());
-            int newer = overlapping.Begin(new DiscoveryCancel());
-            Check("a stale result arriving mid-operation changes nothing",
-                !overlapping.TryAccept(older) && overlapping.Working
-                && overlapping.Generation == newer);
+            // Stop, and then the long wait while the work winds up. This is
+            // the case that left the wizard with every button disabled: Stop
+            // used to end the operation on the spot, so the completion that
+            // restores the controls was thrown away as stale and the code that
+            // puts them back never ran.
+            WizardState stopping = new WizardState();
+            DiscoveryCancel token = new DiscoveryCancel();
+            int running = stopping.Begin(token);
+            stopping.Cancel();
+            Check("pressing Stop cancels the token the work is watching", token.IsCancelled);
+            Check("and records that stopping was asked for", stopping.CancellationRequested);
+            Check("the operation is still the current one while it winds up",
+                stopping.Generation == running);
+            Check("and the window is still working, so closing still waits for the worker",
+                stopping.Working);
+            Check("a progress update from it is still current", stopping.IsCurrent(running));
 
-            // Success, queued for the UI thread -- and then the person presses
-            // Stop before it is applied. The work succeeded; the instruction
-            // was withdrawn, so nothing is saved and nothing is announced.
+            Completion cancelled = stopping.Complete(running);
+            Check("its eventual completion is not thrown away", cancelled != Completion.Stale);
+            Check("it is delivered as cancelled, so nothing is saved or announced",
+                cancelled == Completion.Cancelled);
+            Check("and the window is finally idle, with its controls to restore",
+                !stopping.Working);
+            Check("a progress update arriving after that is refused",
+                !stopping.IsCurrent(running));
+
+            // Retry: the next operation behaves as though nothing happened.
+            DiscoveryCancel retryToken = new DiscoveryCancel();
+            int retry = stopping.Begin(retryToken);
+            Check("a retry starts cleanly", stopping.Working && !stopping.CancellationRequested);
+            Check("and its completion is accepted",
+                stopping.Complete(retry) == Completion.Accepted);
+
+            // Success queued for the UI thread, Stop pressed before it is
+            // applied. The work succeeded; the instruction was withdrawn.
             WizardState withdrawn = new WizardState();
             int queued = withdrawn.Begin(new DiscoveryCancel());
             withdrawn.Cancel();
-            Check("a success queued before Stop is refused once Stop is pressed",
-                !withdrawn.TryAccept(queued));
+            Check("a success queued before Stop is not applied",
+                withdrawn.Complete(queued) == Completion.Cancelled);
             Check("and the window is not left believing work is still running",
                 !withdrawn.Working);
 
-            // The same withdrawal, expressed through the token alone -- which
-            // is how a cancellation reaches the background work itself.
-            WizardState tokenCancelled = new WizardState();
-            DiscoveryCancel token = new DiscoveryCancel();
-            int generation = tokenCancelled.Begin(token);
-            token.Cancel();
+            // The same withdrawal expressed through the token alone, which is
+            // how cancellation reaches the background work itself.
+            WizardState tokenOnly = new WizardState();
+            DiscoveryCancel outside = new DiscoveryCancel();
+            int generation = tokenOnly.Begin(outside);
+            outside.Cancel();
             Check("a cancelled token refuses its own operation's success",
-                !tokenCancelled.TryAccept(generation));
-            Check("and that operation is over, not still in flight",
-                !tokenCancelled.Working);
+                tokenOnly.Complete(generation) == Completion.Cancelled);
 
-            // Cancelling also stops the work, not just its result.
-            WizardState stopping = new WizardState();
-            DiscoveryCancel stopToken = new DiscoveryCancel();
-            stopping.Begin(stopToken);
-            stopping.Cancel();
-            Check("cancelling cancels the token the background work is watching",
-                stopToken.IsCancelled);
+            // Cancelling when nothing is running changes nothing.
+            WizardState idle = new WizardState();
+            idle.Cancel();
+            Check("cancelling an idle wizard does nothing",
+                !idle.Working && !idle.CancellationRequested && idle.Generation == 0);
 
             // And the window keeps no second copy of any of this. Two records
             // of "is work running" is how a stale result cleared a flag that
@@ -1752,8 +2081,20 @@ namespace OmoBench.Installer.Tests
                     System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance) == null
                 && typeof(InstallerForm).GetField("_generation",
                     System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance) == null);
+
+            // The window's completion handlers carry the generation they
+            // belong to, so a queued one can be recognised as stale at all.
+            Check("the window's completion handlers carry their generation",
+                Parameters(typeof(InstallerForm), "FinishPreparation") == 2
+                && Parameters(typeof(InstallerForm), "ApplyEnvironment") == 2);
         }
 
+        private static int Parameters(Type type, string method)
+        {
+            System.Reflection.MethodInfo found = type.GetMethod(method,
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            return found == null ? -1 : found.GetParameters().Length;
+        }
         // -- identity and honesty about signing ---------------------------------
 
         private static void BuildIdentityTests()

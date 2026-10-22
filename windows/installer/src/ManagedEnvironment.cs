@@ -457,24 +457,50 @@ namespace OmoBench.Installer
         /// somebody's data and is left exactly as it is -- nothing is moved,
         /// emptied or overwritten to make room.
         /// </summary>
+        /// <summary>
+        /// What a `test -e` actually established.
+        ///
+        /// test answers 0 for present and 1 for absent, and nothing else.
+        /// Anything else came from the shell or the distribution rather than
+        /// from test: 127 is "command not found", 2 is a usage error, and a
+        /// stopped distribution can produce others. None of them mean the
+        /// directory is absent, so none of them may be read as permission to
+        /// create one.
+        /// </summary>
+        private enum Presence { Exists, Absent, Unknown }
+
+        private static Presence Probe(string distribution, string path, DiscoveryCancel cancel)
+        {
+            ProcessResult result = Run(distribution, BuildExistsProgram(path), 20000, cancel);
+            if (result == null || result.TimedOut) { return Presence.Unknown; }
+            if (result.ExitCode == 0) { return Presence.Exists; }
+            if (result.ExitCode == 1) { return Presence.Absent; }
+            return Presence.Unknown;
+        }
+
         internal static string ClaimLinuxRoot(string distribution, string home, DiscoveryCancel cancel)
         {
             string root = EnvironmentRoot(home);
             string marker = LinuxOwnershipMarker(home);
 
-            ProcessResult rootExists = Run(distribution, BuildExistsProgram(root), 20000, cancel);
-            if (rootExists == null || rootExists.TimedOut)
+            Presence rootPresence = Probe(distribution, root, cancel);
+            if (rootPresence == Presence.Unknown)
             {
                 return root + "\r\n\r\nWhether that directory exists could not be determined, so it "
                     + "was left alone.";
             }
 
-            if (rootExists.ExitCode == 0)
+            if (rootPresence == Presence.Exists)
             {
-                ProcessResult owned = Run(distribution, BuildExistsProgram(marker), 20000, cancel);
-                if (owned != null && !owned.TimedOut && owned.ExitCode == 0)
+                Presence markerPresence = Probe(distribution, marker, cancel);
+                if (markerPresence == Presence.Exists)
                 {
                     return null;    // a previous attempt's working area; retry is fine
+                }
+                if (markerPresence == Presence.Unknown)
+                {
+                    return root + "\r\n\r\nWhether OmoBench created that directory could not be "
+                        + "determined, so it was left alone.";
                 }
 
                 ProcessResult listing = Run(distribution, BuildListDirectoryProgram(root), 20000, cancel);

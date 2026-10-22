@@ -110,6 +110,26 @@ namespace OmoBench.Installer
             public Action RequestClose;
         }
 
+        /// <summary>
+        /// What looking for running companions established.
+        ///
+        /// <see cref="Answered"/> is false when the question could not be
+        /// answered at all -- the enumeration itself failed. That is not the
+        /// same as "none are running", and the difference decides whether a
+        /// program is about to be replaced or deleted underneath one.
+        /// </summary>
+        public sealed class CompanionScan
+        {
+            public readonly List<CompanionProcess> Running = new List<CompanionProcess>();
+            public bool Answered = true;
+
+            /// <summary>True unless it is established that none are running.</summary>
+            public bool AnyPossiblyRunning
+            {
+                get { return !Answered || Running.Count > 0; }
+            }
+        }
+
         /// <summary>Finds companions to coordinate with. Replaced by tests only.</summary>
         internal static Func<List<CompanionProcess>> CompanionEnumerator = EnumerateInstalledCompanions;
 
@@ -133,30 +153,48 @@ namespace OmoBench.Installer
         /// properly when told to close; killing it would bypass that question
         /// and orphan the work it was told to protect.
         /// </summary>
-        public static List<CompanionProcess> RunningInstalledCompanions()
+        public static CompanionScan ScanInstalledCompanions()
         {
+            CompanionScan scan = new CompanionScan();
             List<CompanionProcess> found;
-            try { found = CompanionEnumerator() ?? new List<CompanionProcess>(); }
-            catch (Exception) { return new List<CompanionProcess>(); }
+            try { found = CompanionEnumerator(); }
+            catch (Exception)
+            {
+                // The question was not answered. Saying "nothing is running"
+                // here is how a failed enumeration used to become permission
+                // to replace or delete the program -- without anyone ever
+                // having looked.
+                scan.Answered = false;
+                return scan;
+            }
+            if (found == null)
+            {
+                scan.Answered = false;
+                return scan;
+            }
 
             // An enumeration is a snapshot. Asking each one whether it has
             // actually gone is what makes waiting for a close request mean
             // something -- and a process we cannot ask is treated as still
             // running, because "probably gone" is not an answer worth
             // deleting a program on.
-            List<CompanionProcess> running = new List<CompanionProcess>();
             foreach (CompanionProcess process in found)
             {
                 if (process == null) { continue; }
                 bool exited;
                 try { exited = process.HasExited != null && process.HasExited(); }
                 catch (Exception) { exited = false; }
-                if (!exited) { running.Add(process); }
+                if (!exited) { scan.Running.Add(process); }
             }
-            return running;
+            return scan;
         }
 
-        private static List<CompanionProcess> EnumerateInstalledCompanions()
+        public static List<CompanionProcess> RunningInstalledCompanions()
+        {
+            return ScanInstalledCompanions().Running;
+        }
+
+        internal static List<CompanionProcess> EnumerateInstalledCompanions()
         {
             List<CompanionProcess> running = new List<CompanionProcess>();
             string installed;
@@ -182,15 +220,29 @@ namespace OmoBench.Installer
                 {
                     continue;
                 }
-                Process captured = process;
-                running.Add(new CompanionProcess
-                {
-                    Id = SafeId(captured),
-                    HasExited = () => { try { return captured.HasExited; } catch (Exception) { return true; } },
-                    RequestClose = () => { try { captured.CloseMainWindow(); } catch (Exception) { } },
-                });
+                running.Add(Adapt(process));
             }
             return running;
+        }
+
+        /// <summary>
+        /// One real process, as coordination sees it.
+        ///
+        /// HasExited deliberately does not swallow: a query that fails has
+        /// not established that the process has gone, and returning true
+        /// claimed exactly that. The caller treats a failed query as still
+        /// running, which is the only safe reading when the next step is
+        /// replacing or deleting the program.
+        /// </summary>
+        internal static CompanionProcess Adapt(Process process)
+        {
+            Process captured = process;
+            return new CompanionProcess
+            {
+                Id = SafeId(captured),
+                HasExited = () => captured.HasExited,
+                RequestClose = () => { try { captured.CloseMainWindow(); } catch (Exception) { } },
+            };
         }
 
         private static int SafeId(Process process)
@@ -210,13 +262,20 @@ namespace OmoBench.Installer
         /// </summary>
         public static bool TryCloseInstalledCompanions(int waitMilliseconds)
         {
-            List<CompanionProcess> running = RunningInstalledCompanions();
-            if (running.Count == 0)
+            CompanionScan scan = ScanInstalledCompanions();
+            if (!scan.Answered)
+            {
+                // Nothing is asked to close: there is no identified process to
+                // ask. The caller postpones, which is the honest outcome of a
+                // question that could not be answered.
+                return false;
+            }
+            if (scan.Running.Count == 0)
             {
                 return true;
             }
 
-            foreach (CompanionProcess process in running)
+            foreach (CompanionProcess process in scan.Running)
             {
                 try { process.RequestClose(); }
                 catch (Exception) { }
@@ -225,13 +284,13 @@ namespace OmoBench.Installer
             DateTime deadline = DateTime.UtcNow.AddMilliseconds(waitMilliseconds);
             while (DateTime.UtcNow < deadline)
             {
-                if (RunningInstalledCompanions().Count == 0)
-                {
-                    return true;
-                }
+                CompanionScan again = ScanInstalledCompanions();
+                if (!again.Answered) { return false; }
+                if (again.Running.Count == 0) { return true; }
                 System.Threading.Thread.Sleep(250);
             }
-            return RunningInstalledCompanions().Count == 0;
+            CompanionScan last = ScanInstalledCompanions();
+            return last.Answered && last.Running.Count == 0;
         }
 
         /// <summary>
@@ -422,43 +481,74 @@ namespace OmoBench.Installer
                 return outcome;
             }
 
-            // Files first. The Apps & features entry and the omobench://
-            // registration are how a person reaches this program -- and how
-            // they would reach the uninstaller again -- so they are removed
-            // only once the files they point at are actually gone.
+            string self = SelfPath();
+            string uninstaller = FullPathOrNull(InstallPaths.UninstallerPath);
+
+            // Files first, and the uninstaller last of all. The Apps &
+            // features entry and the omobench:// registration are how a person
+            // reaches this program -- and how they would reach the uninstaller
+            // again -- so they go only once the files they point at are gone.
             try
             {
-                RemoveProgramFiles(outcome);
+                DeleteInstalledFiles(outcome, self, uninstaller);
             }
             catch (Exception error)
             {
                 outcome.Warn("Some program files could not be removed: " + error.Message);
             }
 
-            // The companion executable and the manifest beside it are what make
-            // this an installation. If either is still there, the removal did
-            // not happen, whatever else succeeded -- and saying otherwise
-            // leaves a person with a program they were told was gone and no
-            // entry to retry from.
-            List<string> stillPresent = new List<string>();
-            foreach (string required in new string[] { InstallPaths.CompanionPath, InstallPaths.ManifestPath })
+            // Everything that is still there, the uninstaller aside. If any of
+            // it remains the removal did not happen, whatever else succeeded --
+            // and saying otherwise leaves a person with a program they were
+            // told was gone and no entry to retry from.
+            List<string> blocking = new List<string>();
+            foreach (string file in RemainingInstalledFiles(self))
             {
-                try { if (File.Exists(required)) { stillPresent.Add(required); } }
-                catch (Exception) { stillPresent.Add(required); }
+                if (uninstaller != null && SamePath(file, uninstaller)) { continue; }
+                blocking.Add(file);
             }
 
-            if (stillPresent.Count > 0)
+            if (blocking.Count > 0)
             {
                 outcome.Ok = false;
                 outcome.Summary = "OmoBench could not be completely removed.";
-                foreach (string remaining in stillPresent)
+                foreach (string remaining in blocking)
                 {
                     outcome.Step("Still present: " + remaining);
                 }
-                outcome.Step("This usually means the program is still open. Its Apps & features entry "
-                    + "and omobench:// registration have been left in place, so close it and "
-                    + "uninstall again from there.");
+                outcome.Step("This usually means the program is still open. Its Apps & features entry, "
+                    + "its omobench:// registration and " + InstallPaths.UninstallerFileName
+                    + " have all been left in place, so close it and uninstall again from there.");
                 return outcome;
+            }
+
+            // Now the uninstaller, which until this moment was the way back.
+            if (uninstaller != null && !SamePath(uninstaller, self))
+            {
+                try
+                {
+                    if (File.Exists(uninstaller)) { File.Delete(uninstaller); }
+                }
+                catch (Exception error)
+                {
+                    outcome.Warn("Could not delete " + uninstaller + ": " + error.Message);
+                }
+
+                bool uninstallerRemains;
+                try { uninstallerRemains = File.Exists(uninstaller); }
+                catch (Exception) { uninstallerRemains = true; }
+                if (uninstallerRemains)
+                {
+                    // Reported rather than waved through: a file of this
+                    // installation is still on the machine. The entry that
+                    // reaches it is kept, so trying again actually works.
+                    outcome.Ok = false;
+                    outcome.Summary = "OmoBench could not be completely removed.";
+                    outcome.Step("Still present: " + uninstaller);
+                    outcome.Step("Everything else has gone. Its Apps & features entry has been left in "
+                        + "place so you can uninstall again once that file is no longer in use.");
+                    return outcome;
+                }
             }
 
             try
@@ -493,41 +583,111 @@ namespace OmoBench.Installer
                 outcome.Warn("Could not remove the Apps & features entry: " + error.Message);
             }
 
+            RemoveProgramDirectory(outcome, self);
+
             outcome.Ok = true;
             outcome.Summary = "OmoBench has been removed.";
             outcome.Step("Your benchmark evidence, saved settings, model files and WSL installation were not touched.");
             return outcome;
         }
 
+        private static string SelfPath()
+        {
+            try { return Path.GetFullPath(System.Reflection.Assembly.GetEntryAssembly().Location); }
+            catch (Exception) { return null; }
+        }
+
+        private static string FullPathOrNull(string path)
+        {
+            try { return Path.GetFullPath(path); }
+            catch (Exception) { return null; }
+        }
+
+        private static bool SamePath(string left, string right)
+        {
+            if (left == null || right == null) { return false; }
+            try
+            {
+                return string.Equals(Path.GetFullPath(left), Path.GetFullPath(right),
+                    StringComparison.OrdinalIgnoreCase);
+            }
+            catch (Exception) { return false; }
+        }
+
         /// <summary>
-        /// Delete what was installed. Every path is checked to be inside the
-        /// program directory first, so a corrupted or tampered manifest cannot
-        /// turn an uninstall into a wider deletion. The running uninstaller
-        /// itself cannot delete its own file, so it is scheduled instead.
+        /// Every installed file still on disk, except the one this program is
+        /// running from -- which Windows will not let it delete, and which the
+        /// relaunch-from-temp path exists to avoid.
         /// </summary>
-        private static void RemoveProgramFiles(InstallOutcome outcome)
+        private static List<string> RemainingInstalledFiles(string self)
+        {
+            List<string> remaining = new List<string>();
+            try
+            {
+                if (!Directory.Exists(InstallPaths.ProgramDirectory)) { return remaining; }
+                foreach (string file in Directory.GetFiles(
+                    InstallPaths.ProgramDirectory, "*", SearchOption.AllDirectories))
+                {
+                    if (self != null && SamePath(file, self)) { continue; }
+                    remaining.Add(file);
+                }
+            }
+            catch (Exception)
+            {
+                // Unable to look is not the same as nothing there.
+                remaining.Add(InstallPaths.ProgramDirectory);
+            }
+            return remaining;
+        }
+        /// <summary>
+        /// Delete the installed files, keeping the way back until the end.
+        ///
+        /// Every path is checked to be inside the program directory first, so
+        /// a corrupted or tampered manifest cannot turn an uninstall into a
+        /// wider deletion. Two files are skipped: the one this program is
+        /// running from, which Windows will not let it delete, and the
+        /// uninstaller, which the Apps &amp; features entry points at. Deleting
+        /// the uninstaller first and then finding the companion locked left
+        /// that entry aimed at a program that no longer existed -- an offer to
+        /// try again with nothing behind it.
+        /// </summary>
+        private static void DeleteInstalledFiles(InstallOutcome outcome, string self, string uninstaller)
         {
             if (!Directory.Exists(InstallPaths.ProgramDirectory))
             {
                 return;
             }
 
-            string self = null;
-            try { self = Path.GetFullPath(System.Reflection.Assembly.GetEntryAssembly().Location); }
-            catch (Exception) { }
-
-            foreach (string file in Directory.GetFiles(InstallPaths.ProgramDirectory))
+            foreach (string file in Directory.GetFiles(
+                InstallPaths.ProgramDirectory, "*", SearchOption.AllDirectories))
             {
                 if (!InstallPaths.IsInsideProgramDirectory(file))
                 {
                     continue;   // never reached in practice; refuses anyway
                 }
-                if (self != null && string.Equals(file, self, StringComparison.OrdinalIgnoreCase))
+                if (self != null && SamePath(file, self))
                 {
-                    continue;   // handled below
+                    continue;   // a running program cannot delete its own file
+                }
+                if (uninstaller != null && SamePath(file, uninstaller))
+                {
+                    continue;   // kept until everything else has gone
                 }
                 try { File.Delete(file); }
                 catch (Exception error) { outcome.Warn("Could not delete " + file + ": " + error.Message); }
+            }
+        }
+
+        /// <summary>
+        /// Remove the now-empty program directory. Reached only once every
+        /// installed file is gone, so what is left is the folder itself --
+        /// unless this program is running from inside it.
+        /// </summary>
+        private static void RemoveProgramDirectory(InstallOutcome outcome, string self)
+        {
+            if (!Directory.Exists(InstallPaths.ProgramDirectory))
+            {
+                return;
             }
 
             if (self != null && InstallPaths.IsInsideProgramDirectory(self))
@@ -561,7 +721,6 @@ namespace OmoBench.Installer
                         + "\r\nThese are usually files still open in another program."));
             }
         }
-
         /// <summary>
         /// Hand the uninstall to a copy of this program running somewhere
         /// else, so that nothing is left behind.

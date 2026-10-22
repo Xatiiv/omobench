@@ -19,6 +19,12 @@
     Also run the payload provenance tests and build and run the installer's
     own test harness.
 
+.PARAMETER WizardFixture
+    Also build the wizard fixture (windows/installer/fixtures). It runs the
+    real installer window against a sandbox and a fake distribution, so Stop,
+    retry and closing can be observed on a real desktop without installing
+    anything. Not built by default and never shipped.
+
 .PARAMETER Version
     Product version. Defaults to the contents of VERSION next to this script.
 
@@ -38,6 +44,7 @@
 [CmdletBinding()]
 param(
     [switch]$Test,
+    [switch]$WizardFixture,
     [string]$OutputDirectory,
     [string]$Version,
     [string]$Revision,
@@ -297,7 +304,35 @@ if ($signed) {
     Write-Host "Signing  : NOT SIGNED. Windows will report an unknown publisher."
 }
 
-# 5. The installer's own tests.
+if ($WizardFixture) {
+    $fixtureSources = Get-ChildItem -Path (Join-Path $root 'fixtures') -Filter *.cs | Sort-Object Name
+    if (-not $fixtureSources) { throw "No fixture sources found under $root\fixtures." }
+
+    # The same source files as the installer itself, so what is observed is
+    # the shipped window and not a re-implementation of it.
+    $fixtureExe = Join-Path $OutputDirectory 'OmoBenchWizardFixture.exe'
+    Write-Host ''
+    Write-Host "Compiling the wizard fixture -> $fixtureExe"
+    $fixtureArguments = @(
+        '/nologo',
+        # A console app on purpose: it prints where its sandbox is.
+        '/target:exe',
+        '/platform:anycpu',
+        '/langversion:5',
+        '/warnaserror+',
+        '/main:OmoBench.Installer.Fixtures.WizardFixtureProgram',
+        "/out:$fixtureExe"
+    ) + $references + $stampPath +
+        ($installerSources | ForEach-Object { $_.FullName }) +
+        ($companionSources | ForEach-Object { $_.FullName }) +
+        ($fixtureSources | ForEach-Object { $_.FullName })
+
+    & $csc @fixtureArguments
+    if ($LASTEXITCODE -ne 0) { throw "Wizard fixture build failed with exit code $LASTEXITCODE." }
+    Write-Host "Built $fixtureExe"
+}
+
+# 5. The installer''s own tests.
 if ($Test) {
     # The payload builder first, against its own throwaway repository: it is
     # the one part of this that cannot be covered from inside the C# harness,

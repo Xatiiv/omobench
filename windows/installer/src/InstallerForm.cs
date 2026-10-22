@@ -140,10 +140,17 @@ namespace OmoBench.Installer
             }
         }
 
+        /// <summary>
+        /// Ask the work to stop. It is a request, not the end of it: the
+        /// worker keeps running until it reaches its next checkpoint, and the
+        /// completion it then delivers is what puts these controls back.
+        /// </summary>
         private void CancelWork()
         {
             _wizard.Cancel();
             _secondary.Enabled = false;
+            _secondary.Text = "Stopping…";
+            _primary.Enabled = false;
         }
 
         // -- installing the program -------------------------------------------
@@ -157,10 +164,12 @@ namespace OmoBench.Installer
             _close.Enabled = false;
             Application.DoEvents();
 
-            if (Installation.RunningInstalledCompanions().Count > 0)
+            // Including the case where that question could not be answered:
+            // "we could not tell" is a reason to coordinate, not to proceed.
+            if (Installation.ScanInstalledCompanions().AnyPossiblyRunning)
             {
                 DialogResult choice = MessageBox.Show(this,
-                    "The installed OmoBench companion is running, and its program file cannot be "
+                    "The installed OmoBench companion may be running, and its program file cannot be "
                     + "replaced while it is open.\n\n"
                     + "It will be asked to close. If a benchmark is running it will ask you first — "
                     + "answer that question however you like; this update will wait, and will stop if "
@@ -240,6 +249,11 @@ namespace OmoBench.Installer
         /// </summary>
         private void ShowEnvironment(bool recheck)
         {
+            // One operation at a time. Starting a second while the first is
+            // still winding up would leave its worker unwaited for at closing
+            // time and its completion silently stale.
+            if (_wizard.Working) { return; }
+
             _step = Step.Environment;
             _heading.Text = "Setting up the benchmark environment";
             _primary.Visible = true;
@@ -307,20 +321,24 @@ namespace OmoBench.Installer
 
         private void ApplyEnvironment(int generation, EnvironmentAnswer answer)
         {
-            // Nothing above this line. A stale or cancelled completion must
-            // not clear the working flag, touch the buttons, save anything or
-            // announce a result: by now those may belong to a newer operation,
-            // or to an instruction the person has withdrawn.
-            if (!_wizard.TryAccept(generation))
+            // Nothing above this line. A stale completion belongs to an
+            // operation that has been replaced, and the controls, the working
+            // flag and the status it would change belong to a newer one.
+            Completion completion = _wizard.Complete(generation);
+            if (completion == Completion.Stale)
             {
                 return;
             }
 
+            // Reached for a cancelled operation too: this is where the window
+            // stops being busy. Stop was pressed, the work has now wound up,
+            // and the buttons have to come back -- which is exactly what
+            // throwing the completion away used to prevent.
             _secondary.Text = "Check again";
             _secondary.Enabled = true;
             _close.Enabled = true;
 
-            if (answer.Cancelled)
+            if (completion == Completion.Cancelled || answer.Cancelled)
             {
                 _heading.Text = "Check stopped";
                 _subheading.Text = "Nothing was changed.";
@@ -425,6 +443,8 @@ namespace OmoBench.Installer
 
         private void PrepareEnvironment()
         {
+            if (_wizard.Working) { return; }
+
             _primary.Enabled = false;
             _secondary.Text = "Stop";
             _secondary.Enabled = true;
@@ -440,11 +460,15 @@ namespace OmoBench.Installer
             _worker = new Thread(() =>
             {
                 PreparationResult result = ManagedEnvironment.Prepare(
-                    distribution, build, cancel, snapshot => Post(() => RenderStages(snapshot)));
-                Post(() =>
-                {
-                    if (_wizard.TryAccept(generation)) { FinishPreparation(result); }
-                });
+                    distribution, build, cancel,
+                    // Progress is queued, so it outlives the work that
+                    // produced it: a stage update from a replaced operation
+                    // would otherwise redraw a newer one's list.
+                    snapshot => Post(() =>
+                    {
+                        if (_wizard.IsCurrent(generation)) { RenderStages(snapshot); }
+                    }));
+                Post(() => FinishPreparation(generation, result));
             });
             _worker.IsBackground = true;
             _worker.Start();
@@ -460,14 +484,21 @@ namespace OmoBench.Installer
             _detail.Text = text.ToString();
         }
 
-        private void FinishPreparation(PreparationResult result)
+        private void FinishPreparation(int generation, PreparationResult result)
         {
+            Completion completion = _wizard.Complete(generation);
+            if (completion == Completion.Stale)
+            {
+                return;
+            }
+
             _close.Enabled = true;
             _secondary.Text = "Check again";
             _secondary.Enabled = true;
+            _primary.Enabled = true;
             RenderStages(result);
 
-            if (result.Cancelled)
+            if (completion == Completion.Cancelled || result.Cancelled)
             {
                 _heading.Text = "Setup stopped";
                 _subheading.Text = result.Summary;
@@ -599,6 +630,10 @@ namespace OmoBench.Installer
                 _subheading.Text = "Waiting for the current step to stop cleanly.";
                 Application.DoEvents();
 
+                // The worker this window owns -- the one the operation above
+                // started. Waiting is what lets its cancellation reach a
+                // checkpoint instead of being cut off wherever it happened
+                // to be when the process ended.
                 Thread worker = _worker;
                 if (worker != null && worker.IsAlive)
                 {
