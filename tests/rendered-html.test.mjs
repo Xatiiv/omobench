@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readdirSync } from "node:fs";
 
 const { default: worker } = await import("../dist/server/index.js");
 
@@ -29,4 +30,21 @@ test("offers the local launcher without inventing a public installer download", 
   assert.match(html, /Public download coming soon/);
   assert.match(html, /WSL2/);
   assert.doesNotMatch(html, /href="[^"]*OmoBenchSetup\.exe"/);
+});
+
+test("comparison starts with registry data and a private import path, never fictional measurements", async () => {
+  const html = await render("/compare");
+  assert.match(html, /See how your/);
+  const resultFiles = readdirSync(new URL("../results/", import.meta.url), { recursive: true }).filter(path => path.endsWith("result.json"));
+  if (!resultFiles.length) assert.match(html, /No community runs are included/);
+  assert.match(html, /Open your result.json/);
+  assert.match(html, /Illustrative preview/);
+  assert.match(html, /never uploaded/);
+  assert.doesNotMatch(html, /Example CPU setup A/);
+});
+
+test("the home page links to the visual comparison workspace", async () => {
+  const html = await render("/");
+  assert.match(html, /href="\/compare"/);
+  assert.match(html, /Compare setups/);
 });

@@ -126,5 +126,27 @@ class GuidedPerformanceDisplayTests(unittest.TestCase):
         self.assertEqual(self.states["retainedSelection"]["readout"], state["readout"])
 
 
+class GuidedComparisonExportTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.states = _render_states()
+
+    def test_comparison_export_requires_a_reviewed_package(self):
+        self.assertIn("review", self.states["comparisonMissingPreview"].lower())
+
+    def test_comparison_export_preserves_the_reviewed_result(self):
+        exported = self.states["comparisonDownload"]
+        self.assertEqual(exported["count"], 1)
+        self.assertEqual(exported["name"], "result.json")
+        self.assertEqual(exported["type"], "application/json")
+        self.assertTrue(exported["unchanged"])
+        self.assertTrue(exported["content"].endswith("\n"))
+        self.assertEqual(json.loads(exported["content"]), {
+            "schema_version": "1.0", "run_id": "run-fixture-1234",
+            "results": {"output_tokens_per_second": 12},
+            "fixture": "not benchmark evidence",
+        })
+
+
 if __name__ == "__main__":
     unittest.main()

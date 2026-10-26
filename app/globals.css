@@ -209,5 +209,7 @@ body { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSyst
 .launch-card details p { margin-top: 12px; font-size: 12px; }
 .unavailable-download { display: inline-block; border: 1px solid #40516b; border-radius: 8px; padding: 12px 17px; margin-top: 24px; color: #a4b5ce; font-size: 13px; }
 @media (max-width: 900px) { .product-hero { gap: 30px; padding: 50px 0; }.hero-copy h1 { font-size: 56px; }.hero-description { font-size: 15px; }.setup-visual { padding: 18px; }.visual-legend { gap: 12px; } }
-@media (max-width: 700px) { .product-hero,.launch-grid { grid-template-columns: 1fr; }.hero-copy h1 { font-size: clamp(48px, 11vw, 64px); }.setup-visual { max-width: 500px; }.site-header nav { gap: 15px; font-size: 12px; }.site-header nav > a:nth-child(2) { display: none; }.site-header .nav-run { padding: 8px 11px; gap: 8px; }.product-brand { font-size: 20px; gap: 7px; }.product-brand svg { width: 29px; }.launch-card { padding: 23px; } }
+@media (max-width: 700px) { .product-hero,.launch-grid { grid-template-columns: 1fr; }.hero-copy h1 { font-size: clamp(48px, 11vw, 64px); }.setup-visual { max-width: 500px; }.site-header nav { gap: 15px; font-size: 12px; }.site-header nav > .nav-profiles { display: none; }.site-header .nav-run { padding: 8px 11px; gap: 8px; }.product-brand { font-size: 20px; gap: 7px; }.product-brand svg { width: 29px; }.launch-card { padding: 23px; } }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+
+@media (max-width: 520px) { .site-header { flex-wrap: wrap; gap: 18px; }.site-header nav { width: 100%; justify-content: space-between; gap: 12px; } }

@@ -19,6 +19,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { comparisonHref } from "@/app/lib/comparison";
 import { demoResults, type DemoResult } from "@/app/data/demo-results";
 import { registryResults, type RegistryResult } from "@/app/data/registry-results";
 
@@ -155,7 +156,7 @@ function LocalRegistry() {
             </p>
           </div>
           <Badge className={hasResults ? "border-amber-400/30 bg-amber-400/10 text-amber-200" : "border-amber-300/30 bg-amber-300/10 text-amber-200"} variant="outline">
-            {hasResults ? `${registryResults.length} packaged local ${registryResults.length === 1 ? "result" : "results"}` : "Awaiting a local result"}
+            {hasResults ? `${registryResults.length} registry ${registryResults.length === 1 ? "result" : "results"}` : "Awaiting a submitted result"}
           </Badge>
         </div>
 
@@ -165,6 +166,7 @@ function LocalRegistry() {
             <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-400">
               Run a benchmark, review the evidence and submit it for validation. Accepted results appear here after review and a website build.
             </p>
+            <Link className="mt-4 inline-block text-sm text-amber-300 hover:underline" href="/compare">Open the visual comparison workspace ↗</Link>
           </div>
         ) : (
           <>
@@ -176,7 +178,7 @@ function LocalRegistry() {
               <DemoFilter id="registry-profile-filter" label="Profile" onValueChange={setProfile} options={registryProfileOptions} value={profile} />
             </div>
             <p aria-live="polite" className="mt-4 text-sm text-slate-400">
-              Showing <span className="font-mono text-slate-200">{filteredResults.length}</span> of {registryResults.length} packaged local results.
+              Showing <span className="font-mono text-slate-200">{filteredResults.length}</span> of {registryResults.length} registry results.
             </p>
             <div className="mt-4">
               <Table>
@@ -195,7 +197,7 @@ function LocalRegistry() {
                   {filteredResults.length === 0 ? (
                     <TableRow className="border-white/10 hover:bg-transparent">
                       <TableCell className="py-8 text-center text-sm text-slate-400" colSpan={7}>
-                        No packaged local results match this combination.
+                        No registry results match this combination.
                       </TableCell>
                     </TableRow>
                   ) : (
@@ -218,6 +220,7 @@ function LocalRegistry() {
                           <a className="font-mono text-xs text-amber-300 transition hover:text-amber-200 hover:underline" href={`/runs/${result.id}`}>
                             View details
                           </a>
+                          <Link className="mt-2 block font-mono text-xs text-sky-300 hover:underline" href={comparisonHref(result.id)}>Compare ↗</Link>
                         </TableCell>
                       </TableRow>
                     ))
@@ -262,7 +265,7 @@ export default function Home() {
             <p className="hero-description">Measure inference speed, response time and reliability on your own hardware. Every result starts with a repeatable workload and ends with evidence you can inspect.</p>
             <div className="hero-actions">
               <Link className="product-button" href="/run">Run a benchmark <span aria-hidden="true">↗</span></Link>
-              <a className="product-button secondary-button" href="#local-results">Explore results <span aria-hidden="true">↓</span></a>
+              <Link className="product-button secondary-button" href="/compare">Compare setups <span aria-hidden="true">↗</span></Link>
             </div>
             <div className="hero-capabilities"><span>CPU + GPU</span><span>Local execution</span><span>Open evidence</span></div>
           </div>

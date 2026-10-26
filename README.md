@@ -220,6 +220,12 @@ merge PRs. Read the [submission guide](docs/submission-bundle.md) before publish
 
 ## Develop the comparison website
 
+The **Compare** page shows setup cards, throughput and latency charts, and a
+leaderboard of compatible registry runs. You can also open a packaged
+`result.json` privately in your browser without uploading it. An opt-in example
+mode demonstrates the interface while the registry is empty. See
+[comparing results](docs/comparing-results.md).
+
 Only website development needs Node.js (22.13 or later, as declared in
 `package.json`). From the checkout, with Node and npm available in that terminal:
 

@@ -70,6 +70,7 @@ const context = createContext({
   String,
   Boolean,
   Promise,
+  Blob,
   Error,
   isNaN,
   parseInt,
@@ -184,4 +185,23 @@ context.renderChart({ available: true, latest_metrics: { output_tokens_per_secon
 results.zeroMetrics = chartState();
 context.renderChart({ ...observed, available: false });
 results.unavailableMetrics = chartState();
+
+// Export exactly the reviewed normalized result, without a network request or
+// any mutation of the evidence. A raw local summary cannot use this action.
+const downloads = [];
+context.captureComparisonDownload = (blob, name) => downloads.push({ blob, name });
+runInContext("download = captureComparisonDownload; preview = null;", context);
+try { context.downloadComparisonResult(); } catch (error) { results.comparisonMissingPreview = error.message; }
+const reviewedFixture = { schema_version: "1.0", run_id: "run-fixture-1234", results: { output_tokens_per_second: 12 }, fixture: "not benchmark evidence" };
+context.reviewedFixture = reviewedFixture;
+runInContext("preview = { result: reviewedFixture };", context);
+const fixtureBefore = JSON.stringify(reviewedFixture);
+context.downloadComparisonResult();
+results.comparisonDownload = {
+  count: downloads.length,
+  name: downloads[0].name,
+  type: downloads[0].blob.type,
+  content: await downloads[0].blob.text(),
+  unchanged: fixtureBefore === JSON.stringify(reviewedFixture),
+};
 process.stdout.write(JSON.stringify(results));

@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { SiteHeader } from "@/components/product/site-header";
 import { Badge } from "@/components/ui/badge";
+import { comparisonHref } from "@/app/lib/comparison";
 import { demoResults, type DemoResult } from "@/app/data/demo-results";
 import {
   getRegistryResult,
@@ -64,22 +65,24 @@ function LocalRunDetails({ result }: Readonly<{ result: RegistryResult }>) {
     <DetailShell
       badge={
         <Badge className="border-amber-400/30 bg-amber-400/10 text-amber-200" variant="outline">
-          Local packaged evidence
+          Registry evidence
         </Badge>
       }
     >
       <section className="border-b border-white/10 py-14">
         <Link className="font-mono text-xs text-amber-300 transition hover:text-amber-200 hover:underline" href="/#local-results">
-          ← Back to local results
+          ← Back to results
         </Link>
-        <p className="mt-8 font-mono text-xs uppercase tracking-[0.22em] text-amber-300">Local run record</p>
+        <p className="mt-8 font-mono text-xs uppercase tracking-[0.22em] text-amber-300">Registry run record</p>
         <h1 className="mt-3 max-w-4xl text-4xl font-semibold tracking-[-0.04em] sm:text-5xl">
           {result.model} on {result.hardware.display}
         </h1>
         <p className="mt-5 max-w-3xl text-lg leading-8 text-slate-300">
-          This record was loaded from a local, packaged evidence bundle. It is inspectable on this computer but has not been submitted, reviewed, or published.
+          This record is included in this website build. Inspect its measurements, declared setup and evidence metadata below. Inclusion in a local preview alone does not establish community review.
         </p>
       </section>
+
+      <Link className="product-button mt-6" href={comparisonHref(result.id)}>Compare this setup ↗</Link>
 
       <section className="grid gap-4 py-10 sm:grid-cols-2 lg:grid-cols-5">
         {[
@@ -103,10 +106,12 @@ function LocalRunDetails({ result }: Readonly<{ result: RegistryResult }>) {
             {[
               ["Time to first token, p50", formatMetric(result.ttftP50, " ms")],
               ["Time to first token, p95", formatMetric(result.ttftP95, " ms")],
+              ["Inter-token latency, p50", formatMetric(result.itlP50, " ms")],
+              ["Inter-token latency, p95", formatMetric(result.itlP95, " ms")],
               ["Output tokens per second", formatMetric(result.outputTokensPerSecond)],
               ["Total tokens per second", formatMetric(result.totalTokensPerSecond)],
               ["Requests per second", formatMetric(result.requestsPerSecond)],
-              ["Error rate", formatMetric((result.requests.failed / result.requests.attempted) * 100, "%")],
+              ["Error rate", formatMetric(result.errorRatePercent, "%")],
             ].map(([label, value]) => (
               <div className="flex items-end justify-between gap-4 border-b border-white/10 pb-4 last:border-0 last:pb-0" key={label}>
                 <dt className="text-sm text-slate-400">{label}</dt>
@@ -129,7 +134,7 @@ function LocalRunDetails({ result }: Readonly<{ result: RegistryResult }>) {
         </div>
       </section>
 
-      <section className="py-12">
+      <section className="py-12" id="evidence">
         <div className="flex flex-col gap-3 border-b border-white/10 pb-6 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <p className="font-mono text-xs uppercase tracking-[0.2em] text-slate-500">Evidence bundle</p>
@@ -140,7 +145,7 @@ function LocalRunDetails({ result }: Readonly<{ result: RegistryResult }>) {
         <div className="mt-6 grid gap-3 md:grid-cols-2">
           <article className="rounded-xl border border-white/10 bg-white/[0.025] p-5">
             <p className="font-mono text-sm text-slate-100">result.json</p>
-            <p className="mt-2 text-sm leading-6 text-slate-400">Normalized summary used to render this local record.</p>
+            <p className="mt-2 text-sm leading-6 text-slate-400">Normalized summary used to render this registry record.</p>
           </article>
           {result.artifacts.map((artifact) => (
             <article className="rounded-xl border border-white/10 bg-white/[0.025] p-5" key={artifact.path}>
