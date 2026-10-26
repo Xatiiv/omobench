@@ -23,6 +23,12 @@ Missing telemetry displays Pending rather than a manufactured zero. Failed or ca
 
 ## Interaction and accessibility
 
+The website's **Compare** workspace extends this palette to setup cards, metric
+bars and a workload-matched run leaderboard. Amber marks the reference; blue,
+violet and cyan distinguish selected peers. Values, units and reference labels
+remain readable without colour. See [comparing-results.md](comparing-results.md)
+for compatibility rules, private imports and the explicitly illustrative preview.
+
 - Controls retain visible keyboard focus and meaningful labels.
 - The chart includes axis units, a text readout and an accessible range control.
 - Layouts collapse to one column on narrow screens without hiding essential measurements or cancellation controls.

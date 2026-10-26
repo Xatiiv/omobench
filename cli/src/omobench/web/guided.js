@@ -1126,6 +1126,15 @@ $("prepare-review-button").addEventListener("click", () => action(async () => {
 $("download-bundle-button").addEventListener("click", () => action(async () =>
   download(await api(`/api/runs/${benchmarkJobId}/bundle`, undefined, true), `${benchmarkJobId}-submission.zip`)));
 
+function downloadComparisonResult() {
+  if (!preview?.result) throw new Error("Package, validate and review the submission files first.");
+  // Export the already-reviewed normalized record exactly as shown. Never
+  // send a local result or the panel token to the hosted comparison page.
+  download(new Blob([JSON.stringify(preview.result, null, 2) + "\n"], { type: "application/json" }), "result.json");
+}
+
+$("download-comparison-button").addEventListener("click", () => action(downloadComparisonResult));
+
 $("submit-confirmed").addEventListener("change", () => {
   $("submit-button").disabled = !preview?.can_submit || !$("submit-confirmed").checked;
 });
