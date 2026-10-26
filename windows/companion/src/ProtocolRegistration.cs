@@ -15,7 +15,26 @@ namespace OmoBench.Companion
     /// </summary>
     public static class ProtocolRegistration
     {
-        public const string KeyPath = @"Software\Classes\" + Protocol.Scheme;
+        /// <summary>
+        /// The real registration: what Windows consults for an omobench://
+        /// link, and what the tests must leave alone.
+        /// </summary>
+        public const string DefaultKeyPath = @"Software\Classes\" + Protocol.Scheme;
+
+        /// <summary>
+        /// Redirects the registration, so a test can register and unregister
+        /// without touching the handler a real installation depends on.
+        /// Null in normal use.
+        /// </summary>
+        internal static string KeyPathOverride = null;
+
+        public static string KeyPath
+        {
+            get
+            {
+                return string.IsNullOrEmpty(KeyPathOverride) ? DefaultKeyPath : KeyPathOverride;
+            }
+        }
         private const string CommandSubKey = @"shell\open\command";
         private const string OwnerValueName = "OmoBenchCompanion";
 

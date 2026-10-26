@@ -16,12 +16,20 @@
 .PARAMETER Test
     Also build and run the test harness (windows/companion/tests).
 
+.PARAMETER ShutdownFixture
+    Also build the shutdown fixture (windows/companion/fixtures). It runs the
+    real companion window against a sandbox configuration and a fixture panel,
+    so the window's own closing question can be observed on a real desktop
+    without a checkout, a panel or a benchmark. Not built by default and never
+    shipped.
+
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File windows\companion\build.ps1 -Test
 #>
 [CmdletBinding()]
 param(
     [switch]$Test,
+    [switch]$ShutdownFixture,
     [string]$OutputDirectory
 )
 
@@ -70,6 +78,31 @@ $arguments = @(
 & $csc @arguments
 if ($LASTEXITCODE -ne 0) { throw "Build failed with exit code $LASTEXITCODE." }
 Write-Host "Built $exePath ($([math]::Round((Get-Item $exePath).Length / 1KB, 1)) KB)"
+
+if ($ShutdownFixture) {
+    $fixtureSources = Get-ChildItem -Path (Join-Path $root 'fixtures') -Filter *.cs | Sort-Object Name
+    if (-not $fixtureSources) { throw "No fixture sources found under $root\fixtures." }
+
+    # Same source files as the shipped companion, so what is observed is the
+    # shipped behaviour and not a re-implementation of it.
+    $fixtureExe = Join-Path $OutputDirectory 'OmoBenchShutdownFixture.exe'
+    Write-Host "Compiling the shutdown fixture -> $fixtureExe"
+    $fixtureArguments = @(
+        '/nologo',
+        # A console app on purpose: it prints where its sandbox is.
+        '/target:exe',
+        '/platform:anycpu',
+        '/langversion:5',
+        '/warnaserror+',
+        '/main:OmoBench.Companion.Fixtures.ShutdownFixtureProgram',
+        "/out:$fixtureExe"
+    ) + $references + ($sources | ForEach-Object { $_.FullName }) +
+        ($fixtureSources | ForEach-Object { $_.FullName })
+
+    & $csc @fixtureArguments
+    if ($LASTEXITCODE -ne 0) { throw "Shutdown fixture build failed with exit code $LASTEXITCODE." }
+    Write-Host "Built $fixtureExe"
+}
 
 if ($Test) {
     $testSources = Get-ChildItem -Path (Join-Path $root 'tests') -Filter *.cs | Sort-Object Name

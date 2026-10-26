@@ -44,9 +44,21 @@ namespace OmoBench.Companion
             }
         }
 
+        /// <summary>
+        /// Redirects the saved configuration, so a test can exercise saving
+        /// and loading without touching the configuration a person depends on.
+        /// Null in normal use.
+        /// </summary>
+        internal static string FilePathOverride = null;
+
         public static string FilePath
         {
-            get { return Path.Combine(DirectoryPath, "companion.config"); }
+            get
+            {
+                return string.IsNullOrEmpty(FilePathOverride)
+                    ? Path.Combine(DirectoryPath, "companion.config")
+                    : FilePathOverride;
+            }
         }
 
         /// <summary>
@@ -302,7 +314,8 @@ namespace OmoBench.Companion
 
         public void Save()
         {
-            Directory.CreateDirectory(DirectoryPath);
+            string directory = Path.GetDirectoryName(FilePath);
+            if (!string.IsNullOrEmpty(directory)) { Directory.CreateDirectory(directory); }
             List<string> lines = new List<string>
             {
                 "# OmoBench companion configuration (per user).",

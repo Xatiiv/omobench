@@ -1,0 +1,236 @@
+name: Windows installer
+
+# Builds the downloadable Windows installer and, separately, publishes it.
+#
+# The two are deliberately different events. Every pull request builds the
+# installer and attaches it as a CI artifact, so a reviewer can download and
+# run exactly what the branch produces. Publishing happens only from a tag on
+# main or a deliberate manual run -- never from an ordinary pull request.
+#
+# Publication ships the artifact the build job produced and tested. It does not
+# recompile: a second compilation is a different binary (the in-box compiler
+# stamps a fresh module id into every output), so its checksum would not be the
+# one that was tested, and the hash in the release notes would describe a file
+# nobody ran.
+
+on:
+  pull_request:
+    paths:
+      - "windows/**"
+      - ".github/workflows/windows-installer.yml"
+  push:
+    branches: [main]
+    paths:
+      - "windows/**"
+      - ".github/workflows/windows-installer.yml"
+    tags:
+      - "windows-v*"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish a draft GitHub Release from this build"
+        type: boolean
+        default: false
+      version_tag:
+        description: "Existing tag to publish, e.g. windows-v0.1.0 (required when publishing)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.build.outputs.version }}
+      revision: ${{ steps.build.outputs.revision }}
+      sha256: ${{ steps.build.outputs.sha256 }}
+      artifact: ${{ steps.build.outputs.artifact }}
+    steps:
+      # For a pull request, build the branch's own head commit rather than the
+      # synthetic merge commit: the revision stamped into the installer is what
+      # its managed environment later downloads, so it needs to be a commit that
+      # actually exists on the branch.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      # The harness runs against the production sources, not a copy: the test
+      # build links the same files the shipped companion is compiled from.
+      - name: Run the companion test harness
+        shell: pwsh
+        run: ./windows/companion/build.ps1 -Test
+
+      # No -Revision here. The script derives it from the checked-out commit
+      # and refuses a supplied value that disagrees with it.
+      - name: Build the installer and run its tests
+        id: build
+        shell: pwsh
+        run: |
+          ./windows/installer/build.ps1 -Test
+          $metadata = Get-Content ./windows/installer/build/version.json | ConvertFrom-Json
+          $artifact = "OmoBenchSetup-$($metadata.version)-$($metadata.revision)"
+          "version=$($metadata.version)"   >> $env:GITHUB_OUTPUT
+          "revision=$($metadata.revision)" >> $env:GITHUB_OUTPUT
+          "sha256=$($metadata.installer_sha256)" >> $env:GITHUB_OUTPUT
+          "artifact=$artifact" >> $env:GITHUB_OUTPUT
+          Write-Host "::notice::OmoBenchSetup.exe $($metadata.version) ($($metadata.revision)) sha256=$($metadata.installer_sha256)"
+          if (-not $metadata.signed) {
+            Write-Host "::warning::This installer is not code-signed. Windows will report an unknown publisher."
+          }
+
+      # The stamped revision, the checked-out commit, the recorded checksum and
+      # the file on disk must all agree before anything is uploaded.
+      - name: Verify the artifact's identity
+        shell: pwsh
+        run: |
+          $metadata = Get-Content ./windows/installer/build/version.json | ConvertFrom-Json
+          $head = (git rev-parse HEAD).Trim()
+          if ($metadata.revision -ne $head) {
+            throw "Installer revision $($metadata.revision) is not the checked-out commit $head."
+          }
+          if (-not $metadata.source_clean) {
+            throw "The build reported an unclean source tree; refusing to publish or share it."
+          }
+          $actual = (Get-FileHash ./windows/installer/build/OmoBenchSetup.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $metadata.installer_sha256) {
+            throw "OmoBenchSetup.exe hashes to $actual but version.json records $($metadata.installer_sha256)."
+          }
+          $sums = (Get-Content ./windows/installer/build/SHA256SUMS -Raw).Trim()
+          if ($sums -notmatch [regex]::Escape($actual)) {
+            throw "SHA256SUMS does not contain the installer's actual checksum."
+          }
+          Write-Host "Verified $actual for revision $head"
+
+      - name: Upload the installer as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.build.outputs.artifact }}
+          path: |
+            windows/installer/build/OmoBenchSetup.exe
+            windows/installer/build/version.json
+            windows/installer/build/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish draft release
+    # A tag push, or a deliberate manual run. A pull request build -- whose ref
+    # is refs/pull/N/merge -- can never satisfy either clause.
+    if: >
+      (github.event_name == 'workflow_dispatch' && inputs.publish) ||
+      startsWith(github.ref, 'refs/tags/windows-v')
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    environment: windows-release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # github.ref_name is the branch name on a manual run, which is not a
+      # version and must never be used as a tag. A manual publication names an
+      # existing tag explicitly, and that name is validated before use.
+      - name: Resolve and validate the tag
+        id: tag
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ inputs.version_tag }}".Trim()
+            if (-not $tag) {
+              throw "Publishing manually requires version_tag, for example windows-v0.1.0."
+            }
+          } else {
+            $tag = "${{ github.ref_name }}"
+          }
+          if ($tag -notmatch '^windows-v[0-9]+\.[0-9]+\.[0-9]+$') {
+            throw "'$tag' is not a release tag of the form windows-v<major>.<minor>.<patch>."
+          }
+          # The tag must already exist. This workflow never creates one.
+          $commit = (git rev-list -n 1 "refs/tags/$tag" 2>$null)
+          if ($LASTEXITCODE -ne 0 -or -not $commit) {
+            throw "Tag '$tag' does not exist. Create and push it before publishing."
+          }
+          $commit = $commit.Trim()
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "commit=$commit" >> $env:GITHUB_OUTPUT
+          Write-Host "Publishing $tag ($commit)"
+
+      # Source policy: only code that is on main may be released.
+      - name: Check the tag is on main
+        shell: pwsh
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "${{ steps.tag.outputs.commit }}" origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Tag ${{ steps.tag.outputs.tag }} points at a commit that is not contained in main."
+          }
+
+      # Ship what was built and tested, rather than compiling again.
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact }}
+          path: release
+
+      - name: Verify the artifact matches the tag and its own metadata
+        shell: pwsh
+        run: |
+          $metadata = Get-Content ./release/version.json | ConvertFrom-Json
+          if ($metadata.revision -ne "${{ steps.tag.outputs.commit }}") {
+            throw "The built artifact is revision $($metadata.revision), but tag ${{ steps.tag.outputs.tag }} points at ${{ steps.tag.outputs.commit }}."
+          }
+          if ("v$($metadata.version)" -ne "${{ steps.tag.outputs.tag }}".Replace("windows-", "")) {
+            throw "Tag ${{ steps.tag.outputs.tag }} does not match the built version $($metadata.version)."
+          }
+          $actual = (Get-FileHash ./release/OmoBenchSetup.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $metadata.installer_sha256) {
+            throw "The downloaded installer hashes to $actual, not the recorded $($metadata.installer_sha256)."
+          }
+          $sums = (Get-Content ./release/SHA256SUMS -Raw).Trim()
+          if ($sums -notmatch [regex]::Escape($actual)) {
+            throw "SHA256SUMS does not contain the installer's actual checksum."
+          }
+          $signing = if ($metadata.signed) { "signed as $($metadata.signing_identity)" } else { "NOT SIGNED" }
+          @"
+          ## OmoBench for Windows $($metadata.version)
+
+          | | |
+          | --- | --- |
+          | Tag | ``${{ steps.tag.outputs.tag }}`` |
+          | Source revision | ``$($metadata.revision)`` |
+          | SHA-256 | ``$actual`` |
+          | Code signing | $signing |
+          "@ >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Create the draft GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          name: OmoBench for Windows ${{ needs.build.outputs.version }}
+          tag_name: ${{ steps.tag.outputs.tag }}
+          files: |
+            release/OmoBenchSetup.exe
+            release/version.json
+            release/SHA256SUMS
+          body: |
+            OmoBench for Windows ${{ needs.build.outputs.version }}
+
+            Source revision: `${{ needs.build.outputs.revision }}`
+            SHA-256 of `OmoBenchSetup.exe`: `${{ needs.build.outputs.sha256 }}`
+
+            Verify the download before running it:
+
+                Get-FileHash .\OmoBenchSetup.exe -Algorithm SHA256
+
+            This build is **not code-signed**, so Windows SmartScreen will show
+            an unknown publisher. Compare the checksum above rather than
+            relying on the publisher name. The checksum identifies this exact
+            file; rebuilding the same revision produces a different one.
+
+            Installs for your user account only; no administrator rights are
+            needed. Benchmark evidence, saved settings and your WSL
+            installation are never removed by the uninstaller.
