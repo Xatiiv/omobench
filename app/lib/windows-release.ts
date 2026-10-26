@@ -3,7 +3,7 @@
  *
  * `null` means no release has been published yet. The page renders an honest
  * "not available yet" state in that case rather than a button that leads to a
- * 404 — a broken download is worse than a clear absence, because the person
+ * 404, a broken download is worse than a clear absence, because the person
  * cannot tell whether the fault is theirs.
  *
  * When the release workflow publishes a build, fill this in from the

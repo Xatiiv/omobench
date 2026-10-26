@@ -85,5 +85,46 @@ class GuidedProgressBarTests(unittest.TestCase):
         self.assertIn("Time limit reached", overrunning["label"])
 
 
+class GuidedPerformanceDisplayTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.states = _render_states()
+
+    def test_missing_or_unavailable_telemetry_never_becomes_a_zero_score(self):
+        for key in ("missingMetrics", "unavailableMetrics"):
+            with self.subTest(key=key):
+                state = self.states[key]
+                self.assertEqual(state["throughput"], "Pending")
+                self.assertTrue(state["hidden"])
+                self.assertTrue(state["inspectorHidden"])
+                self.assertEqual(state["points"], "")
+                self.assertEqual(state["area"], "")
+
+    def test_live_metrics_use_observed_values_including_zero(self):
+        state = self.states["observedMetrics"]
+        self.assertEqual(state["throughput"], "7.25")
+        self.assertEqual(state["ttft"], "0 ms")
+        self.assertEqual(state["requestTime"], "12.5 s")
+        self.assertEqual(state["successful"], "0")
+        zero = self.states["zeroMetrics"]
+        self.assertEqual(zero["throughput"], "0")
+        self.assertFalse(zero["hidden"])
+        self.assertEqual(len(zero["points"].split()), 1)
+
+    def test_chart_uses_only_valid_observations_and_preserves_input(self):
+        state = self.states["observedMetrics"]
+        self.assertEqual(len(state["points"].split()), 2)
+        self.assertNotIn("NaN", state["points"])
+        self.assertTrue(self.states["historyPreserved"])
+        coordinates = [float(pair.split(",")[0]) for pair in state["points"].split()]
+        self.assertLess(coordinates[0], coordinates[1])
+
+    def test_sample_inspection_is_accessible_and_survives_polling(self):
+        state = self.states["inspectedSample"]
+        self.assertEqual(state["readout"], "0m 10s · 5 tok/s")
+        self.assertEqual(state["accessibleReadout"], state["readout"])
+        self.assertEqual(self.states["retainedSelection"]["readout"], state["readout"])
+
+
 if __name__ == "__main__":
     unittest.main()

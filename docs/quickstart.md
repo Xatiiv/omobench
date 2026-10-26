@@ -166,9 +166,9 @@ omobench ui
 Open the full URL it prints, including `#token=...`. Keep the terminal running.
 Your Windows browser can access the WSL-hosted panel. The page that opens is a
 **guided benchmark by default**: it downloads, verifies, and runs one reviewed
-small CPU model for you, then helps prepare a submission — see
+small CPU model for you, then helps prepare a submission, see
 [Guided CPU setup](guided-launcher.md). It adds one extra requirement of its
-own — Linux x86_64 with glibc 2.34 or newer — because its pinned runtime build
+own, Linux x86_64 with glibc 2.34 or newer, because its pinned runtime build
 depends on it.
 
 Already loaded a model yourself using the [model-server guide](model-server.md)?

@@ -32,7 +32,7 @@ See [guided-launcher.md](docs/guided-launcher.md).
 - The model catalog in `catalog/models/` is the source of truth for eligible public models. Do not hard-code a competing model list.
 - Runtime provenance matters. Preserve the exact framework, version, startup arguments, and a meaningful description for `openai-compatible-other`.
 - GPU metadata is vendor-neutral. Do not make NVIDIA-only assumptions or infer VRAM from an unreliable source.
-- `--execution-device` records a contributor's declaration; it does not create or independently prove execution on that device. A CPU result must not represent an installed-but-unused GPU as having performed inference — its `hardware.gpus` stays empty even when the machine has an idle GPU.
+- `--execution-device` records a contributor's declaration; it does not create or independently prove execution on that device. A CPU result must not represent an installed-but-unused GPU as having performed inference, its `hardware.gpus` stays empty even when the machine has an idle GPU.
 
 ## Evidence and result integrity
 

@@ -116,7 +116,7 @@ Authentication headers and redirects are also unsupported.
 
 A CPU or GPU selection is only a declaration. A GPU package also needs
 detected GPU metadata (a memory override can only fill unknown VRAM for
-already-detected hardware); a CPU package needs none of that — no GPU
+already-detected hardware); a CPU package needs none of that, no GPU
 detection, VRAM, or driver is required, and any `--gpu-memory-gb` value is
 rejected since no GPU performed inference. Either way, validation requires a
 catalogued model, immutable revision, valid runtime details, and an intact
@@ -124,7 +124,7 @@ evidence bundle.
 
 **Download local summary** remains available on any run for a quick JSON
 export; it is not the public `result.json` format, so do not copy it into
-`results/` by hand — package the run instead.
+`results/` by hand, package the run instead.
 
 For direct PR creation, `gh` must be installed and authenticated in the panel's
 environment, with write access to the displayed `origin` repository. Windows

@@ -79,7 +79,7 @@ that opens is the guided benchmark, which downloads and runs its own model;
 since this demo starts a server yourself, open **`/advanced`** instead (same
 token, same origin) for the connect-and-run form below. If you would rather
 skip starting a server by hand, the guided page's default flow does that for
-you — see [Guided CPU setup](guided-launcher.md).
+you, see [Guided CPU setup](guided-launcher.md).
 
 ### 4. Browser: connect and start
 

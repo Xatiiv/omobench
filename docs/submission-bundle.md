@@ -8,7 +8,7 @@ OpenAI-compatible chat-completions endpoint.
 CPU and GPU runs are both eligible for public v1 records: `--execution-device`
 declares what actually performed inference, not merely what hardware is
 installed. A CPU run's quick **Download local summary** JSON is still not a
-public `result.json` and must not be placed under `results/` by hand — use
+public `result.json` and must not be placed under `results/` by hand, use
 packaging (CLI or panel) to produce a schema-ready bundle instead.
 
 There are two submission routes: **Review & submit** in `omobench ui`, or the
@@ -41,20 +41,19 @@ is planning information, not an enforced runtime allowlist.
 ## Immutable model revisions
 
 `model.revision` must identify an immutable model revision or commit SHA.
-Registry validation rejects an empty revision and clearly mutable labels —
-`main`, `master`, and `latest` (case-insensitive) — because they can point to
+Registry validation rejects an empty revision and clearly mutable labels, `main`, `master`, and `latest` (case-insensitive), because they can point to
 different weights over time and break reproducibility. Normal SHA-based (or
 otherwise content-addressed) revisions are accepted.
 
 `model.id` always stays the canonical catalog identity used for eligibility
 and comparison, regardless of where the weights actually came from. The
 optional `model.source` (set with `--model-source`) records the actual
-weights source — ideally the exact download URL pinned to an immutable
-revision and filename — for cases like a quantized re-export repository that
+weights source, ideally the exact download URL pinned to an immutable
+revision and filename, for cases like a quantized re-export repository that
 differs from `model.id`'s own repository (for example a GGUF conversion
 maintained under a different namespace). **When `model.source` is supplied,
 `model.revision` refers to that source's own repository, not to `model.id`'s
-canonical upstream repository** — do not present it as a verified revision of
+canonical upstream repository**, do not present it as a verified revision of
 the upstream repo. Omitting `--model-source` keeps the historical
 interpretation (`model.revision` refers to `model.id`'s own repository) and
 existing bundles without `model.source` remain valid exactly as before.
@@ -77,11 +76,11 @@ profile hash.
 
 The remaining files are the evidence for the summary:
 
-- `guidellm-benchmarks.json.gz` — unmodified raw GuideLLM output, compressed.
-- `guidellm.stdout.log` — the runner's standard output after redaction.
-- `environment.json` — detected operating system, CPU, RAM, GPU, driver, and
+- `guidellm-benchmarks.json.gz`, unmodified raw GuideLLM output, compressed.
+- `guidellm.stdout.log`, the runner's standard output after redaction.
+- `environment.json`, detected operating system, CPU, RAM, GPU, driver, and
   package-version information.
-- `reproduce.md` — exact non-secret commands needed to recreate the run.
+- `reproduce.md`, exact non-secret commands needed to recreate the run.
 
 Never commit API keys, access tokens, private hostnames, serial numbers, user
 prompts, model weights, or credentials. Inspect evidence before final packaging
@@ -111,7 +110,7 @@ omobench package \
 
 Add `--model-source https://...` (an https URL, no embedded credentials) only
 when the weights actually came from somewhere other than `--model`'s own
-repository — for example a quantized re-export. Omit it entirely when the
+repository, for example a quantized re-export. Omit it entirely when the
 weights came directly from `--model`'s own repository at `--model-revision`;
 omitting it changes nothing about how the bundle is interpreted. The advanced
 panel's package form prefills this field automatically for a run started from
@@ -143,15 +142,14 @@ actually performed inference, not merely what hardware is installed: pass
 `--execution-device gpu` only after confirming the model server **genuinely
 ran on the GPU** (the flag records that confirmation; it does not itself
 verify or cause GPU execution), or `--execution-device cpu` for a confirmed
-CPU-only run. A CPU package does not need GPU detection, VRAM, or a driver —
-its `hardware.gpus` is recorded empty even when the machine has an idle,
+CPU-only run. A CPU package does not need GPU detection, VRAM, or a driver, its `hardware.gpus` is recorded empty even when the machine has an idle,
 unused GPU, because that GPU did not perform inference.
 
 ## GPU vendor and memory
 
 OmoBench reports NVIDIA, AMD, Intel, and other GPUs through available vendor
 utilities and OS fallbacks. It does not install those utilities, and every
-detection method is best-effort — see
+detection method is best-effort, see
 [docs/quickstart.md](quickstart.md) for exactly how each vendor and OS
 combination is detected. `hardware.gpus[].vendor` is optional in
 `schema/benchmark-run.schema.json`; a `result.json` published before
@@ -167,7 +165,7 @@ omobench package --gpu-memory-gb 16 ...
 ```
 
 Before doing so, confirm the real VRAM figure in the serving runtime's own
-startup log or the OS hardware panel — `--gpu-memory-gb` only fills in a
+startup log or the OS hardware panel, `--gpu-memory-gb` only fills in a
 memory value for a GPU `omobench doctor` already detected; it never invents
 a GPU model or vendor, and `omobench package` still requires at least one
 automatically detected GPU. It is rejected with a clear error if every
@@ -185,13 +183,13 @@ one kind of GPU. Applying it marks `hardware.detection.hardware` as
 - `sglang`
 - `llama.cpp`
 - `lmstudio`
-- `openai-compatible-other` — any other OpenAI-compatible server
+- `openai-compatible-other`, any other OpenAI-compatible server
 
 Every `runtime` still requires an `endpoint_type` of `openai-compatible`;
 these framework choices only record *what implements* that endpoint.
 
 When `--framework openai-compatible-other` is used, `--server-description`
-is required — a free-text description of the server (for example, "internal
+is required, a free-text description of the server (for example, "internal
 gateway in front of a fine-tuned model"). `omobench package` fails clearly
 if that framework is selected without a description:
 
@@ -211,8 +209,7 @@ a new configuration. Existing `result.json` files without
 `--model-source` behaves the same way: when supplied, it is recorded as
 `model.source` and included in the `configuration_fingerprint`, so packaging
 the same run once with a source and once without produces two different
-configurations. Omitting `--model-source` leaves `model` exactly as before —
-the fingerprint for a run packaged without a source is unaffected by this
+configurations. Omitting `--model-source` leaves `model` exactly as before, the fingerprint for a run packaged without a source is unaffected by this
 option's existence.
 
 ## Repeats and duplicates
@@ -224,7 +221,7 @@ one execution session. `execution_device` is deliberately **not** part of
 this digest: `hardware.gpus` (always empty for a `cpu` run) already separates
 a `cpu` configuration from a `gpu` one, which keeps a `gpu` result's
 fingerprint identical to what pre-`execution_device` code computed for the
-same configuration — an old GPU bundle and a freshly repackaged, otherwise
+same configuration, an old GPU bundle and a freshly repackaged, otherwise
 identical GPU run still collide under the duplicate check below.
 
 - Same fingerprint and same raw-runner hash: accidental duplicate; rejected.
