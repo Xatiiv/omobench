@@ -1,8 +1,8 @@
 # Advanced panel: browser control
 
 `omobench ui` opens a local control panel around the existing OmoBench CLI.
-Its **default page is a guided benchmark** — see
-[Guided CPU setup](guided-launcher.md) — that downloads, verifies, runs, and
+Its **default page is a guided benchmark**, see
+[Guided CPU setup](guided-launcher.md), that downloads, verifies, runs, and
 helps submit one reviewed small CPU model for you, with nothing to type but a
 submitter identity. This page describes the **advanced panel**, at
 `/advanced` in the same running panel: connecting to a model server you
@@ -19,7 +19,7 @@ does not remotely execute programs on visitors' computers.
 On Windows, the [companion](windows-companion.md) can start this same panel
 for you from the website's **Open OmoBench** button: one graphical setup, then
 no terminal, no WSL activation, and no connection token to copy. It only opens
-the panel — everything below works exactly as it does when you run
+the panel, everything below works exactly as it does when you run
 `omobench ui` yourself.
 
 ## First-time setup
@@ -105,10 +105,10 @@ After a completed CPU or GPU run, **Review & submit** becomes available:
    Generic servers require a meaningful server description. Do not enter secrets.
    Leave **Model weights source** blank when the weights came from the model
    ID's own repository; set it only when they came from elsewhere (for example
-   a quantized re-export) — the panel prefills it automatically for a run
+   a quantized re-export), the panel prefills it automatically for a run
    started from a reviewed managed recipe.
 2. Use the optional hardware fields only if detection was incomplete. The GPU
-   memory field only applies to a GPU run and is hidden for a CPU run — no GPU
+   memory field only applies to a GPU run and is hidden for a CPU run, no GPU
    performed inference, so there is nothing to fill in. A GPU memory value can
    fill unknown VRAM for one detected vendor/model class; it cannot invent a
    GPU or replace already-detected VRAM. The CLI enforces these rules.

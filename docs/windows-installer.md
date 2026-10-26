@@ -1,23 +1,23 @@
 # Installing OmoBench on Windows
 
 This is the download-and-run path: you get an installer, open it, answer a
-couple of questions, and end up at the OmoBench benchmark panel — with no
+couple of questions, and end up at the OmoBench benchmark panel, with no
 repository to clone and no Python paths to find.
 
 Two prerequisites can still need a command from you, and the installer says so
 rather than pretending otherwise:
 
 - **WSL2 is not installed.** Installing it needs an administrator command and a
-  restart — see [below](#if-wsl-is-missing).
+  restart, see [below](#if-wsl-is-missing).
 - **Your Linux distribution is missing `python3` or `python3-venv`.** Installing
   those needs your Linux password, so the installer gives you the exact command
   instead of asking for it.
 
-Everything else — finding or fetching OmoBench, creating an isolated
-environment, installing the pinned runner, checking it works — it does itself.
+Everything else, finding or fetching OmoBench, creating an isolated
+environment, installing the pinned runner, checking it works, it does itself.
 
 If you already work in a checkout and prefer the terminal, nothing here
-replaces that — see [the setup guide](quickstart.md). The installer only
+replaces that, see [the setup guide](quickstart.md). The installer only
 automates *finding and preparing* an environment; the benchmark engine,
 profiles, CLI and submission flow are the same either way.
 
@@ -25,12 +25,12 @@ profiles, CLI and submission flow are the same either way.
 
 - 64-bit Windows 10 version 2004 (build 19041) or later, or Windows 11.
 - WSL2, with a Linux distribution. The installer checks for this and explains
-  how to get it if it is missing — see [below](#if-wsl-is-missing).
+  how to get it if it is missing, see [below](#if-wsl-is-missing).
 - An internet connection, if you do not already have OmoBench installed.
 
 The installer refuses early and explains why on a machine that cannot work:
 32-bit Windows, or a Windows build older than 2004, cannot run the benchmark
-runner at all. That is not something OmoBench can work around — the runner's
+runner at all. That is not something OmoBench can work around, the runner's
 dependencies include `uvloop`, which has no native Windows build, so the
 benchmark has to run inside WSL2.
 
@@ -57,7 +57,7 @@ version, source revision and signing status on its first screen.
 ### Building it yourself
 
 The installer is ordinary C# in this repository and needs no developer tools
-installed — it compiles with the C# compiler that ships inside Windows:
+installed, it compiles with the C# compiler that ships inside Windows:
 
 ```powershell
 # Windows PowerShell, from the checkout root
@@ -78,14 +78,14 @@ Nothing built is committed; the build directory is ignored by Git.
 
 1. Run `OmoBenchSetup.exe`. The first screen shows the version, the source
    revision it was built from, its signing status, and exactly what it will do.
-2. Press **Install**. This installs for your user account only — no
+2. Press **Install**. This installs for your user account only, no
    administrator prompt. It places the companion in
    `%LOCALAPPDATA%\Programs\OmoBench`, adds a Start menu entry and an entry in
    Apps & features, and registers `omobench://` links against the installed
    program.
 3. The installer then looks at your machine:
-   - **If you already have OmoBench** — an existing checkout and a Linux Python
-     environment with it installed — it finds them, checks them, and uses them.
+   - **If you already have OmoBench**, an existing checkout and a Linux Python
+     environment with it installed, it finds them, checks them, and uses them.
      Nothing is downloaded and nothing of yours is changed.
    - **If you do not**, it offers to prepare one. See
      [below](#when-it-prepares-an-environment-for-you).
@@ -102,15 +102,15 @@ check decides.
 If there is nothing to reuse, **Prepare it for me** will, inside your WSL2
 distribution:
 
-1. unpack the OmoBench source it carries — the exact revision the installer was
-   built from — into `%LOCALAPPDATA%\OmoBench\source\<revision>`;
+1. unpack the OmoBench source it carries, the exact revision the installer was
+   built from, into `%LOCALAPPDATA%\OmoBench\source\<revision>`;
 2. create a Python environment used only by OmoBench, at
    `~/.local/share/omobench/managed-env` inside Linux;
 3. install OmoBench and the pinned benchmark runner version into it;
 4. check the result before calling it finished.
 
 It shows each stage as it happens, reports the real error if one fails, and can
-be stopped at any point — stopping leaves the rest untouched.
+be stopped at any point, stopping leaves the rest untouched.
 
 **It does not touch anything you already have.** A checkout you work in, a
 virtual environment you maintain, your system Python: none of them are written
@@ -130,7 +130,7 @@ installer was built; a truncated or altered payload is refused rather than
 installed.
 
 The archive is an explicit list of what the CLI, guided panel, packaging and
-validation actually read — the `cli` package, benchmark profiles, the model
+validation actually read, the `cli` package, benchmark profiles, the model
 catalogue and download recipes, the result schema and the validator. Git
 history, the website, tests, caches, evidence and model files are not in it.
 
@@ -142,7 +142,7 @@ working internet connection.
 
 The repository is private, and the website's download is deliberately marked
 unavailable. Publishing the installer will need an **anonymously accessible
-location for the asset itself** — a public release, or another host a person
+location for the asset itself**, a public release, or another host a person
 can download from without an account. Nothing about the installer requires the
 *source* to be public any more, because it carries what it needs; the open
 question is only where the `.exe` is served from, and under what licence it is
@@ -154,8 +154,8 @@ before anything is distributed.
 Two cases need your Linux password, so the installer explains them instead of
 trying to do them for you:
 
-- **No `python3`** — `sudo apt update && sudo apt install -y python3 python3-venv`
-- **`python3 -m venv` fails** — on Ubuntu this usually means
+- **No `python3`**, `sudo apt update && sudo apt install -y python3 python3-venv`
+- **`python3 -m venv` fails**, on Ubuntu this usually means
   `sudo apt install -y python3-venv`
 
 Run either from inside your distribution, then press **Try again**.
@@ -164,14 +164,14 @@ Run either from inside your distribution, then press **Try again**.
 
 Installing WSL is a Windows operation that needs administrator rights and a
 restart, so it is done once, by you, outside this installer. The installer does
-not ask for elevation — nothing else it does needs it, and the install would
+not ask for elevation, nothing else it does needs it, and the install would
 not survive the reboot anyway.
 
 1. Open Terminal, Command Prompt or PowerShell **as administrator**.
 2. Run `wsl --install`.
 3. **Restart Windows** when asked. WSL is not usable until this finishes.
 4. After the restart, Ubuntu opens and asks you to create a Linux username and
-   password. These are new credentials for the Linux environment — not your
+   password. These are new credentials for the Linux environment, not your
    Windows account, and they can be different.
 5. Return to the installer and press **Check again**.
 
@@ -191,14 +191,14 @@ your WSL environment and opens it in your browser. See
 
 **Updating.** Run a newer `OmoBenchSetup.exe`. It updates the installed program
 in place and leaves your settings, benchmark evidence and model files alone. If
-the companion is open, the installer offers to close it first — its program file
+the companion is open, the installer offers to close it first, its program file
 cannot be replaced while it is running.
 
 **Uninstalling.** Apps & features → OmoBench → Uninstall, or run
 `OmoBenchUninstall.exe /uninstall` from the install folder.
 
 Uninstalling removes four things: the program folder, the Start menu entry, the
-Apps & features entry, and the `omobench://` registration — and only if that
+Apps & features entry, and the `omobench://` registration, and only if that
 registration still points at this installation.
 
 It deliberately keeps:
@@ -234,7 +234,7 @@ or to any location shared with other accounts.
 
 Every pull request that touches `windows/` builds the installer on a Windows
 runner, runs the companion's test harness against the production sources and
-the installer's own tests, and attaches the result as a build artifact — so a
+the installer's own tests, and attaches the result as a build artifact, so a
 reviewer can download and run exactly what the branch produces.
 
 Publishing a release is a separate, deliberate action: a tag or an explicit

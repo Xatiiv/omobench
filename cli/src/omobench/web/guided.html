@@ -10,21 +10,16 @@
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="/">Omo<span>Bench</span><span class="brand-mark">▥</span></a>
-    <span class="pill"><span class="dot"></span> Guided benchmark</span>
+    <a class="brand" href="/"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M25 9a12 12 0 1 0 2 11"/><path d="m7 18 5-5 5 6 8-12"/></svg>omo<span>bench</span></a>
+    <div class="topbar-actions"><a href="/advanced">Advanced panel ↗</a><span class="pill"><span class="dot"></span> Local workspace</span></div>
   </header>
   <div class="guided-layout">
     <main>
-      <div class="eyebrow">GUIDED BENCHMARK</div>
-      <h1>Benchmark a model, step by step.</h1>
-      <p class="intro">
-        This walks through a reviewed, verified CPU model end to end: download, run, understand the
-        result, and prepare a submission — without typing server addresses, model revisions, runtime
-        arguments, or shell commands. It runs the <strong>same, unchanged</strong> benchmark engine,
-        packager, and validator as the <a href="/advanced">advanced panel</a>.
-        Already have a model server of your own running? <a href="/advanced">Use the advanced panel</a>
-        to connect to it directly instead — every existing CLI command keeps working unchanged too.
-      </p>
+      <div class="workspace-heading"><div>
+        <div class="eyebrow">YOUR MODEL. YOUR MACHINE.</div>
+        <h1>Your benchmark, in focus.</h1>
+        <p class="intro">Choose a reviewed CPU test, watch your setup perform and explore the results.<br class="desktop-break"> Everything runs locally, using the same fixed profiles and CLI engine.</p>
+      </div><a class="workspace-link" href="/advanced">Connect your own server <span aria-hidden="true">↗</span></a></div>
       <nav class="stepper" id="stepper" aria-label="Guided steps">
         <button type="button" class="step-tab" data-screen="choose">1 · Choose your test</button>
         <button type="button" class="step-tab" data-screen="run">2 · Prepare and run</button>
@@ -82,25 +77,43 @@
             <span id="progress-bar-label" class="progress-bar-label">Starting…</span>
           </div>
 
+          <div class="performance-console">
+            <div class="throughput-score">
+              <p class="eyebrow">OUTPUT THROUGHPUT</p>
+              <div class="score-value" id="live-throughput">Pending</div>
+              <p class="score-unit">tokens / second</p>
+              <p class="score-note">Cumulative average across the run.<br>Final measured-window results follow.</p>
+              <div class="score-divider"></div>
+              <dl class="latency-pair"><div><dt>First token, mean</dt><dd id="live-ttft">Pending</dd></div><div><dt>Request time, mean</dt><dd id="live-request-latency">Pending</dd></div></dl>
+            </div>
+            <div class="chart-wrap">
+              <div class="section-head chart-head"><div><p class="eyebrow">PERFORMANCE OVER TIME</p><h3>Output throughput</h3></div><span class="chart-key"><i></i> tok/s</span></div>
+              <p class="hint" id="chart-label">Cumulative average since the first request · live estimate</p>
+              <div id="chart-empty" class="chart-empty"><span class="waiting-mark" aria-hidden="true">▥</span><strong>Waiting for the first measurement</strong><span>Your graph appears as the runner reports real samples.</span></div>
+              <svg id="chart-svg" viewBox="0 0 800 240" preserveAspectRatio="none" role="img" aria-label="Output tokens per second over elapsed time" hidden>
+                <defs><linearGradient id="throughput-gradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#f7bd55" stop-opacity=".25"/><stop offset="100%" stop-color="#f7bd55" stop-opacity="0"/></linearGradient></defs>
+                <path class="chart-grid" d="M52 24H780M52 112H780M52 200H780"/>
+                <text id="chart-y-max" x="42" y="28" text-anchor="end">0</text><text id="chart-y-mid" x="42" y="116" text-anchor="end">0</text><text x="42" y="204" text-anchor="end">0</text>
+                <text x="52" y="229">0m</text><text id="chart-x-end" x="780" y="229" text-anchor="end">0m</text>
+                <polygon id="chart-area" points="" fill="url(#throughput-gradient)"/>
+                <polyline id="chart-line" points=""/>
+                <line id="chart-cursor" x1="52" y1="24" x2="52" y2="200"/>
+                <circle id="chart-point" cx="52" cy="200" r="4"/>
+              </svg>
+              <div class="chart-inspector" id="chart-inspector" hidden><label for="chart-scrub">Inspect a sample</label><input id="chart-scrub" type="range" min="0" max="0" value="0" step="1" aria-label="Inspect throughput samples"><output id="chart-readout" for="chart-scrub"></output></div>
+            </div>
+          </div>
+          <dl class="dashboard-facts" id="dashboard-facts">
+            <div><dt>Elapsed</dt><dd id="fact-elapsed">Pending</dd></div>
+            <div><dt>Estimated remaining</dt><dd id="fact-eta">Estimating…</dd></div>
+            <div><dt>Requests completed</dt><dd id="fact-requests">Pending</dd></div>
+            <div><dt>Maximum duration</dt><dd id="fact-max-duration">Pending</dd></div>
+          </dl>
+          <div class="request-health"><span>All run phases</span><span>Successful <strong id="live-successful">Pending</strong></span><span>Errored <strong id="live-errors">Pending</strong></span><span>Cancelled <strong id="live-cancelled">Pending</strong></span></div>
+          <p id="eta-basis-note" class="hint">The run ends at its configured request or time limit, whichever comes first; it may finish earlier.</p>
+          <div class="stage-heading"><h3>Run stages</h3><span class="hint">From preparation to saved evidence</span></div>
           <ol class="stage-list" id="stage-list"></ol>
           <div id="download-progress"></div>
-
-          <dl class="dashboard-facts" id="dashboard-facts">
-            <div><dt>Elapsed</dt><dd id="fact-elapsed">—</dd></div>
-            <div><dt>Estimated time remaining</dt><dd id="fact-eta">—</dd></div>
-            <div><dt>Requests completed</dt><dd id="fact-requests">—</dd></div>
-            <div><dt>Maximum duration</dt><dd id="fact-max-duration">—</dd></div>
-          </dl>
-          <p id="eta-basis-note" class="hint">The run ends at its configured request or time limit, whichever comes first; it may finish earlier.</p>
-
-          <div class="chart-wrap">
-            <div class="section-head chart-head"><h3>Output tokens / second</h3>
-              <span class="hint" id="chart-label">Cumulative average since the first request · live estimate</span></div>
-            <div id="chart-empty" class="muted">Waiting for the first measurement…</div>
-            <svg id="chart-svg" viewBox="0 0 600 160" preserveAspectRatio="none" role="img" aria-label="Output tokens per second over elapsed time" hidden>
-              <polyline id="chart-line" points=""></polyline>
-            </svg>
-          </div>
 
           <p id="run-error" class="notice error" role="status" hidden></p>
           <div class="actions">
@@ -126,7 +139,7 @@
       <!-- Screen 3: Your results -->
       <section class="screen" id="screen-results" hidden>
         <section class="panel">
-          <div class="section-head"><div><span class="step">3</span><h2>Your results</h2></div></div>
+          <div class="section-head"><div><span class="step">3</span><h2>Your performance report</h2></div></div>
           <p id="results-status" class="notice"></p>
           <div id="results-metrics" class="grid metrics"></div>
           <div class="actions">
@@ -146,7 +159,7 @@
           <details id="technical-details-package" open>
             <summary>Technical details <span class="hint">Filled in automatically from the verified recipe</span></summary>
             <dl class="kv" id="package-facts"></dl>
-            <label class="check"><input id="edit-details-toggle" type="checkbox"><span>These look wrong — let me edit them</span></label>
+            <label class="check"><input id="edit-details-toggle" type="checkbox"><span>These look wrong, let me edit them</span></label>
             <div id="package-editable" hidden>
               <div class="grid two">
                 <label>Model weights source (URL)<input id="edit-model-source" type="url" spellcheck="false"></label>

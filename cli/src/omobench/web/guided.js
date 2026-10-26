@@ -146,7 +146,7 @@ async function loadRecipes() {
     const minutes = recipe.max_duration_seconds ? Math.round(recipe.max_duration_seconds / 60) : null;
     const badge = recipe.id === recommendedId ? '<span class="badge">Recommended for slower hardware</span>' : "";
     const duration = minutes
-      ? `Ends at its configured request or time limit — up to ${minutes} minutes — whichever comes first; it may finish earlier.`
+      ? `Ends at its configured request or time limit, up to ${minutes} minutes, whichever comes first; it may finish earlier.`
       : "Ends at its own configured request or time limit; it may finish earlier.";
     card.innerHTML = `${badge}<h3>${recipe.title}</h3>
       <p class="hint">Model ${recipe.model_id} (${recipe.quantization}) · ${recipe.execution_device.toUpperCase()} only</p>
@@ -264,7 +264,7 @@ function renderSummary(report) {
   const cachedKinds = report.files.filter((file) => file.already_cached).map((file) => file.kind);
   let downloadLine;
   if (cachedKinds.length === report.files.length) {
-    downloadLine = `${formatBytes(totalBytes)} total — every file already verified in this folder's cache; nothing left to download.`
+    downloadLine = `${formatBytes(totalBytes)} total, every file already verified in this folder's cache; nothing left to download.`
       + (alreadyInstalledValid ? "" : " This recipe still needs local preparation (extracting the runtime) before it can run.");
   } else if (cachedKinds.length > 0) {
     downloadLine = `${formatBytes(totalBytes)} total, ${formatBytes(bytesToDownload)} still to download `
@@ -281,12 +281,14 @@ function renderSummary(report) {
     ["Licences", report.files.map((file) => `${file.kind}: ${file.licence}`).join(" · ")],
     ["Measured requests target", recipe.measured_requests ? String(recipe.measured_requests) : "Set by the profile."],
     ["Maximum duration", minutes
-      ? `${minutes} minutes — the run ends at its configured request or time limit, whichever comes first; it may finish before the time limit.`
+      ? `${minutes} minutes, the run ends at its configured request or time limit, whichever comes first; it may finish before the time limit.`
       : "Bounded by the profile's own request or time limit."],
   ];
   entries.forEach(([label, value]) => {
     const dt = document.createElement("dt"), dd = document.createElement("dd");
-    dt.textContent = label; dd.textContent = value; facts.append(dt, dd);
+    const pair = document.createElement("div");
+    pair.className = "fact-pair";
+    dt.textContent = label; dd.textContent = value; pair.append(dt, dd); facts.append(pair);
   });
 
   $("platform-message").textContent = report.platform.message
@@ -309,7 +311,7 @@ function renderSummary(report) {
     spaceMessage.textContent = `Not enough free space: ${formatBytes(report.free_space_bytes)} free, ${formatBytes(report.required_bytes)} required.`;
     spaceMessage.classList.add("error");
   } else {
-    spaceMessage.textContent = `Free space: ${formatBytes(report.free_space_bytes)} (${formatBytes(report.required_bytes)} required) — enough space.`;
+    spaceMessage.textContent = `Free space: ${formatBytes(report.free_space_bytes)} (${formatBytes(report.required_bytes)} required), enough space.`;
   }
 
   $("review-files").replaceChildren();
@@ -363,6 +365,8 @@ async function doStart() {
   $("jump-to-latest-button").hidden = true;
   $("benchmark-log").textContent = "Waiting…";
   $("log-connection-status").textContent = "Panel connected · refreshes automatically";
+  inspectedSampleTime = null;
+  renderChart(null);
   $("chart-empty").textContent = "Waiting for the first measurement…";
   renderProgressBar(null);
   renderChart(null);
@@ -445,25 +449,87 @@ function renderProgressBar(percent, { complete = false } = {}) {
   }
 }
 
+// Display only finite, observed samples. The chart never creates measurements.
+let chartSamples = [];
+let chartScale = { maxX: 1, maxY: 1 };
+let inspectedSampleTime = null;
+
+function liveNumber(value, unit = "") {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value.toLocaleString(undefined, { maximumFractionDigits: 2 }) + unit : "Pending";
+}
+
+function inspectChartSample(index) {
+  const sample = chartSamples[index];
+  if (!sample) return;
+  const x = 52 + sample.elapsed_seconds / chartScale.maxX * 728;
+  const y = 200 - sample.output_tokens_per_second / chartScale.maxY * 176;
+  $("chart-cursor").setAttribute("x1", x.toFixed(1));
+  $("chart-cursor").setAttribute("x2", x.toFixed(1));
+  $("chart-point").setAttribute("cx", x.toFixed(1));
+  $("chart-point").setAttribute("cy", y.toFixed(1));
+  $("chart-readout").textContent = `${formatDuration(sample.elapsed_seconds)} · ${liveNumber(sample.output_tokens_per_second)} tok/s`;
+  $("chart-scrub").value = String(index);
+  $("chart-scrub").setAttribute("aria-valuetext", $("chart-readout").textContent);
+}
+
 function renderChart(telemetry) {
-  const history = (telemetry && telemetry.available && telemetry.chart_history) || [];
-  $("chart-empty").hidden = history.length > 0;
-  $("chart-svg").hidden = history.length === 0;
-  if (history.length === 0) {
+  const available = !!(telemetry && telemetry.available);
+  const rawHistory = available && Array.isArray(telemetry.chart_history) ? telemetry.chart_history : [];
+  chartSamples = rawHistory.filter(sample => sample
+    && Number.isFinite(sample.elapsed_seconds) && sample.elapsed_seconds >= 0
+    && Number.isFinite(sample.output_tokens_per_second) && sample.output_tokens_per_second >= 0)
+    .slice().sort((a, b) => a.elapsed_seconds - b.elapsed_seconds);
+  const metrics = available ? telemetry.latest_metrics || {} : {};
+  const requests = available ? telemetry.requests || {} : {};
+  const observedThroughput = typeof metrics.output_tokens_per_second === "number"
+    ? metrics.output_tokens_per_second : chartSamples[chartSamples.length - 1]?.output_tokens_per_second;
+  $("live-throughput").textContent = liveNumber(observedThroughput);
+  $("live-ttft").textContent = liveNumber(metrics.time_to_first_token_ms, " ms");
+  $("live-request-latency").textContent = liveNumber(metrics.request_latency_seconds, " s");
+  $("live-successful").textContent = liveNumber(requests.successful);
+  $("live-errors").textContent = liveNumber(requests.errored);
+  $("live-cancelled").textContent = liveNumber(requests.cancelled);
+  $("chart-empty").hidden = chartSamples.length > 0;
+  // SVG elements do not reflect the HTML hidden property. Toggle the attribute.
+  if (chartSamples.length === 0) $("chart-svg").setAttribute("hidden", "");
+  else $("chart-svg").removeAttribute("hidden");
+  $("chart-inspector").hidden = chartSamples.length === 0;
+  if (chartSamples.length === 0) {
     $("chart-line").setAttribute("points", "");
+    $("chart-area").setAttribute("points", "");
+    $("chart-readout").textContent = "";
+    inspectedSampleTime = null;
     return;
   }
-  const maxX = Math.max(1, history[history.length - 1].elapsed_seconds);
-  const maxY = Math.max(1, ...history.map((sample) => sample.output_tokens_per_second));
-  const points = history
-    .map((sample) => {
-      const x = (sample.elapsed_seconds / maxX) * 600;
-      const y = 155 - (sample.output_tokens_per_second / maxY) * 145;
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(" ");
+  const maxX = Math.max(1, chartSamples[chartSamples.length - 1].elapsed_seconds);
+  const maxY = Math.max(1, ...chartSamples.map(sample => sample.output_tokens_per_second)) * 1.15;
+  chartScale = { maxX, maxY };
+  const coordinates = chartSamples.map(sample => [
+    52 + sample.elapsed_seconds / maxX * 728,
+    200 - sample.output_tokens_per_second / maxY * 176,
+  ]);
+  const points = coordinates.map(([x,y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
   $("chart-line").setAttribute("points", points);
+  $("chart-area").setAttribute("points", `${coordinates[0][0].toFixed(1)},200 ${points} ${coordinates[coordinates.length - 1][0].toFixed(1)},200`);
+  $("chart-y-max").textContent = liveNumber(maxY);
+  $("chart-y-mid").textContent = liveNumber(maxY / 2);
+  $("chart-x-end").textContent = formatDuration(maxX);
+  $("chart-svg").setAttribute("aria-label", `Output throughput, ${chartSamples.length} observed samples across ${formatDuration(maxX)}. Cumulative average in tokens per second.`);
+  $("chart-scrub").max = String(chartSamples.length - 1);
+  let selected = chartSamples.length - 1;
+  if (inspectedSampleTime !== null) {
+    selected = chartSamples.reduce((best, sample, index) =>
+      Math.abs(sample.elapsed_seconds - inspectedSampleTime) < Math.abs(chartSamples[best].elapsed_seconds - inspectedSampleTime) ? index : best, 0);
+  }
+  inspectChartSample(selected);
 }
+
+$("chart-scrub").addEventListener("input", () => {
+  const index = Number($("chart-scrub").value);
+  inspectedSampleTime = chartSamples[index]?.elapsed_seconds ?? null;
+  inspectChartSample(index);
+});
 
 function renderConnectionStatus(runJob, telemetry) {
   const el = $("log-connection-status");
@@ -496,7 +562,7 @@ function renderTechnicalTelemetry(telemetry) {
     ["Remaining fraction", telemetry.remaining_fraction != null ? telemetry.remaining_fraction.toFixed(3) : "unknown"],
     ["Remaining seconds (time limit)", telemetry.remaining_seconds_duration_limit != null ? Math.round(telemetry.remaining_seconds_duration_limit) : "unknown"],
     ["Time budget", telemetry.duration_budget_exhausted === true
-      ? "Spent — the runner cannot interrupt an in-flight request, so it finishes the current one before stopping"
+      ? "Spent, the runner cannot interrupt an in-flight request, so it finishes the current one before stopping"
       : "Within budget"],
     ["Last update", new Date(telemetry.updated_at * 1000).toLocaleTimeString()],
   ];
@@ -523,7 +589,7 @@ function renderProgress(setupJob, runJob, benchJob, telemetry) {
     ? telemetry.elapsed_seconds
     : (flowStartedAt ? (Date.now() - flowStartedAt) / 1000 : null);
   $("elapsed").textContent = formatElapsed(flowStartedAt);
-  $("fact-elapsed").textContent = elapsedSeconds != null ? formatDuration(elapsedSeconds) : "—";
+  $("fact-elapsed").textContent = elapsedSeconds != null ? formatDuration(elapsedSeconds) : "N/A";
 
   // The run's own time budget is spent, but the runner is still working:
   // GuideLLM cannot interrupt an in-flight request, so it finishes the
@@ -536,9 +602,9 @@ function renderProgress(setupJob, runJob, benchJob, telemetry) {
   } else if (overrunning) {
     // Never "0s remaining": a countdown frozen at zero while work continues
     // reads as a stuck run, not as an honest "we are past the budget".
-    $("fact-eta").textContent = "Time limit reached — finishing current request";
+    $("fact-eta").textContent = "Time limit reached, finishing current request";
   } else if (!telemetryOk) {
-    $("fact-eta").textContent = "—";
+    $("fact-eta").textContent = "N/A";
   } else if (telemetry.eta_seconds === null || telemetry.eta_seconds === undefined) {
     $("fact-eta").textContent = "Estimating…";
   } else {
@@ -552,14 +618,14 @@ function renderProgress(setupJob, runJob, benchJob, telemetry) {
     $("fact-requests").textContent = `${r.processed ?? 0} / ${total} total requests`
       + (target ? ` (target: ${target} measured)` : "");
   } else {
-    $("fact-requests").textContent = "—";
+    $("fact-requests").textContent = "N/A";
   }
   // The ceiling bounds the benchmark's own execution, not model startup or
   // cleanup -- which is why elapsed flow time can exceed it without the
   // benchmark having overrun anything.
   $("fact-max-duration").textContent = recipe && recipe.max_duration_seconds
     ? `${Math.round(recipe.max_duration_seconds / 60)} min ceiling (benchmark execution only)`
-    : "—";
+    : "N/A";
 
   const percent = telemetryOk && telemetry.remaining_fraction != null ? (1 - telemetry.remaining_fraction) * 100 : null;
   // Never record 100 for "saving": evidence finalization can still fail, and
@@ -623,7 +689,7 @@ function renderProgressBarSaving() {
   const fill = $("progress-bar-fill"), label = $("progress-bar-label"), wrap = $("progress-bar-wrap");
   fill.classList.remove("indeterminate");
   fill.style.width = "99%";
-  label.textContent = "Benchmark finished — writing and verifying the evidence files";
+  label.textContent = "Benchmark finished, writing and verifying the evidence files";
   wrap.setAttribute("aria-valuenow", "99");
 }
 
@@ -634,7 +700,7 @@ function renderProgressBarOverrunning() {
   const fill = $("progress-bar-fill"), label = $("progress-bar-label"), wrap = $("progress-bar-wrap");
   fill.classList.remove("indeterminate");
   fill.style.width = "99%";
-  label.textContent = "Time limit reached — the runner is finishing its current request and stopping";
+  label.textContent = "Time limit reached, the runner is finishing its current request and stopping";
   wrap.setAttribute("aria-valuenow", "99");
 }
 
@@ -654,7 +720,7 @@ function renderProgressBarFrozen() {
     wrap.setAttribute("aria-valuenow", "0");
   } else {
     const value = wrap.getAttribute("aria-valuenow") || "0";
-    label.textContent = `${value}% — stopped here`;
+    label.textContent = `${value}%, stopped here`;
   }
 }
 
@@ -718,7 +784,7 @@ function finishFlow(success, errorMessage, runJob) {
   renderProgressBarFrozen();
   // "Estimating…"/"Xm Ys remaining" implied more progress was still coming;
   // once terminal, a remaining-time estimate is stale, not a real fact.
-  $("fact-eta").textContent = neverStarted ? "—" : cancelled ? "Cancelled" : "Stopped — did not finish";
+  $("fact-eta").textContent = neverStarted ? "N/A" : cancelled ? "Cancelled" : "Stopped, did not finish";
 
   if ($("chart-empty").hidden === false) {
     $("chart-empty").textContent = neverStarted
@@ -802,7 +868,7 @@ function interruptedByRestart() {
   activeJobId = null;
   notice(
     "The local panel appears to have restarted since this run began. If a benchmark was in progress, it was "
-    + "interrupted — it did not silently resume. Check .omobench-runs for any partial evidence, then start again.",
+    + "interrupted, it did not silently resume. Check .omobench-runs for any partial evidence, then start again.",
     true,
   );
   showScreen("choose");
@@ -843,7 +909,7 @@ function pollFlow() {
       timers.push(setTimeout(tick, 1200));
     } catch (error) {
       if (isUnknownJobError(error)) { interruptedByRestart(); return; }
-      $("log-connection-status").textContent = "Panel connection lost — retrying…";
+      $("log-connection-status").textContent = "Panel connection lost, retrying…";
       notice(error.message, true);
       timers.push(setTimeout(tick, 2500));
     }
@@ -880,7 +946,7 @@ function metricWithNote(label, value, unit, note) {
 function showResults(summary) {
   const r = summary.results;
   $("results-status").textContent = "Execution completed. These are real CPU measurements from the managed server, "
-    + "staged as a normal local evidence directory — nothing has been uploaded.";
+    + "staged as a normal local evidence directory, nothing has been uploaded.";
   $("results-metrics").replaceChildren(
     metricWithNote("Time to first token · p50", r.latency_ms.ttft.p50, "ms", "Median time until the first streamed token; lower is better."),
     metricWithNote("Time to first token · p95", r.latency_ms.ttft.p95, "ms", "95th-percentile time until the first streamed token; lower is better."),

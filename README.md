@@ -16,8 +16,7 @@ first-class, publishable OmoBench results, provided the model is in the
 ## Start here
 
 - **Install or update OmoBench:** [Setup guide](docs/quickstart.md).
-- **First time? Just run `omobench ui`:** it opens a guided benchmark by default —
-  download and verify one reviewed CPU model, run it, understand the result, and
+- **First time? Just run `omobench ui`:** it opens a guided benchmark by default, download and verify one reviewed CPU model, run it, understand the result, and
   prepare a submission, with no server address, model revision, runtime argument,
   or shell command to type. See [Guided CPU setup](docs/guided-launcher.md).
 - **Already run your own model server?** Open `/advanced` in the same panel, or
@@ -25,7 +24,7 @@ first-class, publishable OmoBench results, provided the model is in the
   [CPU demo walkthrough](docs/local-demo.md) for that workflow.
 - **On Windows, prefer not to use a terminal?** The
   [Windows installer](docs/windows-installer.md) installs OmoBench, finds or
-  prepares a benchmark environment, and opens the panel — no repository to
+  prepares a benchmark environment, and opens the panel, no repository to
   clone and no Python paths to find. Installing WSL2, or a missing
   `python3-venv`, still needs one command from you; the installer detects those
   and tells you which. Afterwards the panel opens from
@@ -51,7 +50,7 @@ site does not start programs on your computer.
 
 ## Run through the browser
 
-`omobench ui` opens a **guided benchmark by default** — see
+`omobench ui` opens a **guided benchmark by default**, see
 [Guided CPU setup](docs/guided-launcher.md) for that walkthrough. The steps
 below describe the **advanced panel** at `/advanced`: connecting to a model
 server you already run yourself. Both panels run the same CLI, profiles, and
@@ -96,7 +95,7 @@ On Windows, the [companion](docs/windows-companion.md) performs this step's
 *selection* for you once the environment exists: it finds the checkout and the
 Linux interpreter that already has OmoBench installed, checks the pair, and
 opens the panel without a terminal. It does not create the environment or
-install anything — the commands above still do that.
+install anything, the commands above still do that.
 
 ### 2. Start the model server
 
@@ -156,8 +155,8 @@ incorrect identifiers, streaming errors, and interrupted runs.
 - Quality/accuracy evaluation, model installation, cloud hardware provisioning,
   and native Windows benchmark execution are outside the current workflow.
 - A guided, reviewed CPU setup path (`omobench prepare`/`launch`, and the
-  panel's default page) can download, verify, run, and — unlike a plain smoke
-  test — package and prepare a submission for one pinned model + runtime
+  panel's default page) can download, verify, run, and, unlike a plain smoke
+  test, package and prepare a submission for one pinned model + runtime
   recipe, without leaving the guided page. It is a development milestone, not
   a general installer; see [Guided CPU setup](docs/guided-launcher.md).
 
@@ -259,7 +258,7 @@ than substituting `next build`.
 | [docs/model-server.md](docs/model-server.md) | Starting a server, model identifiers, CPU/GPU settings |
 | [docs/browser-control.md](docs/browser-control.md) | Panel controls, recovery, packaging, and submission |
 | [docs/local-demo.md](docs/local-demo.md) | CPU demonstration and website-only demo |
-| [docs/guided-launcher.md](docs/guided-launcher.md) | Reviewed, managed CPU setup, run, and submission review — the panel's default page |
+| [docs/guided-launcher.md](docs/guided-launcher.md) | Reviewed, managed CPU setup, run, and submission review, the panel's default page |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Common setup and runtime failures |
 | [docs/submission-bundle.md](docs/submission-bundle.md) | Evidence requirements and manual PR workflow |
 | [docs/local-results.md](docs/local-results.md) | Preview a packaged GPU result on the website |

@@ -11,7 +11,8 @@ const source = readFileSync(guidedPath, "utf8");
 
 function makeElement(id) {
   const classes = new Set();
-  const attributes = {};
+  const attributes = id === "chart-svg" ? { hidden: "" } : {};
+  const listeners = {};
   return {
     id,
     textContent: "",
@@ -32,7 +33,8 @@ function makeElement(id) {
     setAttribute: (name, v) => { attributes[name] = String(v); },
     getAttribute: (name) => (name in attributes ? attributes[name] : null),
     removeAttribute: (name) => { delete attributes[name]; },
-    addEventListener: () => {},
+    addEventListener: (name, handler) => { listeners[name] = handler; },
+    trigger: (name) => listeners[name]?.(),
     append: () => {},
     replaceChildren: () => {},
     scrollIntoView: () => {},
@@ -138,4 +140,48 @@ results.completed = barState();
 context.renderProgressBar(99.999);
 results.primitiveNearComplete = barState();
 
+// Observed telemetry display: zero is a real observation, missing is not.
+function chartState() {
+  const get = (id) => document.getElementById(id);
+  return {
+    throughput: get("live-throughput").textContent,
+    ttft: get("live-ttft").textContent,
+    requestTime: get("live-request-latency").textContent,
+    successful: get("live-successful").textContent,
+    hidden: get("chart-svg").getAttribute("hidden") !== null,
+    inspectorHidden: get("chart-inspector").hidden,
+    points: get("chart-line").getAttribute("points"),
+    area: get("chart-area").getAttribute("points"),
+    readout: get("chart-readout").textContent,
+    accessibleReadout: get("chart-scrub").getAttribute("aria-valuetext"),
+  };
+}
+context.renderChart(null);
+results.missingMetrics = chartState();
+const observed = {
+  available: true,
+  latest_metrics: { output_tokens_per_second: 7.25, time_to_first_token_ms: 0, request_latency_seconds: 12.5 },
+  requests: { successful: 0, errored: 0, cancelled: 0 },
+  chart_history: [
+    { elapsed_seconds: 20, output_tokens_per_second: 8 },
+    { elapsed_seconds: 10, output_tokens_per_second: 5 },
+    { elapsed_seconds: 30, output_tokens_per_second: NaN },
+    { elapsed_seconds: -5, output_tokens_per_second: 4 },
+    { elapsed_seconds: 40, output_tokens_per_second: -2 },
+    null,
+  ],
+};
+const historyBefore = JSON.stringify(observed.chart_history);
+context.renderChart(observed);
+results.observedMetrics = chartState();
+results.historyPreserved = JSON.stringify(observed.chart_history) === historyBefore;
+document.getElementById("chart-scrub").value = "0";
+document.getElementById("chart-scrub").trigger("input");
+results.inspectedSample = chartState();
+context.renderChart({ ...observed, chart_history: [...observed.chart_history, { elapsed_seconds: 25, output_tokens_per_second: 9 }] });
+results.retainedSelection = chartState();
+context.renderChart({ available: true, latest_metrics: { output_tokens_per_second: 0 }, chart_history: [{ elapsed_seconds: 0, output_tokens_per_second: 0 }] });
+results.zeroMetrics = chartState();
+context.renderChart({ ...observed, available: false });
+results.unavailableMetrics = chartState();
 process.stdout.write(JSON.stringify(results));
