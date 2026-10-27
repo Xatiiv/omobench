@@ -269,3 +269,11 @@ than substituting `next build`.
 | [docs/submission-bundle.md](docs/submission-bundle.md) | Evidence requirements and manual PR workflow |
 | [docs/local-results.md](docs/local-results.md) | Preview a packaged GPU result on the website |
 | [AGENTS.md](AGENTS.md) | Shared contributor and coding-agent context |
+
+## Licence
+
+OmoBench is licensed under the [Apache License 2.0](LICENSE), with attribution
+in [NOTICE](NOTICE). See [third-party notices](THIRD_PARTY_NOTICES.md) for
+material that retains separate terms. The Windows installer carries these
+files, installs them beside the companion, and includes them in the embedded
+runtime source. The Python package also includes a copy of the licence.

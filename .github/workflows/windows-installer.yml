@@ -16,11 +16,21 @@ name: Windows installer
 on:
   pull_request:
     paths:
+      - "LICENSE"
+      - "NOTICE"
+      - "THIRD_PARTY_NOTICES.md"
+      - "cli/LICENSE"
+      - "cli/NOTICE"
       - "windows/**"
       - ".github/workflows/windows-installer.yml"
   push:
     branches: [main]
     paths:
+      - "LICENSE"
+      - "NOTICE"
+      - "THIRD_PARTY_NOTICES.md"
+      - "cli/LICENSE"
+      - "cli/NOTICE"
       - "windows/**"
       - ".github/workflows/windows-installer.yml"
     tags:
@@ -93,6 +103,9 @@ jobs:
           }
           if (-not $metadata.source_clean) {
             throw "The build reported an unclean source tree; refusing to publish or share it."
+          }
+          if ($metadata.license -ne 'Apache-2.0') {
+            throw "The installer must identify the Apache-2.0 licence."
           }
           $actual = (Get-FileHash ./windows/installer/build/OmoBenchSetup.exe -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($actual -ne $metadata.installer_sha256) {
@@ -183,6 +196,9 @@ jobs:
           if ($metadata.revision -ne "${{ steps.tag.outputs.commit }}") {
             throw "The built artifact is revision $($metadata.revision), but tag ${{ steps.tag.outputs.tag }} points at ${{ steps.tag.outputs.commit }}."
           }
+          if (-not $metadata.source_clean -or $metadata.license -ne 'Apache-2.0') {
+            throw "The artifact must be a clean Apache-2.0 release build."
+          }
           if ("v$($metadata.version)" -ne "${{ steps.tag.outputs.tag }}".Replace("windows-", "")) {
             throw "Tag ${{ steps.tag.outputs.tag }} does not match the built version $($metadata.version)."
           }
@@ -218,6 +234,9 @@ jobs:
             release/SHA256SUMS
           body: |
             OmoBench for Windows ${{ needs.build.outputs.version }}
+
+            Licensed under Apache License 2.0. The installed program and embedded
+            runtime include the licence and third-party notices.
 
             Source revision: `${{ needs.build.outputs.revision }}`
             SHA-256 of `OmoBenchSetup.exe`: `${{ needs.build.outputs.sha256 }}`

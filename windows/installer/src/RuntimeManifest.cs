@@ -35,6 +35,11 @@ namespace OmoBench.Installer
         // required-begin
         private static readonly string[] Required =
         {
+            "LICENSE",
+            "NOTICE",
+            "THIRD_PARTY_NOTICES.md",
+            "cli/LICENSE",
+            "cli/NOTICE",
             "cli/pyproject.toml",
             "cli/src/omobench/__init__.py",
             "cli/src/omobench/cli.py",

@@ -138,16 +138,19 @@ history, the website, tests, caches, evidence and model files are not in it.
 benchmark runner, are installed from PyPI, so preparing an environment needs a
 working internet connection.
 
-### Before this can be distributed publicly
+### Licence and public downloads
 
-The repository is private, and the website's download is deliberately marked
-unavailable. Publishing the installer will need an **anonymously accessible
-location for the asset itself**, a public release, or another host a person
-can download from without an account. Nothing about the installer requires the
-*source* to be public any more, because it carries what it needs; the open
-question is only where the `.exe` is served from, and under what licence it is
-offered. The repository currently has no licence file, which will need settling
-before anything is distributed.
+OmoBench is licensed under [Apache License 2.0](../LICENSE). The installer
+embeds `LICENSE`, `NOTICE` and `THIRD_PARTY_NOTICES.md`, installs them beside the
+Windows companion, and includes them in the verified runtime source archive.
+The Python package includes its own identical copy of `LICENSE`. Third-party
+packages, downloaded runtimes and model weights retain their separate terms.
+
+Public installers are distributed through the repository's
+[GitHub Releases](https://github.com/Xatiiv/omobench/releases). The website only
+enables its download button once the release asset is publicly available and
+its source revision and checksum have been verified. `version.json` records
+`license: "Apache-2.0"` alongside the build identity.
 
 ### If something is missing inside Linux
 

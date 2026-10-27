@@ -97,6 +97,8 @@ namespace OmoBench.Installer
             _subheading.Text = "Installs for your user account only. No administrator rights are needed.";
             _detail.Text =
                 _build.Describe() + "\r\n\r\n"
+                + "OmoBench is open source under Apache License 2.0. The licence and third-party "
+                + "notices are included in the installed program folder.\r\n\r\n"
                 + "This will:\r\n"
                 + "  - install the OmoBench companion into\r\n      " + InstallPaths.ProgramDirectory + "\r\n"
                 + "  - add a Start menu entry and an entry in Apps & features\r\n"
