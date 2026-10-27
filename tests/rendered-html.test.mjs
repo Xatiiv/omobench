@@ -24,12 +24,17 @@ test("renders OmoBench with a route to the benchmark and labelled demo data", as
   assert.match(html, /Benchmark registry/i);
 });
 
-test("offers the local launcher without inventing a public installer download", async () => {
+test("offers the verified public Windows installer alongside the local launcher", async () => {
   const html = await render("/run");
   assert.match(html, /href="omobench:\/\/open"/);
-  assert.match(html, /Public download coming soon/);
+  assert.match(html, /Download for Windows/);
+  assert.match(html, /href="https:\/\/github\.com\/Xatiiv\/omobench\/releases\/download\/windows-v0\.1\.0\/OmoBenchSetup\.exe"/);
+  assert.match(html, /afa11a567165b3aec76ac44b4385b5d05b6b8e0d5d2974f3ce8c4cbf0222ca27/);
+  assert.match(html, /13a3842478e4/);
+  assert.match(html, /This build is unsigned/);
+  assert.match(html, /manual Linux installation step/);
+  assert.doesNotMatch(html, /Public download coming soon/);
   assert.match(html, /WSL2/);
-  assert.doesNotMatch(html, /href="[^"]*OmoBenchSetup\.exe"/);
 });
 
 test("comparison starts with registry data and a private import path, never fictional measurements", async () => {
