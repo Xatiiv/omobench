@@ -248,17 +248,27 @@ $references = @(
 
 # Every executable that can install the program carries the legal files,
 # including the test harness and optional wizard fixture.
+# Read them back from the verified runtime archive. The checkout may use CRLF
+# even when the committed files use LF, so embedding the working-tree copies
+# would give Windows and Python different bytes for the same notices.
+$legalDirectory = Join-Path $OutputDirectory 'legal-source'
+New-Item -ItemType Directory -Force -Path $legalDirectory | Out-Null
+& tar -xzf $runtimeArchive -C $legalDirectory `
+    'omobench/LICENSE' 'omobench/NOTICE' 'omobench/THIRD_PARTY_NOTICES.md' `
+    'omobench/cli/LICENSE' 'omobench/cli/NOTICE'
+if ($LASTEXITCODE -ne 0) { throw 'Could not extract the legal files from the verified runtime archive.' }
+$legalRoot = Join-Path $legalDirectory 'omobench'
 $legalResources = @('LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md') | ForEach-Object {
-    $legalPath = Join-Path $repository $_
+    $legalPath = Join-Path $legalRoot $_
     if (-not (Test-Path -LiteralPath $legalPath)) { throw "Missing legal file $legalPath." }
     "/resource:$legalPath,OmoBench.Legal.$_"
 }
-if ((Get-FileHash (Join-Path $repository 'LICENSE')).Hash -ne
-    (Get-FileHash (Join-Path $repository 'cli/LICENSE')).Hash) {
+if ((Get-FileHash (Join-Path $legalRoot 'LICENSE')).Hash -ne
+    (Get-FileHash (Join-Path $legalRoot 'cli/LICENSE')).Hash) {
     throw 'The Python package licence must match the repository licence.'
 }
-if ((Get-FileHash (Join-Path $repository 'NOTICE')).Hash -ne
-    (Get-FileHash (Join-Path $repository 'cli/NOTICE')).Hash) {
+if ((Get-FileHash (Join-Path $legalRoot 'NOTICE')).Hash -ne
+    (Get-FileHash (Join-Path $legalRoot 'cli/NOTICE')).Hash) {
     throw 'The Python package notice must match the repository notice.'
 }
 
