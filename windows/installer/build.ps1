@@ -170,6 +170,11 @@ if (-not (Test-Path $companionExe)) { throw "The companion build produced no exe
 # Deliberately absent: git history, the website, build output, the installer
 # itself, tests, caches, evidence bundles, model files and local configuration.
 $runtimeAllowList = @(
+    'LICENSE',
+    'NOTICE',
+    'THIRD_PARTY_NOTICES.md',
+    'cli/LICENSE',
+    'cli/NOTICE',
     'cli/pyproject.toml',
     'cli/src',
     'benchmarks/profiles',
@@ -241,6 +246,22 @@ $references = @(
     '/reference:System.Web.Extensions.dll'
 )
 
+# Every executable that can install the program carries the legal files,
+# including the test harness and optional wizard fixture.
+$legalResources = @('LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md') | ForEach-Object {
+    $legalPath = Join-Path $repository $_
+    if (-not (Test-Path -LiteralPath $legalPath)) { throw "Missing legal file $legalPath." }
+    "/resource:$legalPath,OmoBench.Legal.$_"
+}
+if ((Get-FileHash (Join-Path $repository 'LICENSE')).Hash -ne
+    (Get-FileHash (Join-Path $repository 'cli/LICENSE')).Hash) {
+    throw 'The Python package licence must match the repository licence.'
+}
+if ((Get-FileHash (Join-Path $repository 'NOTICE')).Hash -ne
+    (Get-FileHash (Join-Path $repository 'cli/NOTICE')).Hash) {
+    throw 'The Python package notice must match the repository notice.'
+}
+
 $setupExe = Join-Path $OutputDirectory 'OmoBenchSetup.exe'
 Write-Host "Compiling the installer -> $setupExe"
 $arguments = @(
@@ -254,7 +275,7 @@ $arguments = @(
     "/resource:$companionExe,OmoBenchCompanion.exe",
     "/resource:$runtimeArchive,OmoBenchRuntimeSource.tar.gz",
     "/out:$setupExe"
-) + $references + $stampPath +
+) + $references + $legalResources + $stampPath +
     ($installerSources | ForEach-Object { $_.FullName }) +
     ($companionSources | ForEach-Object { $_.FullName })
 
@@ -270,6 +291,7 @@ $companionChecksum = (Get-FileHash -Path $companionExe -Algorithm SHA256).Hash.T
 
 $metadata = [ordered]@{
     product            = 'OmoBench for Windows'
+    license            = 'Apache-2.0'
     version            = $Version
     revision           = $Revision
     built_at           = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
@@ -322,7 +344,7 @@ if ($WizardFixture) {
         '/warnaserror+',
         '/main:OmoBench.Installer.Fixtures.WizardFixtureProgram',
         "/out:$fixtureExe"
-    ) + $references + $stampPath +
+    ) + $references + $legalResources + $stampPath +
         ($installerSources | ForEach-Object { $_.FullName }) +
         ($companionSources | ForEach-Object { $_.FullName }) +
         ($fixtureSources | ForEach-Object { $_.FullName })
@@ -360,7 +382,7 @@ if ($Test) {
         "/resource:$companionExe,OmoBenchCompanion.exe",
         "/resource:$runtimeArchive,OmoBenchRuntimeSource.tar.gz",
         "/out:$testExe"
-    ) + $references + $stampPath +
+    ) + $references + $legalResources + $stampPath +
         ($installerSources | ForEach-Object { $_.FullName }) +
         ($companionSources | ForEach-Object { $_.FullName }) +
         ($testSources | ForEach-Object { $_.FullName })

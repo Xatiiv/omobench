@@ -1588,6 +1588,21 @@ namespace OmoBench.Installer.Tests
                         File.Exists(Path.Combine(realUnpacked, @"tools\validate_results.py")));
                     Check("and the panel's web assets",
                         File.Exists(Path.Combine(realUnpacked, @"cli\src\omobench\web\index.html")));
+                    foreach (KeyValuePair<string, byte[]> legal in LicenseFiles.ReadAll())
+                    {
+                        Check("runtime and Windows installation carry identical " + legal.Key,
+                            RuntimePayload.Sha256(File.ReadAllBytes(Path.Combine(realUnpacked, legal.Key)))
+                                == RuntimePayload.Sha256(legal.Value));
+                    }
+                    Check("the Python package carries the same Apache licence",
+                        RuntimePayload.Sha256(File.ReadAllBytes(Path.Combine(realUnpacked, @"cli\LICENSE")))
+                            == RuntimePayload.Sha256(File.ReadAllBytes(Path.Combine(realUnpacked, "LICENSE"))));
+                    File.Delete(Path.Combine(realUnpacked, "LICENSE"));
+                    string missingLicence;
+                    Check("a runtime without its licence is refused before preparation",
+                        !RuntimeManifest.Validate(realUnpacked, out missingLicence)
+                            && missingLicence.Contains("LICENSE"));
+                    File.WriteAllBytes(Path.Combine(realUnpacked, "LICENSE"), LicenseFiles.ReadAll()["LICENSE"]);
 
                     // Tampering with an unpacked file is caught by the manifest.
                     File.AppendAllText(
@@ -1737,6 +1752,16 @@ namespace OmoBench.Installer.Tests
                 InstallOutcome installed = Installation.Install(
                     System.Text.Encoding.UTF8.GetBytes("not really a program"), stand, build);
                 Check("a sandboxed install succeeds", installed.Ok);
+                foreach (KeyValuePair<string, byte[]> legal in LicenseFiles.ReadAll())
+                {
+                    Check("the installed " + legal.Key + " matches the embedded file",
+                        File.Exists(Path.Combine(InstallPaths.ProgramDirectory, legal.Key))
+                            && RuntimePayload.Sha256(File.ReadAllBytes(Path.Combine(InstallPaths.ProgramDirectory, legal.Key)))
+                                == RuntimePayload.Sha256(legal.Value));
+                }
+                Check("the installed licence is Apache 2.0",
+                    File.ReadAllText(Path.Combine(InstallPaths.ProgramDirectory, "LICENSE"))
+                        .Contains("Version 2.0, January 2004"));
                 Check("  it wrote an Apps & features entry", UninstallEntryExists());
                 Check("  it placed an uninstaller", File.Exists(InstallPaths.UninstallerPath));
                 Check("  and registered omobench:// at the test-owned location",

@@ -397,6 +397,7 @@ namespace OmoBench.Installer
                     return outcome;
                 }
 
+                Dictionary<string, byte[]> legalFiles = LicenseFiles.ReadAll();
                 Directory.CreateDirectory(InstallPaths.ProgramDirectory);
                 outcome.Step(previous == null
                     ? "Created " + InstallPaths.ProgramDirectory
@@ -405,6 +406,12 @@ namespace OmoBench.Installer
 
                 File.WriteAllBytes(InstallPaths.CompanionPath, companion);
                 outcome.Step("Installed " + InstallPaths.CompanionFileName);
+
+                foreach (KeyValuePair<string, byte[]> legal in legalFiles)
+                {
+                    File.WriteAllBytes(Path.Combine(InstallPaths.ProgramDirectory, legal.Key), legal.Value);
+                }
+                outcome.Step("Installed the Apache 2.0 licence and third-party notices");
 
                 if (!string.IsNullOrEmpty(installerSelfPath) && File.Exists(installerSelfPath))
                 {

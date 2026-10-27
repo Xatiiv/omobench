@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "CLI scaffolding for reproducible OmoBench submissions"
 requires-python = ">=3.10"
 authors = [{ name = "OmoBench" }]
+license = { file = "LICENSE" }
 dependencies = ["PyYAML>=6.0"]
 
 [project.optional-dependencies]
@@ -19,6 +20,9 @@ omobench = "omobench.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools]
+license-files = ["LICENSE", "NOTICE"]
 
 [tool.setuptools.package-data]
 omobench = ["web/*.html", "web/*.css", "web/*.js"]
