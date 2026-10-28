@@ -71,15 +71,20 @@ Repackaging is blocked once community submission begins; the same evidence can
 still be downloaded. Return to the original account and route for retries.
 Local files and benchmark evidence are never deleted on upload failure.
 
-## Maintainer setup before enabling sign-in
+## Registered application and release verification
 
-This change does not itself register or authorize a GitHub application.
-`github_auth.OAUTH_CLIENT_ID` is empty until an OmoBench OAuth app is registered.
-The UI reports that state and keeps manual bundle download available.
+The Xatiiv-owned **OmoBench Community** OAuth app was registered on 28 October
+2026 with device flow enabled and expiring access tokens selected. Its public
+client ID, `Ov23li62UyK8EY7Ci9um`, is configured in `github_auth.OAUTH_CLIENT_ID`.
+No client secret was generated. Registration does not authorize any user account
+or upload evidence. The GitHub-required callback is
+`http://127.0.0.1/oauth/callback`, with wildcard matching disabled; the device
+flow does not use a redirect callback.
 
-Register a project-owned OAuth app with a recognizable name, homepage and
-permission explanation, and enable device flow. No client secret is needed or
-used. Record only its public client ID in `cli/src/omobench/github_auth.py`.
+Downstream projects should register their own OAuth app with a recognizable
+name, homepage and permission explanation, and enable device flow. No client
+secret is needed or used. Record only its public client ID in
+`cli/src/omobench/github_auth.py`.
 `OMOBENCH_GITHUB_CLIENT_ID` can override that value for local development or a
 downstream build; it is not a credential and never changes API hosts. Rebuild
 the installer from the tested committed revision so the runtime payload includes

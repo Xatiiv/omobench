@@ -18,10 +18,10 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 from .ui import UIError
 
 
-# Set to the project's registered OAuth app client ID before a signed-in release.
+# Public client ID of the Xatiiv-owned "OmoBench Community" OAuth app.
 # This is public configuration, not a secret. The environment override is useful
 # for downstream projects and integration tests; endpoints are never configurable.
-OAUTH_CLIENT_ID = ""
+OAUTH_CLIENT_ID = "Ov23li62UyK8EY7Ci9um"
 UPSTREAM = "Xatiiv/omobench"
 VERIFY_URL = "https://github.com/login/device"
 LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\Z")

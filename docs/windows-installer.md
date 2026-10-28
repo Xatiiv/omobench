@@ -253,8 +253,9 @@ the companion and the source all agree.
 The community submission route is independent of a `.git` directory and GitHub
 CLI. A configured build lets the contributor sign in with a one-time GitHub code,
 review five evidence files, and confirm upload to their public fork and a PR to
-OmoBench. The OAuth client ID is public build configuration. Until that app is
-registered and the ID is included in a tested build, the panel says sign-in is
-unavailable and offers the complete ZIP instead. The currently released installer
+OmoBench. The OAuth client ID is public build configuration. The OmoBench
+Community app is registered and its public ID is included in the source. A build
+without a configured ID reports sign-in unavailable and offers the complete ZIP
+instead. The currently released installer
 does not gain this feature until a new release is built and published.
 See [community submissions](community-submissions.md).
