@@ -6,6 +6,7 @@
   <title>OmoBench · Guided benchmark</title>
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/guided.css">
+  <script src="/community.js" defer></script>
   <script src="/guided.js" defer></script>
 </head>
 <body>
@@ -171,6 +172,31 @@
             </div>
           </details>
 
+<div class="community-submission">
+            <label>Submission destination<select id="submission-mode">
+              <option value="community">OmoBench community registry</option>
+              <option value="origin">Checkout origin, existing GitHub CLI authentication</option>
+            </select></label>
+            <section id="github-auth" class="github-auth" aria-labelledby="github-auth-title">
+              <h3 id="github-auth-title">Share with the community</h3>
+              <p id="github-auth-status" role="status">Checking sign-in availability…</p>
+              <div id="github-device" class="github-device" hidden>
+                <span>Your one-time code</span><code id="github-code" tabindex="0"></code>
+                <a id="github-verify" href="https://github.com/login/device" target="_blank" rel="noopener noreferrer">Enter this code on GitHub ↗</a>
+                <p class="hint">Use only the code requested in this panel. Signing in does not upload your results.</p>
+              </div>
+              <div class="actions">
+                <button id="github-sign-in" type="button" class="secondary" disabled>Sign in with GitHub</button>
+                <button id="github-cancel" type="button" class="secondary" hidden>Cancel sign-in</button>
+                <button id="github-sign-out" type="button" class="secondary" hidden>Sign out</button>
+              </div>
+              <details><summary>Permissions and privacy</summary>
+                <p>GitHub's public_repo permission allows writing to public repositories. It does not request access to private repositories. OmoBench uses it for the public fork and submission you review below.</p>
+                <p>Your GitHub credential stays in this panel process's memory, for at most eight hours. Signing out or stopping the panel forgets it locally. It does not revoke the app on GitHub.</p>
+                <a id="github-revoke" target="_blank" rel="noopener noreferrer" hidden>Review or revoke access on GitHub ↗</a>
+              </details>
+            </section>
+          </div>
           <form id="submit-form">
             <label>Submitter<input id="submitter" required spellcheck="false" placeholder="GitHub username or organization">
               <span class="hint">The only detail this run's verified recipe cannot already know.</span></label>
@@ -188,7 +214,7 @@
             <div class="actions"><button id="download-bundle-button" type="button" class="secondary">Download complete bundle</button><button id="download-comparison-button" type="button" class="secondary">Download result.json for comparison</button></div>
             <p class="hint">To compare privately, open the website's Compare page and choose this result.json. It stays in that browser tab, nothing is uploaded. Community results appear after submission and review.</p>
             <p id="github-message" class="hint"></p>
-            <label class="check"><input id="submit-confirmed" type="checkbox"><span>I reviewed the complete bundle, confirmed real CPU inference, and checked that the evidence contains no secrets. Create a branch and pull request in the repository shown above.</span></label>
+            <label class="check"><input id="submit-confirmed" type="checkbox"><span>I reviewed the complete bundle, confirmed real CPU inference, and checked that the evidence contains no secrets. Upload these five files publicly to the destination shown above and create a pull request for review.</span></label>
             <button id="submit-button" type="button" disabled>Create pull request</button>
           </div>
           <p id="submission-link" class="notice" hidden></p>

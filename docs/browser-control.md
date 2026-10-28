@@ -117,12 +117,17 @@ After a completed CPU or GPU run, **Review & submit** becomes available:
    and duplicates against the local registry. Failures remain local and are displayed.
 4. Click **Review submission files**. Inspect the normalized result and PR description.
    Download the complete ZIP to inspect all five files, including logs and raw output.
-5. For direct PR creation, install GitHub CLI and authenticate in the same environment
-   as `omobench ui` using `gh auth login`. Your account needs write access to the
-   checkout's `origin` repository on github.com. The panel shows that exact destination
-   and base branch before you confirm. Authentication credentials stay with GitHub CLI.
-   If `origin` is your fork, the panel opens the PR there; it does not open a
-   cross-fork PR against the upstream project. Use the manual workflow for upstream.
+5. Select **OmoBench community registry**, then **Sign in with GitHub**. Enter
+   this panel's one-time code at GitHub. A configured build requests `public_repo`,
+   which grants public-repository write access, not private-repository access.
+   The credential remains in the panel process's memory. Review again after
+   signing in: the preview names your account, public upload fork, and upstream
+   `Xatiiv/omobench` PR destination. No Git checkout or `gh` installation is needed.
+   See [community submissions](community-submissions.md) for availability,
+   permission details and review/retry behavior.
+   The **Checkout origin** option preserves the previous `gh auth login` route
+   for developers with write access to that remote. It opens the PR in that
+   repository, not automatically upstream.
 6. After reviewing the bundle and confirming inference on the declared device
    and absence of secrets, click **Create pull request**. This uploads only the
    five standard evidence files
@@ -139,9 +144,10 @@ the preview describe the bytes that will be uploaded. If the files change after
 review, submission is rejected until they are reviewed again. Existing remote
 branches or bundle directories are never overwritten.
 
-Without GitHub CLI or write access, **Download complete bundle** still works. Unzip
+Without sign-in, **Download complete bundle** still works. Unzip
 it into your fork/check-out and follow [the manual submission workflow](submission-bundle.md).
-The panel does not automatically create forks or upload repository source changes.
+The community route creates a public fork only after explicit submission confirmation.
+Neither route uploads repository source changes.
 Uploads larger than 50 MiB per file must use the manual workflow.
 If a model needs a catalog entry, add it through a separate source-change PR or
 include the entry in a manually prepared submission PR. The panel uploads only
@@ -160,7 +166,7 @@ extract at the checkout root rather than adding a second `results/` level.
 - If GitHub fails during submission, evidence remains on disk. Retry **Review
   submission files** and **Create pull request**. A saved branch/commit is reused;
   an existing PR is linked instead of duplicated. Once an upload has created a
-  commit, repackaging that job is blocked to preserve the evidence being submitted.
+  commit, or starts a community submission, repackaging that job is blocked to preserve the evidence being submitted.
 - The panel binds only to `127.0.0.1`. Each launch creates a new connection token,
   checked on API requests along with the request host and origin. The token is
   placed in the URL fragment and browser session storage, not submission evidence.

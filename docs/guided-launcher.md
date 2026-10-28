@@ -241,10 +241,11 @@ acceptance passed/failed**, **bundle validation passed/failed**, and
 **submission created** as separate outcomes: a finished run is not
 automatically a publishable one, and an unsuccessful or below-threshold run
 stays viewable and downloadable locally with its actual rejection reason
-shown, never silently discarded. Direct pull-request creation still needs
-GitHub CLI authentication and origin write access (see
-[Packaging and pull requests](browser-control.md#packaging-and-pull-requests));
-without it, downloading the validated bundle for a manual PR still works.
+shown, never silently discarded. The community submission route uses GitHub
+sign-in in the browser, then a reviewed public fork and upstream PR. It works
+without a Git checkout or GitHub CLI when the build has the project's OAuth
+client ID configured. The legacy `gh`/origin route and complete-bundle download
+remain available. See [community submissions](community-submissions.md).
 Publication always requires an explicit **Create pull request** click after
 reviewing the destination repository and evidence, nothing is uploaded
 automatically.

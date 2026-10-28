@@ -142,6 +142,23 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.request("/api/runs", auth, "POST", "[]")[0], 400)
         self.assertEqual(self.request("/api/runs", auth, "POST", "x" * 32769)[0], 413)
 
+    def test_github_sign_in_uses_the_same_local_auth_boundary(self):
+        auth = {"X-OmoBench-Token": self.server.token, "Content-Type": "application/json"}
+        self.assertEqual(self.request("/community.js")[0], 200)
+        self.assertEqual(self.request("/api/github/auth")[0], 401)
+        status, _, body = self.request("/api/github/auth", auth)
+        self.assertEqual(status, 200)
+        self.assertNotIn("access_token", body.decode())
+        with patch.object(self.server.controller.github_auth, "start", return_value={"status": "requesting"}) as start:
+            for headers, expected in [({}, 401), ({**auth, "Origin": "https://evil.test"}, 403),
+                                       ({**auth, "Host": "evil.test"}, 403)]:
+                self.assertEqual(self.request("/api/github/auth/start", headers, "POST", "{}")[0], expected)
+            start.assert_not_called()
+            self.assertEqual(self.request("/api/github/auth/start", auth, "POST", "{}")[0], 200)
+            start.assert_called_once()
+        for action in ["cancel", "sign-out"]:
+            self.assertEqual(self.request("/api/github/auth/" + action, auth, "POST", "{}")[0], 200)
+
     def test_symlinked_evidence_cannot_escape_staging(self):
         controller = self.server.controller
         outside = self.root / "private.txt"

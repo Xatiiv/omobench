@@ -1026,6 +1026,9 @@ function renderValidation(detail) {
 
 async function enterShareScreen() {
   showScreen("share");
+  preview = null;
+  $("submit-confirmed").checked = false;
+  $("submit-button").disabled = true;
   $("submission-preview").hidden = true;
   $("submission-link").hidden = true;
   $("edit-details-toggle").checked = false;
@@ -1103,11 +1106,19 @@ $("submit-form").addEventListener("submit", (event) => {
   });
 });
 
+const community = new CommunitySubmission(api, () => {
+  preview = null;
+  $("submission-preview").hidden = true;
+  $("submit-confirmed").checked = false;
+  $("submit-button").disabled = true;
+});
+
 $("prepare-review-button").addEventListener("click", () => action(async () => {
-  preview = await api(`/api/runs/${benchmarkJobId}/prepare`, {});
-  $("repository").textContent = preview.repository
-    ? `Destination: ${preview.repository} · base: ${preview.base_branch}`
-    : "Direct submission is unavailable here. Download the validated bundle below to submit manually.";
+  const reviewingJob = benchmarkJobId, ticket = community.ticket();
+  const prepared = await api(`/api/runs/${reviewingJob}/prepare`, { mode: ticket.mode });
+  if (benchmarkJobId !== reviewingJob || !community.current(ticket)) return;
+  preview = prepared;
+  $("repository").textContent = community.destination(preview);
   $("submission-files").replaceChildren(...preview.files.map((file) => {
     const li = document.createElement("li"), detail = document.createElement("span");
     li.textContent = `${file.path} · ${(file.bytes / 1024).toFixed(1)} KiB`;
@@ -1142,8 +1153,8 @@ $("submit-confirmed").addEventListener("change", () => {
 $("submit-button").addEventListener("click", () => action(async () => {
   notice("Uploading the reviewed bundle and creating a pull request. This may take a minute…");
   const detail = await api(`/api/runs/${benchmarkJobId}/submit`,
-    { repository: preview.repository, bundle_digest: preview.bundle_digest, confirmed: $("submit-confirmed").checked });
-  notice("Pull request created. Review its checks on GitHub before merging.");
+    community.payload(preview, $("submit-confirmed").checked));
+  notice(`Submission ${detail.submission?.pull_request_state || "available"}. Follow its checks and maintainer review on GitHub.`);
   $("submit-confirmed").checked = false;
   statusChecklist(detail);
   const pr = detail.submission?.pull_request_url;
@@ -1158,6 +1169,7 @@ $("submit-button").addEventListener("click", () => action(async () => {
 async function init() {
   try {
     if (!token) throw new Error("Open the full connection link printed by omobench ui, including its #token part.");
+    community.refresh();
     await loadRunnerStatus();
     await loadRecipes();
     await loadRecentRuns();
