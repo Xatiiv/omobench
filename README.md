@@ -213,10 +213,12 @@ profile hash, and artifact hashes. Validation checks the schema, catalog,
 obviously mutable revision labels, artifact paths/hashes, and duplicates. These
 checks do not independently prove GPU usage or every workload acceptance rule.
 
-The panel can upload a reviewed bundle using your existing GitHub CLI (`gh`)
-authentication and write access to the checkout's `origin` repository.
-Otherwise, download the ZIP and use a fork and manual PR. The panel does not
-merge PRs. Read the [submission guide](docs/submission-bundle.md) before publishing.
+The panel's community submission flow signs in through GitHub in the browser,
+reviews the exact evidence and destination, then uploads to your public fork
+and opens an upstream PR. It needs a build configured with the project's OAuth
+client ID, no local Git checkout or `gh` installation. The existing `gh`/origin
+route and ZIP download remain available. The panel does not merge PRs.
+See [community sign-in and its permissions](docs/community-submissions.md). Read the [submission guide](docs/submission-bundle.md) before publishing.
 
 ## Develop the comparison website
 

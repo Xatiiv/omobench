@@ -19,3 +19,13 @@ input,select,textarea{border-radius:8px}
 pre{font-size:11px;background:#080f1c}
 @media(max-width:620px){.topbar{padding:0 20px}.topbar-actions{gap:12px}.topbar-actions .pill{display:none}.brand{font-size:21px}}
 @media(prefers-reduced-motion:reduce){button{transition:none}button:hover:not(:disabled){transform:none}}
+
+/* Community sign-in shares the panel palette and stays local to the share flow. */
+.community-submission { margin: 1.5rem 0; }
+.github-auth { margin-top: 1rem; padding: 1.25rem; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.github-auth h3 { margin: 0 0 .5rem; }
+.github-auth p { line-height: 1.6; }
+.github-device { padding: 1rem; margin: 1rem 0; border: 1px solid var(--accent); border-radius: 8px; }
+.github-device code { display: block; width: fit-content; margin: .5rem 0 1rem; color: var(--accent); font-size: clamp(1.6rem, 5vw, 2.2rem); letter-spacing: .12em; user-select: all; }
+.github-auth details { margin-top: 1rem; }
+.github-auth a { overflow-wrap: anywhere; }

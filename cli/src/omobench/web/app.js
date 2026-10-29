@@ -214,9 +214,19 @@ $("package-form").addEventListener("submit", (event) => {
     renderRun(await api(`/api/runs/${selected}/package`, data));
   });
 });
+const community = new CommunitySubmission(api, () => {
+  preview = null;
+  $("submission-preview").hidden = true;
+  $("submit-confirmed").checked = false;
+  $("submit-button").disabled = true;
+});
+
 $("prepare-button").addEventListener("click", () => action(async () => {
-  preview = await api(`/api/runs/${selected}/prepare`, {});
-  $("repository").textContent = preview.repository ? `Destination: ${preview.repository} · base: ${preview.base_branch}` : "Download the validated bundle to submit manually.";
+  const reviewingJob = selected, ticket = community.ticket();
+  const prepared = await api(`/api/runs/${reviewingJob}/prepare`, { mode: ticket.mode });
+  if (selected !== reviewingJob || !community.current(ticket)) return;
+  preview = prepared;
+  $("repository").textContent = community.destination(preview);
   $("submission-files").replaceChildren(...preview.files.map((file) => {
     const li = document.createElement("li"), detail = document.createElement("span");
     li.textContent = `${file.path} · ${(file.bytes / 1024).toFixed(1)} KiB`; detail.textContent = `SHA-256 ${file.sha256}`; li.append(detail); return li;
@@ -230,8 +240,8 @@ $("download-bundle").addEventListener("click", () => action(async () => download
 $("submit-confirmed").addEventListener("change", updateButtons);
 $("submit-button").addEventListener("click", () => action(async () => {
   notice("Uploading the reviewed bundle and creating a pull request. This may take a minute…");
-  renderRun(await api(`/api/runs/${selected}/submit`, {repository: preview.repository, bundle_digest: preview.bundle_digest, confirmed: $("submit-confirmed").checked}));
-  notice("Pull request created. Review its checks on GitHub before merging."); $("submit-confirmed").checked = false;
+  renderRun(await api(`/api/runs/${selected}/submit`, community.payload(preview, $("submit-confirmed").checked)));
+  notice("Submission available on GitHub. Follow its checks and maintainer review there."); $("submit-confirmed").checked = false;
 }));
 
 async function poll() {
@@ -247,6 +257,7 @@ async function poll() {
 async function init() {
   try {
     if (!token) throw new Error("Open the full connection link printed by omobench ui, including its #token part.");
+    community.refresh();
     await refreshSetup(); jobs = await api("/api/runs"); renderJobs();
     if (jobs.length) await selectRun(jobs[0].id);
     poll();

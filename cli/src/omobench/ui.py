@@ -167,6 +167,9 @@ class Controller:
         self.worker: threading.Thread | None = None
         self.busy = False
         self.closing = False
+        from .github_auth import DeviceSession
+        self.github_auth = DeviceSession()
+        self.community_reviews: dict[str, dict] = {}
         self.environment = os.environ.copy()
         self.environment["PYTHONPATH"] = str(self.root / "cli" / "src") + os.pathsep + self.environment.get("PYTHONPATH", "")
         self.environment["PYTHONUNBUFFERED"] = "1"
@@ -337,6 +340,8 @@ class Controller:
         with self.lock:
             self.closing = True
             active = next((j["id"] for j in self.jobs.values() if j["status"] in {"running", "cancelling"}), None)
+            self.community_reviews.clear()
+        self.github_auth.close()
         if active:
             self.cancel(active)
         if self.worker:
@@ -407,10 +412,10 @@ class Controller:
     def _begin_action(self, job_id: str, status: str) -> dict:
         with self.lock:
             job = self._get(job_id)
-            if self.busy or job["status"] != "completed":
+            if self.closing or self.busy or job["status"] != "completed":
                 raise UIError("Wait for a successful run before preparing a submission.", 409)
             submission = job.get("submission") or {}
-            if submission.get("commit_sha") and status == "packaging":
+            if (submission.get("commit_sha") or submission.get("started")) and status == "packaging":
                 raise UIError("Submission has started for this bundle. Retry submission or start a new run to change its evidence.")
             self.busy = True
             job["status"] = status
@@ -473,10 +478,36 @@ class Controller:
                 self._save(job)
         return self.detail(job_id)
 
-    def prepare(self, job_id: str) -> dict:
+    def github_action(self, action: str) -> dict:
+        with self.lock:
+            if self.closing or self.busy:
+                raise UIError("Wait for the current operation before changing GitHub sign-in.", 409)
+            self.community_reviews.clear()
+            if action == "start":
+                return self.github_auth.start()
+            return self.github_auth.sign_out()
+
+    def prepare(self, job_id: str, data: dict | None = None) -> dict:
         from .ui_submission import prepare_submission
+        mode = (data or {}).get("mode", "origin")
+        if mode not in {"origin", "community"}:
+            raise UIError("Choose a supported submission route.")
         job = self._begin_action(job_id, "preparing")
         try:
+            if mode == "community":
+                from .community_submission import prepare_community
+                preview, review = prepare_community(self.root, self.run_directory(job_id), self.github_auth,
+                                                    job.get("submission") or {})
+                with self.lock:
+                    # One current review per job; never persist OAuth session data.
+                    self.community_reviews.pop(job_id, None)
+                    if review:
+                        review.update(review_id=secrets.token_urlsafe(24), expires=time.monotonic() + 900)
+                        self.community_reviews[job_id] = review
+                        preview["review_id"] = review["review_id"]
+                return preview
+            if (job.get("submission") or {}).get("mode") == "community":
+                raise UIError("This run has a community submission. Select that route to retry.")
             return prepare_submission(self.root, self.run_directory(job_id))
         finally:
             with self.lock:
@@ -501,12 +532,26 @@ class Controller:
             raise UIError("Review the complete bundle and confirm submission first.")
         repository = text_field(data, "repository")
         bundle_digest = text_field(data, "bundle_digest")
+        mode = data.get("mode", "origin")
+        if mode not in {"origin", "community"}:
+            raise UIError("Choose a supported submission route.")
         job = self._begin_action(job_id, "submitting")
         try:
             state = job.get("submission") or {}
             job["submission"] = state
-            submit_pull_request(self.root, self.run_directory(job_id), repository, bundle_digest,
-                                state, lambda: self._save(job))
+            if mode == "community":
+                from .community_submission import submit_community
+                review = self.community_reviews.get(job_id)
+                if (not review or review["review_id"] != data.get("review_id") or time.monotonic() >= review["expires"]
+                        or review["repository"] != repository or review["bundle_digest"] != bundle_digest):
+                    raise UIError("The submission review is missing, expired or changed. Review the files again.")
+                submit_community(self.root, self.run_directory(job_id), self.github_auth, review,
+                                 state, lambda: self._save(job))
+            else:
+                if state.get("mode") == "community":
+                    raise UIError("This run has a community submission. Select that route to retry.")
+                submit_pull_request(self.root, self.run_directory(job_id), repository, bundle_digest,
+                                    state, lambda: self._save(job))
         finally:
             with self.lock:
                 self.busy = False
@@ -573,6 +618,7 @@ class UIHandler(BaseHTTPRequestHandler):
             static = {"/": ("guided.html", "text/html; charset=utf-8"),
                       "/guided": ("guided.html", "text/html; charset=utf-8"),
                       "/guided.js": ("guided.js", "text/javascript; charset=utf-8"),
+                      "/community.js": ("community.js", "text/javascript; charset=utf-8"),
                       "/guided.css": ("guided.css", "text/css; charset=utf-8"),
                       "/advanced": ("index.html", "text/html; charset=utf-8"),
                       "/app.js": ("app.js", "text/javascript; charset=utf-8"),
@@ -581,6 +627,8 @@ class UIHandler(BaseHTTPRequestHandler):
                 name, mime = static[self.path]
                 return self._send(200, files("omobench").joinpath("web", name).read_bytes(), mime)
             controller = self.server.controller
+            if self.path == "/api/github/auth":
+                return self._json(controller.github_auth.snapshot())
             if self.path == "/api/setup":
                 return self._json(controller.setup())
             if self.path == "/api/runs":
@@ -624,6 +672,9 @@ class UIHandler(BaseHTTPRequestHandler):
             if not isinstance(data, dict):
                 raise UIError("Request must be a JSON object.")
             controller = self.server.controller
+            auth = re.fullmatch(r"/api/github/auth/(start|cancel|sign-out)", self.path)
+            if auth:
+                return self._json(controller.github_action(auth[1]))
             if self.path == "/api/connection":
                 return self._json(controller.connection(data))
             if self.path == "/api/runs":
@@ -631,7 +682,7 @@ class UIHandler(BaseHTTPRequestHandler):
             match = re.fullmatch(r"/api/runs/(job-[a-f0-9]{16})/(cancel|package|prepare|submit)", self.path)
             if match:
                 job_id, action = match.groups()
-                if action in {"cancel", "prepare"}:
+                if action == "cancel":
                     return self._json(getattr(controller, action)(job_id))
                 return self._json(getattr(controller, action)(job_id, data))
             managed = self.server.managed

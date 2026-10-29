@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>OmoBench · Local control</title>
   <link rel="stylesheet" href="/style.css">
+  <script src="/community.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -54,6 +55,31 @@
       <section id="package-panel" class="panel" hidden>
         <div class="section-head"><div><span class="step">03</span><h2>Review &amp; submit</h2></div><span id="package-panel-device" class="pill">Evidence</span></div>
         <p class="muted">Record the model and serving configuration used for this run. Packaging uses the existing CLI and registry validator.</p>
+<div class="community-submission">
+            <label>Submission destination<select id="submission-mode">
+              <option value="community">OmoBench community registry</option>
+              <option value="origin">Checkout origin, existing GitHub CLI authentication</option>
+            </select></label>
+            <section id="github-auth" class="github-auth" aria-labelledby="github-auth-title">
+              <h3 id="github-auth-title">Share with the community</h3>
+              <p id="github-auth-status" role="status">Checking sign-in availability…</p>
+              <div id="github-device" class="github-device" hidden>
+                <span>Your one-time code</span><code id="github-code" tabindex="0"></code>
+                <a id="github-verify" href="https://github.com/login/device" target="_blank" rel="noopener noreferrer">Enter this code on GitHub ↗</a>
+                <p class="hint">Use only the code requested in this panel. Signing in does not upload your results.</p>
+              </div>
+              <div class="actions">
+                <button id="github-sign-in" type="button" class="secondary" disabled>Sign in with GitHub</button>
+                <button id="github-cancel" type="button" class="secondary" hidden>Cancel sign-in</button>
+                <button id="github-sign-out" type="button" class="secondary" hidden>Sign out</button>
+              </div>
+              <details><summary>Permissions and privacy</summary>
+                <p>GitHub's public_repo permission allows writing to public repositories. It does not request access to private repositories. OmoBench uses it for the public fork and submission you review below.</p>
+                <p>Your GitHub credential stays in this panel process's memory, for at most eight hours. Signing out or stopping the panel forgets it locally. It does not revoke the app on GitHub.</p>
+                <a id="github-revoke" target="_blank" rel="noopener noreferrer" hidden>Review or revoke access on GitHub ↗</a>
+              </details>
+            </section>
+          </div>
         <form id="package-form">
           <div class="grid two">
             <label>Canonical model ID<input name="model" id="package-model" list="catalog-models" required spellcheck="false"><datalist id="catalog-models"></datalist><span class="hint">Public results must use a model listed in the catalog.</span></label>
@@ -61,7 +87,7 @@
             <label>Framework<select name="framework" id="framework"></select></label>
             <label>Exact framework version<input name="framework_version" required placeholder="Version, build, and commit where available"></label>
             <label>Quantization<input name="quantization" placeholder="For example BF16 or Q4_K_M"></label>
-            <label>Submitter<input name="submitter" required placeholder="GitHub username or organization"></label>
+            <label>Submitter<input id="submitter" name="submitter" required placeholder="GitHub username or organization"></label>
           </div>
           <label>Model weights source (optional)<input name="model_source" id="package-model-source" type="url" placeholder="Exact pinned download URL, if different from a generic catalog reference" spellcheck="false"><span class="hint">When set, the model revision above is understood as this source's own repository, not necessarily the canonical model ID's repository. Prefilled automatically for a managed CPU run.</span></label>
           <label id="description-field" hidden>Server description<input name="server_description" id="server-description" placeholder="Name and details of the generic server"></label>
@@ -78,7 +104,7 @@
           <details><summary>Pull request description</summary><pre id="pr-description" tabindex="0"></pre></details>
           <div class="actions"><button id="download-bundle" type="button" class="secondary">Download complete bundle</button></div>
           <p id="github-message" class="hint"></p>
-          <label class="check"><input id="submit-confirmed" type="checkbox"><span>I reviewed the complete bundle, confirmed real inference on the declared execution device, and checked that the evidence contains no secrets. Create a branch and pull request in the repository shown above.</span></label>
+          <label class="check"><input id="submit-confirmed" type="checkbox"><span>I reviewed the complete bundle, confirmed real inference on the declared execution device, and checked that the evidence contains no secrets. Upload these five files publicly to the destination shown above and create a pull request for review.</span></label>
           <button id="submit-button" type="button" disabled>Create pull request</button>
         </div>
         <p id="submission-link" class="notice" hidden></p>

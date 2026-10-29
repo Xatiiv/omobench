@@ -4,6 +4,7 @@
 //
 // Run by cli/tests/test_guided_progress.py, which asserts on that JSON.
 import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { createContext, runInContext } from "node:vm";
 
 const guidedPath = process.argv[2];
@@ -84,6 +85,8 @@ const context = createContext({
   fetch: () => Promise.reject(new Error("no network in this harness")),
 });
 
+runInContext(readFileSync(join(dirname(guidedPath), "community.js"), "utf8"), context);
+document.getElementById("submission-mode").value = "community";
 runInContext(source, context, { filename: guidedPath });
 
 function barState() {

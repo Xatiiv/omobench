@@ -50,8 +50,12 @@ Pushing a submission branch/PR exposes its evidence according to repository
 visibility, before merge. Registry inclusion follows review, merge, and a site build.
 
 The panel submits only the five standard evidence files after explicit review,
-using existing `gh` authentication and a new branch in the displayed `origin`.
-It does not merge PRs, create forks, start models, or change local Git branches.
+using either session-only GitHub device sign-in to create/reuse the contributor's
+public fork and open an upstream PR, or the legacy `gh` route to the displayed
+`origin`. Community uploads require a current server-side review bound to the
+account, destination and bundle digest. Sign-in and preparation never upload
+files; fork creation happens only after submission confirmation. The panel does
+not merge PRs or change local Git branches.
 Keep localhost/token/origin protections and the one-panel-per-checkout lock.
 
 ## Repository map
