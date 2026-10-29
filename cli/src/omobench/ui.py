@@ -651,7 +651,7 @@ class UIHandler(BaseHTTPRequestHandler):
                 return self._json(managed.setup_job_detail(match[1]))
             if self.path == "/api/managed/runs":
                 return self._json(managed.run_job_list())
-            match = re.fullmatch(r"/api/managed/runs/(mrun-[a-f0-9]{16})", self.path)
+            match = re.fullmatch(r"/api/managed/runs/(mrun-[a-f0-9]{16}|saved-job-[a-f0-9]{16})", self.path)
             if match:
                 return self._json(managed.run_job_detail(match[1]))
             raise UIError("Not found.", 404)

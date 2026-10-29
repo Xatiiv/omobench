@@ -148,5 +148,44 @@ class GuidedComparisonExportTests(unittest.TestCase):
         })
 
 
+class GuidedHistoryDisplayTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.states = _render_states()
+
+    def test_saved_run_opens_results_and_share_without_execution_or_upload(self):
+        self.assertIn("Saved local run: Fixture/Model", self.states["historyRow"])
+        opened = self.states["historyOpened"]
+        self.assertTrue(opened["resultVisible"])
+        self.assertEqual(opened["jobId"], "job-aaaaaaaaaaaaaaaa")
+        self.assertNotIn("CPU", opened["status"])
+        self.assertIn("publication requirements", opened["status"])
+        self.assertTrue(self.states["historyReadOnly"])
+
+    def test_saved_rejection_and_recorded_device_framework_remain_visible(self):
+        state = self.states["historyRejected"]
+        self.assertIn("acceptance:", state["message"])
+        self.assertTrue(state["reviewHidden"])
+        self.assertIn("GPU", state["facts"])
+        self.assertIn("vllm fixture", state["facts"])
+        self.assertTrue(state["packageDisabled"])
+        self.assertTrue(state["advancedNoteVisible"])
+        self.assertTrue(self.states["historyCpuPackageEnabled"])
+        self.assertTrue(self.states["historyUncheckedReviewHidden"])
+
+    def test_interrupted_run_clears_previous_completion_and_submission_review(self):
+        state = self.states["historyInterrupted"]
+        self.assertEqual(state["heading"], "Benchmark interrupted")
+        self.assertEqual(state["endTime"], "End time unknown")
+        self.assertIsNone(state["finishedJob"])
+        self.assertIsNone(state["preview"])
+        self.assertNotEqual(state["bar"]["ariaValueNow"], "100")
+        self.assertFalse(state["bar"]["indeterminate"])
+
+    def test_server_check_is_not_rendered_as_benchmark_measurements(self):
+        self.assertIn("no benchmark measurements", self.states["historySmoke"]["heading"])
+        self.assertFalse(self.states["historySmoke"]["resultVisible"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -153,6 +153,19 @@ class GuidedServiceTests(unittest.TestCase):
         )
         self.assertEqual(status, 401)
 
+    def test_saved_local_run_details_require_auth_and_resolve_existing_job_only(self):
+        job_id = "job-" + "a" * 16
+        self.server.controller.jobs[job_id] = {
+            "id": job_id, "created_at": "2026-10-26T10:00:00+00:00", "status": "completed",
+            "summary": {"results": {}}, "model": "Fixture/Model", "profile": "chat-small-v1",
+        }
+        path = f"/api/managed/runs/saved-{job_id}"
+        self.assertEqual(self.request(path)[0], 401)
+        status, _, body = self.request(path, self.auth())
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["benchmark_job_id"], job_id)
+        self.assertEqual(self.request("/api/managed/runs/saved-job-" + "b" * 16, self.auth())[0], 404)
+
     # -- review ------------------------------------------------------------------
 
     def test_review_endpoint_reports_files_and_platform_without_writing(self):
@@ -546,6 +559,23 @@ class GuidedRunLifecycleTests(unittest.TestCase):
 
         detail = wait_for(completed, timeout=20)
         benchmark_job_id = detail["benchmark_job_id"]
+
+        # Recreate both controllers, exactly the state boundary of a panel
+        # restart. Preserve the fixture runner environment; never run it again.
+        from omobench.ui import Controller
+        from omobench.ui_managed import ManagedController
+        environment = self.server.controller.environment.copy()
+        self.server.managed.close()
+        self.server.controller.close()
+        self.server.controller = Controller(self.root)
+        self.server.controller.environment = environment
+        self.server.managed = ManagedController(self.root, self.server.controller)
+        status, _, body = self.request(f"/api/managed/runs/{job_id}", self.auth())
+        self.assertEqual(status, 200)
+        reopened = json.loads(body)
+        self.assertEqual(reopened["benchmark_job_id"], benchmark_job_id)
+        self.assertEqual(reopened["result"], detail["result"])
+        self.assertTrue(reopened["recovered"])
 
         with patch("omobench.cli.current_git_commit", return_value="a" * 40):
             status, _, body = self.post(

@@ -115,7 +115,12 @@ function showScreen(name) {
 document.querySelectorAll(".step-tab").forEach((tab) => tab.addEventListener("click", () => action(async () => {
   const target = tab.dataset.screen;
   if (target === "run" && !selectedRecipeId) return;
-  if ((target === "results" || target === "share") && !finishedManagedJob) return;
+  if ((target === "results" || target === "share") && !finishedManagedJob) {
+    notice("Choose a saved run below to reopen its results. Only completed benchmarks can be shared.");
+    showScreen("choose");
+    await loadRecentRuns();
+    return;
+  }
   if (target === "results") showResults(finishedManagedJob.result);
   if (target === "share") await enterShareScreen();
   showScreen(target);
@@ -195,24 +200,19 @@ async function loadRecentRuns() {
     pollFlow();
     return;
   }
-  const recent = managedRuns.filter((job) => !RUN_ACTIVE.has(job.status)).slice(0, 5);
+  const recent = managedRuns.filter((job) => !RUN_ACTIVE.has(job.status));
   $("recent-panel").hidden = recent.length === 0;
   $("recent-list").replaceChildren(...recent.map((job) => {
     const row = document.createElement("button");
     row.type = "button"; row.className = "recent-item";
     const recipe = recipesById[job.recipe];
-    row.textContent = `${recipe ? recipe.title : job.recipe} · ${job.status} · ${new Date(job.created_at).toLocaleString()}`;
+    const label = job.saved_local ? `Saved local run: ${job.model || "Unknown model"} · ${job.profile || "Unknown profile"}`
+      : recipe ? recipe.title : job.recipe;
+    row.textContent = `${label} · ${job.status} · ${new Date(job.created_at).toLocaleString()}`;
     row.addEventListener("click", () => action(async () => {
       selectedRecipeId = job.recipe; storageDir = job.storage_dir;
-      if (job.result) {
-        finishedManagedJob = job; benchmarkJobId = job.benchmark_job_id;
-        showResults(job.result); showScreen("results");
-        return;
-      }
-      // No result: a failed or cancelled run, reopened. Show the same
-      // terminal dashboard state a live failure/cancellation ends in --
-      // not just a top-level notice -- so refreshing or reopening this run
-      // later looks exactly like watching it fail just now would have.
+      // Fetch fresh status, rather than trust a list captured before packaging
+      // or submission. Failed/interrupted jobs never inherit an earlier result.
       await openTerminalRun(job.id);
     }));
     return row;
@@ -738,6 +738,7 @@ function runnerNeverStarted(runJob) {
 
 function finishFlow(success, errorMessage, runJob) {
   clearTimers();
+  if (runJob?.history_warning) notice(runJob.history_warning, true);
   $("cancel-button").hidden = true;
   $("start-over-button").hidden = false;
 
@@ -751,7 +752,7 @@ function finishFlow(success, errorMessage, runJob) {
     $("fact-elapsed").textContent = formatDuration(totalSeconds);
   }
 
-  if (success && runJob && runJob.result) {
+  if (success && runJob && runJob.result?.results && runJob.benchmark_job_id) {
     // 100% only here: execution finished *and* local evidence finalization
     // (compression, environment.json, reproduce.md) already completed --
     // runJob only reaches a terminal "completed" status after that. Every
@@ -777,11 +778,19 @@ function finishFlow(success, errorMessage, runJob) {
   // terminal state itself unmistakable, distinguishing a runner that never
   // started from one that started and then exited or was cancelled.
   const cancelled = runJob && runJob.status === "cancelled";
+  const interrupted = runJob && runJob.status === "interrupted";
+  const smoke = runJob && runJob.kind === "smoke";
   const neverStarted = runnerNeverStarted(runJob);
-  $("progress-heading").textContent = cancelled
+  $("progress-heading").textContent = interrupted ? "Benchmark interrupted"
+    : smoke ? "Server check, no benchmark measurements"
+    : runJob?.status === "unavailable" ? "Saved results unavailable" : cancelled
     ? "Benchmark cancelled"
     : neverStarted ? "Could not start benchmark" : "Benchmark failed";
   renderProgressBarFrozen();
+  if (runJob && !runJob.finished_at) {
+    $("elapsed").textContent = "End time unknown";
+    $("fact-elapsed").textContent = "Unknown, panel interrupted";
+  }
   // "Estimating…"/"Xm Ys remaining" implied more progress was still coming;
   // once terminal, a remaining-time estimate is stale, not a real fact.
   $("fact-eta").textContent = neverStarted ? "N/A" : cancelled ? "Cancelled" : "Stopped, did not finish";
@@ -802,11 +811,14 @@ function finishFlow(success, errorMessage, runJob) {
       $("server-log").textContent = "No managed server diagnostic log is available for this run.";
     }
   } else {
-    $("log-connection-status").textContent = cancelled ? "Runner process stopped (cancelled)." : "Runner process exited.";
+    $("log-connection-status").textContent = interrupted
+      ? "Saved log only. This panel has not resumed the previous process."
+      : cancelled ? "Runner process stopped (cancelled)." : "Runner process exited.";
   }
 
   $("run-error").hidden = false;
-  $("run-error").textContent = errorMessage || (neverStarted
+  $("run-error").textContent = errorMessage || (smoke
+    ? "This was a server readiness check. It produced no benchmark results to share." : neverStarted
     ? "The benchmark process never started. See the technical details below for why."
     : "The run did not finish. Local logs above describe what happened.");
   loadRecentRuns().catch(() => {});
@@ -830,6 +842,12 @@ function lastReachedStageIndexForTerminalJob(runJob, telemetry) {
 
 async function openTerminalRun(jobId) {
   const runJob = await api(`/api/managed/runs/${jobId}`);
+  clearTimers();
+  finishedManagedJob = null;
+  preview = null;
+  $("submit-confirmed").checked = false;
+  $("submit-button").disabled = true;
+  $("submission-preview").hidden = true;
   let benchJob = null, telemetry = null;
   if (runJob.benchmark_job_id) {
     benchJob = await api(`/api/runs/${runJob.benchmark_job_id}`).catch(() => null);
@@ -945,8 +963,8 @@ function metricWithNote(label, value, unit, note) {
 
 function showResults(summary) {
   const r = summary.results;
-  $("results-status").textContent = "Execution completed. These are real CPU measurements from the managed server, "
-    + "staged as a normal local evidence directory, nothing has been uploaded.";
+  $("results-status").textContent = "Execution completed. These saved measurements can be reviewed without rerunning the benchmark. "
+    + "Completion does not mean this result meets publication requirements; check acceptance and submission status in Share results.";
   $("results-metrics").replaceChildren(
     metricWithNote("Time to first token · p50", r.latency_ms.ttft.p50, "ms", "Median time until the first streamed token; lower is better."),
     metricWithNote("Time to first token · p95", r.latency_ms.ttft.p95, "ms", "95th-percentile time until the first streamed token; lower is better."),
@@ -999,10 +1017,10 @@ function renderShareFacts(detail) {
     ["Model revision", detail.model_revision || "(not set)"],
     ["Weights source", detail.model_source || "(same as the canonical model repository)"],
     ["Quantization", detail.quantization || "(not recorded)"],
-    ["Runtime", `${detail.framework || "llama.cpp"} ${detail.framework_version || ""}`.trim()],
+    ["Runtime", `${detail.framework || "(not recorded)"} ${detail.framework_version || ""}`.trim()],
     ["Startup arguments", (detail.runtime_args || []).join(" ") || "(none recorded)"],
     ["Profile", detail.profile],
-    ["Execution device", (detail.execution_device || "cpu").toUpperCase()],
+    ["Execution device", (detail.execution_device || "(not recorded)").toUpperCase()],
   ];
   entries.forEach(([label, value]) => {
     const dt = document.createElement("dt"), dd = document.createElement("dd");
@@ -1034,9 +1052,13 @@ async function enterShareScreen() {
   $("edit-details-toggle").checked = false;
   $("package-editable").hidden = true;
   const detail = await api(`/api/runs/${benchmarkJobId}`);
+  const guidedPackaging = detail.execution_device === "cpu" && detail.framework === "llama.cpp";
+  $("package-button").disabled = !guidedPackaging;
+  $("advanced-package-note").hidden = guidedPackaging;
   renderShareFacts(detail);
   statusChecklist(detail);
   $("validation-result").hidden = !detail.validation;
+  $("prepare-review-button").hidden = !detail.validation?.valid;
   if (detail.validation) renderValidation(detail);
 }
 
@@ -1069,8 +1091,8 @@ $("go-share-button").addEventListener("click", () => action(async () => { await 
 $("download-summary-button").addEventListener("click", () => action(async () => {
   const recipe = recipesById[selectedRecipeId];
   const summary = {
-    kind: "omobench-local-summary", execution_device: "cpu",
-    model: recipe ? recipe.model_id : finishedManagedJob.recipe, profile: recipe ? recipe.benchmark_profile : undefined,
+    kind: "omobench-local-summary", execution_device: finishedManagedJob.execution_device || recipe?.execution_device,
+    model: finishedManagedJob.model || recipe?.model_id, profile: finishedManagedJob.profile || recipe?.benchmark_profile,
     ...finishedManagedJob.result,
   };
   download(new Blob([JSON.stringify(summary, null, 2) + "\n"], { type: "application/json" }), `${finishedManagedJob.id}-local-summary.json`);
@@ -1082,13 +1104,16 @@ $("submit-form").addEventListener("submit", (event) => {
   event.preventDefault();
   action(async () => {
     const detail = await api(`/api/runs/${benchmarkJobId}`);
+    if (detail.execution_device !== "cpu" || detail.framework !== "llama.cpp") {
+      throw new Error("Use the advanced panel to package this run with its recorded device and runtime metadata.");
+    }
     const editing = $("edit-details-toggle").checked;
     const submitter = $("submitter").value.trim();
     if (!submitter) throw new Error("Enter a submitter identity.");
     const data = {
       model: detail.model,
       model_revision: editing ? $("edit-model-revision").value.trim() : (detail.model_revision || ""),
-      framework: "llama.cpp",
+      framework: detail.framework || "",
       framework_version: editing ? $("edit-framework-version").value.trim() : (detail.framework_version || ""),
       quantization: editing ? $("edit-quantization").value.trim() : (detail.quantization || ""),
       model_source: editing ? $("edit-model-source").value.trim() : (detail.model_source || ""),

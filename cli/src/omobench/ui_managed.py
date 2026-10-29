@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -22,17 +23,21 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .ui import UIError, text_field
+from .ui import JOB_ID, UIError, text_field
 
 
 MANAGED_JOB_ACTIVE = {"starting_server", "waiting_ready", "running_benchmark", "preparing", "cancelling"}
+MANAGED_RUN_ID = re.compile(r"mrun-[a-f0-9]{16}\Z")
+TERMINAL = {"completed", "failed", "cancelled", "interrupted"}
 
 
 class ManagedController:
     def __init__(self, root: Path, benchmark_controller: Any):
-        self.root = root
+        self.root = root.resolve()
         self.benchmark_controller = benchmark_controller
-        self.storage = root / ".omobench-runs" / "ui" / "managed"
+        self.storage = self.root / ".omobench-runs" / "ui" / "managed"
+        if self.storage.is_symlink() or not self.storage.resolve().is_relative_to(self.root):
+            raise UIError("Managed history must stay inside the checkout.")
         self.storage.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
         self.setup_jobs: dict[str, dict] = {}
@@ -40,6 +45,117 @@ class ManagedController:
         self.cancel_events: dict[str, threading.Event] = {}
         self.processes: dict[str, Any] = {}
         self.closing = False
+        self._recover_runs()
+
+    def _run_directory(self, job_id: str) -> Path:
+        if not MANAGED_RUN_ID.fullmatch(job_id):
+            raise UIError("Unknown managed run.", 404)
+        directory = self.storage / job_id
+        if directory.is_symlink() or not directory.resolve().is_relative_to(self.storage.resolve()):
+            raise UIError("Managed history must stay inside its staging directory.")
+        return directory
+
+    def _save_run(self, job: dict, *, required: bool = False) -> None:
+        """Only UI bookkeeping, never evidence, credentials or process ownership."""
+        temporary = None
+        created = False
+        try:
+            directory = self._run_directory(job["id"])
+            directory.mkdir(exist_ok=True)
+            path = directory / "job.json"
+            if path.is_symlink():
+                raise UIError("Managed history cannot replace a symbolic link.")
+            record = {key: job.get(key) for key in (
+                "id", "kind", "recipe", "storage_dir", "status", "error",
+                "benchmark_job_id", "created_at", "finished_at",
+            )}
+            record["schema_version"] = 1
+            temporary = directory / ("job-" + secrets.token_hex(8) + ".tmp")
+            with temporary.open("x", encoding="utf-8") as stream:
+                created = True
+                json.dump(record, stream, indent=2)
+                stream.write("\n")
+            temporary.replace(path)
+        except (OSError, UIError) as error:
+            if required:
+                raise UIError("Could not save the managed run history; no run was started.") from error
+            job["history_warning"] = "Could not save the latest managed history. Benchmark evidence is stored separately."
+        finally:
+            if temporary is not None and created:
+                with contextlib.suppress(OSError):
+                    temporary.unlink(missing_ok=True)
+
+    def _recover_runs(self) -> None:
+        # Read only: restarting never rewrites old records or resumes a process.
+        for directory in self.storage.glob("mrun-*"):
+            try:
+                path = self._run_directory(directory.name) / "job.json"
+                if path.is_symlink() or path.stat().st_size > 64 * 1024:
+                    continue
+                record = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(record, dict) or type(record.get("schema_version")) is not int or record["schema_version"] != 1:
+                    continue
+                if record.get("id") != directory.name or not isinstance(record.get("kind"), str) or record["kind"] not in {"execute", "smoke"}:
+                    continue
+                if not isinstance(record.get("status"), str) or record["status"] not in TERMINAL | MANAGED_JOB_ACTIVE:
+                    continue
+                if any(not isinstance(record.get(key), str) for key in ("recipe", "storage_dir", "created_at")):
+                    continue
+                datetime.fromisoformat(record["created_at"])
+                if any(record.get(key) is not None and not isinstance(record[key], str) for key in ("error", "finished_at")):
+                    continue
+                if record.get("finished_at"):
+                    datetime.fromisoformat(record["finished_at"])
+                child = record.get("benchmark_job_id")
+                if child is not None and (not isinstance(child, str) or not JOB_ID.fullmatch(child)):
+                    continue
+                job = {key: record.get(key) for key in (
+                    "id", "kind", "recipe", "storage_dir", "status", "error",
+                    "benchmark_job_id", "created_at", "finished_at",
+                )}
+                job.update(result=None, recovered=True)
+                if job["status"] in MANAGED_JOB_ACTIVE:
+                    job["status"] = "interrupted"
+                    job["finished_at"] = None  # no invented completion time
+                    job["error"] = "The panel stopped before this managed run finished. It has not been resumed; inspect the saved logs."
+                self.run_jobs[job["id"]] = job
+            except (OSError, ValueError, UIError):
+                continue
+
+    def _history_jobs(self) -> dict[str, dict]:
+        """Join by saved job ID only. Old log-only mrun directories are not guessed."""
+        benchmarks = {job["id"]: job for job in self.benchmark_controller.listing()}
+        jobs = {key: dict(value) for key, value in self.run_jobs.items()}
+        linked = {job.get("benchmark_job_id") for job in jobs.values()}
+        for job in jobs.values():
+            child = job.get("benchmark_job_id")
+            if child:
+                bench = benchmarks.get(child)
+                if bench is None:
+                    job.update(status="unavailable", result=None,
+                               error="The saved benchmark job is missing. Its results cannot be reopened.")
+                else:
+                    job.update(model=bench.get("model"), profile=bench.get("profile"),
+                               execution_device=bench.get("execution_device"))
+                    if job["status"] == "completed":
+                        job["result"] = bench.get("summary")
+            if job["status"] == "completed" and job["kind"] == "execute" and not job.get("result"):
+                job.update(status="unavailable", error="No completed measurements are available for this saved run.")
+        for child, bench in benchmarks.items():
+            if child in linked or not JOB_ID.fullmatch(child) or bench.get("status") not in TERMINAL:
+                continue
+            job_id = "saved-" + child
+            jobs[job_id] = {
+                "id": job_id, "kind": "execute", "recipe": None, "storage_dir": "",
+                "status": bench["status"], "error": bench.get("error"),
+                "benchmark_job_id": child, "result": bench.get("summary"),
+                "created_at": bench["created_at"], "finished_at": bench.get("finished_at"),
+                "model": bench.get("model"), "profile": bench.get("profile"),
+                "execution_device": bench.get("execution_device"), "saved_local": True,
+            }
+            if bench["status"] == "completed" and not bench.get("summary"):
+                jobs[job_id].update(status="unavailable", error="No completed measurements are available for this saved run.")
+        return jobs
 
     # -- recipes and defaults -------------------------------------------------
 
@@ -261,7 +377,7 @@ class ManagedController:
     # -- smoke / execute -------------------------------------------------------
 
     def _log_path(self, job_id: str) -> Path:
-        directory = self.storage / job_id
+        directory = self._run_directory(job_id)
         directory.mkdir(parents=True, exist_ok=True)
         return directory / "server.log"
 
@@ -298,6 +414,7 @@ class ManagedController:
                 "created_at": datetime.now(UTC).isoformat(),
                 "finished_at": None,
             }
+            self._save_run(job, required=True)
             self.run_jobs[job_id] = job
         self._remember_selection(recipe_id, storage_dir)
         threading.Thread(target=self._run_managed, args=(job, storage_dir, mode), daemon=True).start()
@@ -317,6 +434,7 @@ class ManagedController:
                         raise UIError("The managed run was cancelled before the server became ready.")
                     self.processes[job["id"]] = process
                     job["status"] = "waiting_ready"
+                    self._save_run(job)
                 launcher.wait_for_ready(endpoint, recipe["model_id"], process)
 
                 if mode == "smoke":
@@ -334,6 +452,7 @@ class ManagedController:
                     if job["status"] == "cancelling":
                         raise UIError("The managed run was cancelled before the benchmark started.")
                     job["status"] = "running_benchmark"
+                    self._save_run(job)
                 benchmark_job = self.benchmark_controller.start(
                     {
                         "endpoint": endpoint,
@@ -345,6 +464,7 @@ class ManagedController:
                 )
                 with self.lock:
                     job["benchmark_job_id"] = benchmark_job["id"]
+                    self._save_run(job)
                 # Fill in every field the reviewed recipe already establishes with
                 # certainty, so packaging this run (from the guided page's "Share
                 # results" screen or the advanced panel) never requires typing a
@@ -385,22 +505,25 @@ class ManagedController:
             with self.lock:
                 self.processes.pop(job["id"], None)
                 job["finished_at"] = datetime.now(UTC).isoformat()
+                self._save_run(job)
 
     def run_job_detail(self, job_id: str) -> dict:
         with self.lock:
-            job = self.run_jobs.get(job_id)
+            job = self._history_jobs().get(job_id)
             if job is None:
                 raise UIError("Unknown managed run.", 404)
             job = dict(job)
-        log_path = self.storage / job_id / "server.log"
-        if log_path.is_file():
+        log_path = self._run_directory(job_id) / "server.log" if MANAGED_RUN_ID.fullmatch(job_id) else None
+        if log_path is not None and not log_path.is_symlink() and log_path.is_file():
             with contextlib.suppress(OSError):
-                job["server_log"] = log_path.read_text(encoding="utf-8", errors="replace")[-8000:]
+                with log_path.open("rb") as stream:
+                    stream.seek(max(0, log_path.stat().st_size - 8000))
+                    job["server_log"] = stream.read(8000).decode("utf-8", errors="replace")
         return job
 
     def run_job_list(self) -> list[dict]:
         with self.lock:
-            return [dict(job) for job in sorted(self.run_jobs.values(), key=lambda j: j["created_at"], reverse=True)]
+            return sorted(self._history_jobs().values(), key=lambda j: (j["created_at"], j["id"]), reverse=True)
 
     def cancel_run(self, job_id: str) -> dict:
         with self.lock:
@@ -410,6 +533,7 @@ class ManagedController:
             if job["status"] not in MANAGED_JOB_ACTIVE:
                 raise UIError("Only an active managed run can be cancelled.", 409)
             job["status"] = "cancelling"
+            self._save_run(job)
             benchmark_job_id = job.get("benchmark_job_id")
             process = self.processes.get(job_id)
         if benchmark_job_id:

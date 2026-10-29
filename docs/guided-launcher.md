@@ -44,6 +44,37 @@ fully available at `/advanced` in the same panel, and from the CLI.
   no established WSL convention folder is found, it suggests a per-user
   folder under your home directory, editable before you confirm.
 
+## Returning to saved results
+
+The guided page lists saved runs under **Choose your test**, including after
+the panel restarts. Select a completed benchmark to reopen its measurements,
+then **Prepare submission** to review its recorded metadata, validation and
+submission status. Reopening never starts inference, downloads a model,
+packages evidence or uploads it. Completed runs that fail acceptance remain
+rejected; the existing packaging and validation rules still apply.
+
+New managed runs save versioned UI history in
+`.omobench-runs/ui/managed/mrun-<id>/job.json`, separate from benchmark evidence.
+Records link to the underlying benchmark job by ID. A run recorded as active
+when the panel stopped is shown as interrupted, without inventing a completion
+time, claiming ownership of an old process, or restarting it. Missing benchmark
+records are reported as unavailable. Invalid history records are ignored.
+
+Older panel builds saved benchmark jobs but not managed-run records. Those
+jobs now appear as **Saved local run**, using their original model, profile,
+device and measurements. Log-only `mrun-*` directories cannot establish which
+benchmark they belong to and are not matched by timestamps or guesses. Standalone
+CLI run directories without a panel job record are not imported automatically.
+The guided packaging form remains for recorded llama.cpp CPU runs; other saved
+runs use the advanced metadata form for packaging. Already validated bundles
+can be reviewed in either panel. A server readiness check is not a benchmark
+and offers no measurements or sharing action.
+
+History recovery reads existing records without rewriting them. New history
+write failures after a run starts do not change benchmark execution or evidence;
+the run response carries a history warning. Packaging and submission remain
+explicit actions and require a fresh submission review after restart.
+
 ## Why WSL/Linux, not native Windows
 
 Like the rest of OmoBench, benchmark execution needs Linux, macOS, or WSL2,
