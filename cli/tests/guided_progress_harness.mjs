@@ -21,6 +21,8 @@ function makeElement(id) {
     disabled: false,
     checked: false,
     value: "",
+    children: [],
+    dataset: {},
     style: {},
     scrollTop: 0,
     scrollHeight: 0,
@@ -36,8 +38,8 @@ function makeElement(id) {
     removeAttribute: (name) => { delete attributes[name]; },
     addEventListener: (name, handler) => { listeners[name] = handler; },
     trigger: (name) => listeners[name]?.(),
-    append: () => {},
-    replaceChildren: () => {},
+    append(...items) { this.children.push(...items); },
+    replaceChildren(...items) { this.children = items; },
     scrollIntoView: () => {},
     focus: () => {},
     querySelectorAll: () => [],
@@ -46,13 +48,18 @@ function makeElement(id) {
 }
 
 const elements = new Map();
+const stepTabs = ["choose", "run", "results", "share"].map((screen) => {
+  const tab = makeElement(`step-${screen}`);
+  tab.dataset.screen = screen;
+  return tab;
+});
 const document = {
   getElementById: (id) => {
     if (!elements.has(id)) elements.set(id, makeElement(id));
     return elements.get(id);
   },
   createElement: (tag) => makeElement(`created:${tag}`),
-  querySelectorAll: () => [],
+  querySelectorAll: (selector) => selector === ".step-tab" ? stepTabs : [],
   addEventListener: () => {},
 };
 
@@ -206,5 +213,155 @@ results.comparisonDownload = {
   type: downloads[0].blob.type,
   content: await downloads[0].blob.text(),
   unchanged: fixtureBefore === JSON.stringify(reviewedFixture),
+};
+// Reopening history drives the shipped navigation and sharing code. No POST
+// (package, upload or execution) may be caused by opening a saved result.
+await Promise.resolve();
+const savedSummary = { results: {
+  latency_ms: { ttft: { p50: 10, p95: 20 }, inter_token: { p50: 30 } },
+  output_tokens_per_second: 2, total_tokens_per_second: 4, requests_per_second: 0.1,
+  requests: { succeeded: 29, attempted: 34 }, error_rate_percent: 14.71,
+} };
+const saved = {
+  id: "saved-job-aaaaaaaaaaaaaaaa", benchmark_job_id: "job-aaaaaaaaaaaaaaaa",
+  kind: "execute", saved_local: true, recipe: null, storage_dir: "", status: "completed",
+  created_at: "2026-10-26T10:00:00Z", finished_at: "2026-10-26T11:00:00Z",
+  model: "Fixture/Model", profile: "chat-small-v1", execution_device: "gpu", result: savedSummary,
+};
+let savedDetail = {
+  ...saved, id: saved.benchmark_job_id, summary: savedSummary, framework: "vllm", framework_version: "fixture",
+  validation: { valid: false, errors: ["acceptance: not enough successful requests"] },
+};
+const historyRequests = [];
+context.fetch = async (path, options) => {
+  historyRequests.push({ path, method: options?.method || "GET" });
+  let data;
+  if (path === "/api/managed/runs") data = [saved];
+  else if (path === "/api/managed/setup-jobs") data = [];
+  else if (path === `/api/managed/runs/${saved.id}`) data = saved;
+  else if (path.endsWith("/telemetry")) data = { available: false };
+  else if (path === `/api/runs/${saved.benchmark_job_id}`) data = savedDetail;
+  else throw new Error(`unexpected request: ${path}`);
+  return { ok: true, json: async () => data };
+};
+await context.loadRecentRuns();
+const get = (id) => document.getElementById(id);
+results.historyRow = get("recent-list").children[0].textContent;
+await get("recent-list").children[0].trigger("click");
+results.historyOpened = {
+  resultVisible: !get("screen-results").hidden,
+  status: get("results-status").textContent,
+  jobId: runInContext("benchmarkJobId", context),
+};
+await context.enterShareScreen();
+results.historyRejected = {
+  message: get("validation-result").textContent,
+  reviewHidden: get("prepare-review-button").hidden,
+  facts: get("package-facts").children.map((el) => el.textContent),
+  packageDisabled: get("package-button").disabled,
+  advancedNoteVisible: !get("advanced-package-note").hidden,
+};
+// A different, not-yet-validated run must not inherit a visible review button.
+get("prepare-review-button").hidden = false;
+savedDetail = { ...savedDetail, validation: null };
+await context.enterShareScreen();
+results.historyUncheckedReviewHidden = get("prepare-review-button").hidden;
+savedDetail = { ...savedDetail, execution_device: "cpu", framework: "llama.cpp" };
+await context.enterShareScreen();
+results.historyCpuPackageEnabled = !get("package-button").disabled;
+// Reopening a stopped run clears the previous completed selection and preview.
+saved.status = "interrupted";
+saved.finished_at = null;
+saved.error = "The panel stopped before this managed run finished.";
+await context.openTerminalRun(saved.id);
+results.historyInterrupted = {
+  heading: get("progress-heading").textContent,
+  endTime: get("elapsed").textContent,
+  finishedJob: runInContext("finishedManagedJob", context),
+  preview: runInContext("preview", context),
+  bar: barState(),
+};
+saved.kind = "smoke"; saved.status = "completed"; saved.benchmark_job_id = null;
+saved.result = { message: "No inference was performed" };
+await context.openTerminalRun(saved.id);
+results.historySmoke = { heading: get("progress-heading").textContent, resultVisible: !get("screen-results").hidden };
+results.historyReadOnly = historyRequests.every((request) => request.method === "GET");
+
+// Real click handlers: history -> tab 2 -> recipe card. The next-run draft
+// must remain separate from historical metadata, including absent old paths.
+saved.kind = "execute"; saved.status = "completed";
+saved.benchmark_job_id = "job-aaaaaaaaaaaaaaaa"; saved.result = savedSummary;
+const recipeFixture = {
+  id: "fixture-new-test", title: "New test", model_id: "Fixture/New", quantization: "Q4",
+  execution_device: "cpu", benchmark_profile: "chat-small-v1", max_duration_seconds: 900,
+};
+const historyFetch = context.fetch;
+const reviewRequests = [];
+context.fetch = async (path, options) => {
+  if (path === "/api/managed/recipes") return { ok: true, json: async () => ({ recipes: [recipeFixture], default_storage_dir: "/fixture/default" }) };
+  if (path === "/api/managed/review") {
+    const body = JSON.parse(options.body);
+    reviewRequests.push(body);
+    return { ok: true, json: async () => ({
+      recipe: recipeFixture, storage_dir: body.storage_dir, storage_dir_exists: true,
+      files: [], already_installed: { installed: true, valid: true },
+      platform: { ok: true, message: "Fixture ready" }, has_enough_space: true,
+      free_space_bytes: 100000, required_bytes: 1000,
+    }) };
+  }
+  return historyFetch(path, options);
+};
+await context.loadRecipes();
+runInContext("selectedRecipeId = null;", context);
+await context.loadRecentRuns();
+await get("recent-list").children[0].trigger("click");
+await stepTabs[1].trigger("click");
+results.historyPrepareWithoutSelection = {
+  choosing: !get("screen-choose").hidden,
+  notice: get("notice").textContent,
+  currentTab: stepTabs.find((tab) => tab.classList.contains("current"))?.dataset.screen,
+};
+await get("recipe-list").children[0].trigger("click");
+results.historyDefaultStorage = {
+  value: get("storage-dir").value,
+  review: reviewRequests.at(-1),
+  startEnabled: !get("start-button").disabled,
+  storageError: !get("storage-error").hidden,
+};
+// A user-reviewed custom location must survive both a legacy saved row and
+// a managed row whose historic recipe and storage belong to a different run.
+get("storage-dir").value = "/fixture/custom";
+await get("recheck-button").trigger("click");
+for (const historicRecipe of [null, "removed-historic-recipe"]) {
+  saved.recipe = historicRecipe;
+  saved.storage_dir = historicRecipe ? "/fixture/old-run" : "";
+  await context.loadRecentRuns();
+  await get("recent-list").children[0].trigger("click");
+  await stepTabs[1].trigger("click");
+  results[historicRecipe ? "historyManagedDraft" : "historyLegacyDraft"] = {
+    selectedRecipe: runInContext("selectedRecipeId", context),
+    value: get("storage-dir").value,
+    summaryVisible: !get("summary-panel").hidden && !get("screen-run").hidden,
+    progressHidden: get("progress-panel").hidden,
+    review: reviewRequests.at(-1),
+  };
+}
+results.historyNoExecution = historyRequests.every((request) => request.method === "GET");
+// Historical display/export must not borrow metadata from the selected new test.
+saved.recipe = null;
+delete saved.model; delete saved.profile; delete saved.execution_device;
+await context.openTerminalRun(saved.id);
+results.historyUnknownCeiling = get("fact-max-duration").textContent;
+await get("download-summary-button").trigger("click");
+results.historyUnknownExport = JSON.parse(await downloads.at(-1).blob.text());
+// Returning to a live dashboard must not replace it with a preparation review.
+runInContext('activeKind = "run"; activeJobId = "mrun-fixture";', context);
+const reviewsBeforeActiveTab = reviewRequests.length;
+get("summary-panel").hidden = true;
+get("progress-panel").hidden = false;
+await stepTabs[1].trigger("click");
+results.historyActiveTab = {
+  noReview: reviewRequests.length === reviewsBeforeActiveTab,
+  progressVisible: !get("progress-panel").hidden && !get("screen-run").hidden,
 };
 process.stdout.write(JSON.stringify(results));

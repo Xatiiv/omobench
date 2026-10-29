@@ -38,6 +38,7 @@
         </section>
         <section class="panel" id="recent-panel" hidden>
           <div class="section-head"><div><h2>Previous runs on this machine</h2></div></div>
+          <p class="hint">Reopen saved results to review or share them without running the benchmark again. Completion and publication eligibility are separate checks.</p>
           <div id="recent-list"></div>
         </section>
       </section>
@@ -158,7 +159,7 @@
           <ul class="status-checklist" id="status-checklist"></ul>
 
           <details id="technical-details-package" open>
-            <summary>Technical details <span class="hint">Filled in automatically from the verified recipe</span></summary>
+            <summary>Technical details <span class="hint">Recorded with this run; review before packaging</span></summary>
             <dl class="kv" id="package-facts"></dl>
             <label class="check"><input id="edit-details-toggle" type="checkbox"><span>These look wrong, let me edit them</span></label>
             <div id="package-editable" hidden>
@@ -199,9 +200,10 @@
           </div>
           <form id="submit-form">
             <label>Submitter<input id="submitter" required spellcheck="false" placeholder="GitHub username or organization">
-              <span class="hint">The only detail this run's verified recipe cannot already know.</span></label>
+              <span class="hint">Review the recorded technical details above before packaging.</span></label>
             <div class="actions"><button id="package-button" type="submit">Package &amp; validate</button></div>
           </form>
+          <p id="advanced-package-note" class="hint" hidden>This run needs the full metadata form to package it. Open the <a href="/advanced">advanced panel</a> and select the same saved run. An already validated bundle can still be reviewed here.</p>
           <p id="validation-result" class="notice" role="status" hidden></p>
 
           <button id="prepare-review-button" type="button" class="secondary" hidden>Review submission files</button>

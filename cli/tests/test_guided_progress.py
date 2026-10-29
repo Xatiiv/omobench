@@ -148,5 +148,73 @@ class GuidedComparisonExportTests(unittest.TestCase):
         })
 
 
+class GuidedHistoryDisplayTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.states = _render_states()
+
+    def test_saved_run_opens_results_and_share_without_execution_or_upload(self):
+        self.assertIn("Saved local run: Fixture/Model", self.states["historyRow"])
+        opened = self.states["historyOpened"]
+        self.assertTrue(opened["resultVisible"])
+        self.assertEqual(opened["jobId"], "job-aaaaaaaaaaaaaaaa")
+        self.assertNotIn("CPU", opened["status"])
+        self.assertIn("publication requirements", opened["status"])
+        self.assertTrue(self.states["historyReadOnly"])
+
+    def test_saved_rejection_and_recorded_device_framework_remain_visible(self):
+        state = self.states["historyRejected"]
+        self.assertIn("acceptance:", state["message"])
+        self.assertTrue(state["reviewHidden"])
+        self.assertIn("GPU", state["facts"])
+        self.assertIn("vllm fixture", state["facts"])
+        self.assertTrue(state["packageDisabled"])
+        self.assertTrue(state["advancedNoteVisible"])
+        self.assertTrue(self.states["historyCpuPackageEnabled"])
+        self.assertTrue(self.states["historyUncheckedReviewHidden"])
+
+    def test_interrupted_run_clears_previous_completion_and_submission_review(self):
+        state = self.states["historyInterrupted"]
+        self.assertEqual(state["heading"], "Benchmark interrupted")
+        self.assertEqual(state["endTime"], "End time unknown")
+        self.assertIsNone(state["finishedJob"])
+        self.assertIsNone(state["preview"])
+        self.assertNotEqual(state["bar"]["ariaValueNow"], "100")
+        self.assertFalse(state["bar"]["indeterminate"])
+
+    def test_server_check_is_not_rendered_as_benchmark_measurements(self):
+        self.assertIn("no benchmark measurements", self.states["historySmoke"]["heading"])
+        self.assertFalse(self.states["historySmoke"]["resultVisible"])
+
+    def test_prepare_tab_without_a_selection_explains_and_opens_test_choices(self):
+        state = self.states["historyPrepareWithoutSelection"]
+        self.assertTrue(state["choosing"])
+        self.assertEqual(state["currentTab"], "choose")
+        self.assertIn("Choose a test", state["notice"])
+
+    def test_recipe_after_history_uses_the_suggested_storage_location(self):
+        state = self.states["historyDefaultStorage"]
+        self.assertEqual(state["value"], "/fixture/default")
+        self.assertEqual(state["review"], {"recipe": "fixture-new-test", "storage_dir": "/fixture/default"})
+        self.assertTrue(state["startEnabled"])
+        self.assertFalse(state["storageError"])
+
+    def test_legacy_and_managed_history_preserve_the_new_run_draft(self):
+        for key in ("historyLegacyDraft", "historyManagedDraft"):
+            with self.subTest(kind=key):
+                state = self.states[key]
+                self.assertEqual(state["selectedRecipe"], "fixture-new-test")
+                self.assertEqual(state["value"], "/fixture/custom")
+                self.assertTrue(state["summaryVisible"])
+                self.assertTrue(state["progressHidden"])
+                self.assertEqual(state["review"], {"recipe": "fixture-new-test", "storage_dir": "/fixture/custom"})
+        self.assertTrue(self.states["historyNoExecution"])
+        self.assertEqual(self.states["historyUnknownCeiling"], "N/A")
+        for field in ("model", "profile", "execution_device"):
+            self.assertNotIn(field, self.states["historyUnknownExport"])
+        self.assertTrue(self.states["historyActiveTab"]["noReview"])
+        self.assertTrue(self.states["historyActiveTab"]["progressVisible"])
+
+
 if __name__ == "__main__":
     unittest.main()
