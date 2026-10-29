@@ -22,6 +22,7 @@ function makeElement(id) {
     checked: false,
     value: "",
     children: [],
+    dataset: {},
     style: {},
     scrollTop: 0,
     scrollHeight: 0,
@@ -47,13 +48,18 @@ function makeElement(id) {
 }
 
 const elements = new Map();
+const stepTabs = ["choose", "run", "results", "share"].map((screen) => {
+  const tab = makeElement(`step-${screen}`);
+  tab.dataset.screen = screen;
+  return tab;
+});
 const document = {
   getElementById: (id) => {
     if (!elements.has(id)) elements.set(id, makeElement(id));
     return elements.get(id);
   },
   createElement: (tag) => makeElement(`created:${tag}`),
-  querySelectorAll: () => [],
+  querySelectorAll: (selector) => selector === ".step-tab" ? stepTabs : [],
   addEventListener: () => {},
 };
 
@@ -280,4 +286,82 @@ saved.result = { message: "No inference was performed" };
 await context.openTerminalRun(saved.id);
 results.historySmoke = { heading: get("progress-heading").textContent, resultVisible: !get("screen-results").hidden };
 results.historyReadOnly = historyRequests.every((request) => request.method === "GET");
+
+// Real click handlers: history -> tab 2 -> recipe card. The next-run draft
+// must remain separate from historical metadata, including absent old paths.
+saved.kind = "execute"; saved.status = "completed";
+saved.benchmark_job_id = "job-aaaaaaaaaaaaaaaa"; saved.result = savedSummary;
+const recipeFixture = {
+  id: "fixture-new-test", title: "New test", model_id: "Fixture/New", quantization: "Q4",
+  execution_device: "cpu", benchmark_profile: "chat-small-v1", max_duration_seconds: 900,
+};
+const historyFetch = context.fetch;
+const reviewRequests = [];
+context.fetch = async (path, options) => {
+  if (path === "/api/managed/recipes") return { ok: true, json: async () => ({ recipes: [recipeFixture], default_storage_dir: "/fixture/default" }) };
+  if (path === "/api/managed/review") {
+    const body = JSON.parse(options.body);
+    reviewRequests.push(body);
+    return { ok: true, json: async () => ({
+      recipe: recipeFixture, storage_dir: body.storage_dir, storage_dir_exists: true,
+      files: [], already_installed: { installed: true, valid: true },
+      platform: { ok: true, message: "Fixture ready" }, has_enough_space: true,
+      free_space_bytes: 100000, required_bytes: 1000,
+    }) };
+  }
+  return historyFetch(path, options);
+};
+await context.loadRecipes();
+runInContext("selectedRecipeId = null;", context);
+await context.loadRecentRuns();
+await get("recent-list").children[0].trigger("click");
+await stepTabs[1].trigger("click");
+results.historyPrepareWithoutSelection = {
+  choosing: !get("screen-choose").hidden,
+  notice: get("notice").textContent,
+  currentTab: stepTabs.find((tab) => tab.classList.contains("current"))?.dataset.screen,
+};
+await get("recipe-list").children[0].trigger("click");
+results.historyDefaultStorage = {
+  value: get("storage-dir").value,
+  review: reviewRequests.at(-1),
+  startEnabled: !get("start-button").disabled,
+  storageError: !get("storage-error").hidden,
+};
+// A user-reviewed custom location must survive both a legacy saved row and
+// a managed row whose historic recipe and storage belong to a different run.
+get("storage-dir").value = "/fixture/custom";
+await get("recheck-button").trigger("click");
+for (const historicRecipe of [null, "removed-historic-recipe"]) {
+  saved.recipe = historicRecipe;
+  saved.storage_dir = historicRecipe ? "/fixture/old-run" : "";
+  await context.loadRecentRuns();
+  await get("recent-list").children[0].trigger("click");
+  await stepTabs[1].trigger("click");
+  results[historicRecipe ? "historyManagedDraft" : "historyLegacyDraft"] = {
+    selectedRecipe: runInContext("selectedRecipeId", context),
+    value: get("storage-dir").value,
+    summaryVisible: !get("summary-panel").hidden && !get("screen-run").hidden,
+    progressHidden: get("progress-panel").hidden,
+    review: reviewRequests.at(-1),
+  };
+}
+results.historyNoExecution = historyRequests.every((request) => request.method === "GET");
+// Historical display/export must not borrow metadata from the selected new test.
+saved.recipe = null;
+delete saved.model; delete saved.profile; delete saved.execution_device;
+await context.openTerminalRun(saved.id);
+results.historyUnknownCeiling = get("fact-max-duration").textContent;
+await get("download-summary-button").trigger("click");
+results.historyUnknownExport = JSON.parse(await downloads.at(-1).blob.text());
+// Returning to a live dashboard must not replace it with a preparation review.
+runInContext('activeKind = "run"; activeJobId = "mrun-fixture";', context);
+const reviewsBeforeActiveTab = reviewRequests.length;
+get("summary-panel").hidden = true;
+get("progress-panel").hidden = false;
+await stepTabs[1].trigger("click");
+results.historyActiveTab = {
+  noReview: reviewRequests.length === reviewsBeforeActiveTab,
+  progressVisible: !get("progress-panel").hidden && !get("screen-run").hidden,
+};
 process.stdout.write(JSON.stringify(results));

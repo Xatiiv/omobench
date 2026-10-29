@@ -186,6 +186,35 @@ class GuidedHistoryDisplayTests(unittest.TestCase):
         self.assertIn("no benchmark measurements", self.states["historySmoke"]["heading"])
         self.assertFalse(self.states["historySmoke"]["resultVisible"])
 
+    def test_prepare_tab_without_a_selection_explains_and_opens_test_choices(self):
+        state = self.states["historyPrepareWithoutSelection"]
+        self.assertTrue(state["choosing"])
+        self.assertEqual(state["currentTab"], "choose")
+        self.assertIn("Choose a test", state["notice"])
+
+    def test_recipe_after_history_uses_the_suggested_storage_location(self):
+        state = self.states["historyDefaultStorage"]
+        self.assertEqual(state["value"], "/fixture/default")
+        self.assertEqual(state["review"], {"recipe": "fixture-new-test", "storage_dir": "/fixture/default"})
+        self.assertTrue(state["startEnabled"])
+        self.assertFalse(state["storageError"])
+
+    def test_legacy_and_managed_history_preserve_the_new_run_draft(self):
+        for key in ("historyLegacyDraft", "historyManagedDraft"):
+            with self.subTest(kind=key):
+                state = self.states[key]
+                self.assertEqual(state["selectedRecipe"], "fixture-new-test")
+                self.assertEqual(state["value"], "/fixture/custom")
+                self.assertTrue(state["summaryVisible"])
+                self.assertTrue(state["progressHidden"])
+                self.assertEqual(state["review"], {"recipe": "fixture-new-test", "storage_dir": "/fixture/custom"})
+        self.assertTrue(self.states["historyNoExecution"])
+        self.assertEqual(self.states["historyUnknownCeiling"], "N/A")
+        for field in ("model", "profile", "execution_device"):
+            self.assertNotIn(field, self.states["historyUnknownExport"])
+        self.assertTrue(self.states["historyActiveTab"]["noReview"])
+        self.assertTrue(self.states["historyActiveTab"]["progressVisible"])
+
 
 if __name__ == "__main__":
     unittest.main()

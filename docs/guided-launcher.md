@@ -52,6 +52,10 @@ then **Prepare submission** to review its recorded metadata, validation and
 submission status. Reopening never starts inference, downloads a model,
 packages evidence or uploads it. Completed runs that fail acceptance remain
 rejected; the existing packaging and validation rules still apply.
+Browsing history preserves the recipe and storage folder selected for the next
+run. **Prepare and run** returns to that selection with a fresh read-only review,
+or explains that you need to choose a test if none is selected. Historical
+recipe metadata is used only to display that historical run.
 
 New managed runs save versioned UI history in
 `.omobench-runs/ui/managed/mrun-<id>/job.json`, separate from benchmark evidence.

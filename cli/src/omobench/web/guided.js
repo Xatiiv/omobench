@@ -114,7 +114,17 @@ function showScreen(name) {
 
 document.querySelectorAll(".step-tab").forEach((tab) => tab.addEventListener("click", () => action(async () => {
   const target = tab.dataset.screen;
-  if (target === "run" && !selectedRecipeId) return;
+  if (target === "run") {
+    if (activeKind && activeJobId) {
+      showScreen("run");
+    } else if (recipesById[selectedRecipeId]) {
+      await chooseRecipe(selectedRecipeId);
+    } else {
+      notice("Choose a test below to prepare a new benchmark. Your saved results remain available.");
+      showScreen("choose");
+    }
+    return;
+  }
   if ((target === "results" || target === "share") && !finishedManagedJob) {
     notice("Choose a saved run below to reopen its results. Only completed benchmarks can be shared.");
     showScreen("choose");
@@ -163,6 +173,7 @@ async function loadRecipes() {
 
 async function chooseRecipe(recipeId) {
   selectedRecipeId = recipeId;
+  notice("");
   showScreen("run");
   $("summary-panel").hidden = false;
   $("progress-panel").hidden = true;
@@ -210,7 +221,8 @@ async function loadRecentRuns() {
       : recipe ? recipe.title : job.recipe;
     row.textContent = `${label} · ${job.status} · ${new Date(job.created_at).toLocaleString()}`;
     row.addEventListener("click", () => action(async () => {
-      selectedRecipeId = job.recipe; storageDir = job.storage_dir;
+      // History describes a past run, not the next-run draft. In particular,
+      // legacy rows have no recipe/storage and must not erase current choices.
       // Fetch fresh status, rather than trust a list captured before packaging
       // or submission. Failed/interrupted jobs never inherit an earlier result.
       await openTerminalRun(job.id);
@@ -583,7 +595,7 @@ function renderProgress(setupJob, runJob, benchJob, telemetry) {
   $("cancel-button").disabled = cancelling;
   $("cancel-button").textContent = cancelling ? "Cancelling…" : "Cancel";
 
-  const recipe = recipesById[selectedRecipeId];
+  const recipe = recipesById[runJob ? runJob.recipe : setupJob ? setupJob.recipe : selectedRecipeId];
   const telemetryOk = telemetry && telemetry.available;
   const elapsedSeconds = telemetryOk && typeof telemetry.elapsed_seconds === "number"
     ? telemetry.elapsed_seconds
@@ -1089,7 +1101,7 @@ $("start-over-button").addEventListener("click", () => action(async () => { rese
 $("run-another-button").addEventListener("click", () => action(async () => { resetFlow(); await loadRecipes(); await loadRecentRuns(); }));
 $("go-share-button").addEventListener("click", () => action(async () => { await enterShareScreen(); }));
 $("download-summary-button").addEventListener("click", () => action(async () => {
-  const recipe = recipesById[selectedRecipeId];
+  const recipe = recipesById[finishedManagedJob.recipe];
   const summary = {
     kind: "omobench-local-summary", execution_device: finishedManagedJob.execution_device || recipe?.execution_device,
     model: finishedManagedJob.model || recipe?.model_id, profile: finishedManagedJob.profile || recipe?.benchmark_profile,
