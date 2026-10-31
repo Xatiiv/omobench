@@ -2,23 +2,8 @@
 
 const $ = (id) => document.getElementById(id);
 
-// "warmup"/"benchmarking"/"cooldown"/"saving" are only ever reached with real
-// support from GuideLLM's own accumulator.timings.status and progress hooks
-// (see telemetry.py); when telemetry is unavailable, execution collapses to
-// the generic "benchmarking" -- never invented.
-const STAGES = [
-  { key: "checking", label: "Checking system" },
-  { key: "downloading", label: "Downloading verified files" },
-  { key: "verifying", label: "Verifying files" },
-  { key: "loading_model", label: "Loading the model" },
-  { key: "warmup", label: "Warming up" },
-  { key: "benchmarking", label: "Running the benchmark" },
-  { key: "cooldown", label: "Cooling down" },
-  { key: "saving", label: "Saving results" },
-];
 const SETUP_ACTIVE = new Set(["preparing", "cancelling"]);
 const RUN_ACTIVE = new Set(["starting_server", "waiting_ready", "running_benchmark", "cancelling"]);
-const STALE_TELEMETRY_SECONDS = 20;
 
 let setup = null;
 let recipes = [];
@@ -32,12 +17,9 @@ let benchmarkJobId = null;
 let finishedManagedJob = null; // last terminal managed run job detail, with .result
 let flowStartedAt = null;
 let lastKnownStageIndex = 0;
-let lastKnownPercent = null; // real remaining_fraction-derived percent, frozen (never reset to 0, never advanced to 100) on failure/cancellation
 let preview = null;
 let pending = false;
 let timers = [];
-let logAutoFollow = true;
-let lastLogText = "";
 
 const incoming = new URLSearchParams(location.hash.slice(1)).get("token");
 if (incoming) {
@@ -45,6 +27,14 @@ if (incoming) {
   history.replaceState(null, "", location.pathname);
 }
 const token = sessionStorage.getItem("omobench-token") || "";
+
+// One shared dashboard component, the same one the advanced panel mounts.
+const dashboard = new BenchmarkDashboard($("dashboard-mount"), {
+  stages: BenchmarkDashboard.MANAGED_STAGES,
+  stageNote: "From preparation to saved evidence",
+  downloadProgress: true,
+  serverLog: true,
+});
 
 function notice(message, error = false) {
   $("notice").textContent = message;
@@ -78,12 +68,6 @@ function formatBytes(value) {
   let size = value, index = 0;
   while (size >= 1024 && index < units.length - 1) { size /= 1024; index += 1; }
   return `${size.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
-}
-
-function formatElapsed(startedAt) {
-  if (!startedAt) return "";
-  const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
-  return `${Math.floor(seconds / 60)}m ${seconds % 60}s elapsed`;
 }
 
 function download(blob, name) {
@@ -196,17 +180,13 @@ async function loadRecentRuns() {
     activeJobId = active.id;
     flowStartedAt = new Date(active.created_at).getTime();
     lastKnownStageIndex = 0;
-    lastKnownPercent = null;
-    showScreen("run");
+      showScreen("run");
     $("summary-panel").hidden = true;
     $("progress-panel").hidden = false;
-    $("cancel-button").hidden = false;
-    $("start-over-button").hidden = true;
-    $("run-error").hidden = true;
     const recipe = recipesById[selectedRecipeId];
-    $("dashboard-subtitle").textContent = recipe
-      ? `${recipe.model_id} (${recipe.quantization}) · ${recipe.benchmark_profile} · ${recipe.execution_device.toUpperCase()}`
-      : "";
+    dashboard.prepareForRun({
+      subtitle: recipe ? `${recipe.model_id} (${recipe.quantization}) · ${recipe.benchmark_profile} · ${recipe.execution_device.toUpperCase()}` : "",
+    });
     notice("Reconnected to a run already in progress on this panel. Its graph and progress resume below.");
     pollFlow();
     return;
@@ -343,49 +323,17 @@ function renderSummary(report) {
   $("start-button").dataset.alreadyInstalled = alreadyInstalledValid ? "1" : "";
 }
 
-function stageIndex(key) { return STAGES.findIndex((stage) => stage.key === key); }
-
-function renderStageList(activeStageIndex, cancelling) {
-  const list = $("stage-list");
-  list.replaceChildren();
-  STAGES.forEach((stage, index) => {
-    const li = document.createElement("li");
-    const state = index < activeStageIndex ? "done" : index === activeStageIndex ? (cancelling ? "cancelling" : "active") : "pending";
-    li.className = `stage-item ${state}`;
-    li.textContent = stage.label;
-    list.append(li);
-  });
-}
+function stageIndex(key) { return dashboard.stageIndex(key); }
 
 async function doStart() {
   flowStartedAt = Date.now();
   lastKnownStageIndex = 0;
-  lastKnownPercent = null;
-  $("progress-heading").textContent = "Running";
-  $("elapsed").textContent = "";
-  $("run-error").hidden = true;
-  $("start-over-button").hidden = true;
-  $("cancel-button").hidden = false;
-  $("cancel-button").disabled = false;
-  $("cancel-button").textContent = "Cancel";
   $("summary-panel").hidden = true;
   $("progress-panel").hidden = false;
-  renderStageList(0, false);
-  $("server-log-wrap").hidden = true;
-  lastLogText = "";
-  logAutoFollow = true;
-  $("jump-to-latest-button").hidden = true;
-  $("benchmark-log").textContent = "Waiting…";
-  $("log-connection-status").textContent = "Panel connected · refreshes automatically";
-  inspectedSampleTime = null;
-  renderChart(null);
-  $("chart-empty").textContent = "Waiting for the first measurement…";
-  renderProgressBar(null);
-  renderChart(null);
   const recipe = recipesById[selectedRecipeId];
-  $("dashboard-subtitle").textContent = recipe
-    ? `${recipe.model_id} (${recipe.quantization}) · ${recipe.benchmark_profile} · ${recipe.execution_device.toUpperCase()}`
-    : "";
+  dashboard.prepareForRun({
+    subtitle: recipe ? `${recipe.model_id} (${recipe.quantization}) · ${recipe.benchmark_profile} · ${recipe.execution_device.toUpperCase()}` : "",
+  });
   const alreadyInstalled = $("start-button").dataset.alreadyInstalled === "1";
   if (alreadyInstalled) {
     activeKind = "run";
@@ -404,12 +352,6 @@ async function startExecute() {
   activeKind = "run";
   activeJobId = job.id;
   pollFlow();
-}
-
-function formatDuration(seconds) {
-  if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) return null;
-  const total = Math.max(0, Math.round(seconds));
-  return `${Math.floor(total / 60)}m ${total % 60}s`;
 }
 
 function currentStageKey(setupJob, runJob, telemetry) {
@@ -440,300 +382,32 @@ function currentStageKey(setupJob, runJob, telemetry) {
   return null; // terminal
 }
 
-function renderProgressBar(percent, { complete = false } = {}) {
-  const fill = $("progress-bar-fill"), label = $("progress-bar-label"), wrap = $("progress-bar-wrap");
-  if (percent === null || percent === undefined || !Number.isFinite(percent)) {
-    fill.classList.add("indeterminate");
-    fill.style.width = "";
-    label.textContent = "Progress unavailable for this stage";
-    wrap.setAttribute("aria-valuenow", "0");
-  } else {
-    // 100% is reserved for a run that genuinely finished: execution *and*
-    // local evidence finalization both succeeded (`complete: true`, set only
-    // by the terminal success path). An in-flight run rounds DOWN and is
-    // capped at 99, so a real 99.6% never displays as a finished 100% while
-    // requests are still running.
-    const clamped = complete ? 100 : Math.max(0, Math.min(99, Math.floor(percent)));
-    fill.classList.remove("indeterminate");
-    fill.style.width = `${clamped}%`;
-    label.textContent = `${clamped}%`;
-    wrap.setAttribute("aria-valuenow", String(clamped));
-  }
-}
-
-// Display only finite, observed samples. The chart never creates measurements.
-let chartSamples = [];
-let chartScale = { maxX: 1, maxY: 1 };
-let inspectedSampleTime = null;
-
-function liveNumber(value, unit = "") {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0
-    ? value.toLocaleString(undefined, { maximumFractionDigits: 2 }) + unit : "Pending";
-}
-
-function inspectChartSample(index) {
-  const sample = chartSamples[index];
-  if (!sample) return;
-  const x = 52 + sample.elapsed_seconds / chartScale.maxX * 728;
-  const y = 200 - sample.output_tokens_per_second / chartScale.maxY * 176;
-  $("chart-cursor").setAttribute("x1", x.toFixed(1));
-  $("chart-cursor").setAttribute("x2", x.toFixed(1));
-  $("chart-point").setAttribute("cx", x.toFixed(1));
-  $("chart-point").setAttribute("cy", y.toFixed(1));
-  $("chart-readout").textContent = `${formatDuration(sample.elapsed_seconds)} · ${liveNumber(sample.output_tokens_per_second)} tok/s`;
-  $("chart-scrub").value = String(index);
-  $("chart-scrub").setAttribute("aria-valuetext", $("chart-readout").textContent);
-}
-
-function renderChart(telemetry) {
-  const available = !!(telemetry && telemetry.available);
-  const rawHistory = available && Array.isArray(telemetry.chart_history) ? telemetry.chart_history : [];
-  chartSamples = rawHistory.filter(sample => sample
-    && Number.isFinite(sample.elapsed_seconds) && sample.elapsed_seconds >= 0
-    && Number.isFinite(sample.output_tokens_per_second) && sample.output_tokens_per_second >= 0)
-    .slice().sort((a, b) => a.elapsed_seconds - b.elapsed_seconds);
-  const metrics = available ? telemetry.latest_metrics || {} : {};
-  const requests = available ? telemetry.requests || {} : {};
-  const observedThroughput = typeof metrics.output_tokens_per_second === "number"
-    ? metrics.output_tokens_per_second : chartSamples[chartSamples.length - 1]?.output_tokens_per_second;
-  $("live-throughput").textContent = liveNumber(observedThroughput);
-  $("live-ttft").textContent = liveNumber(metrics.time_to_first_token_ms, " ms");
-  $("live-request-latency").textContent = liveNumber(metrics.request_latency_seconds, " s");
-  $("live-successful").textContent = liveNumber(requests.successful);
-  $("live-errors").textContent = liveNumber(requests.errored);
-  $("live-cancelled").textContent = liveNumber(requests.cancelled);
-  $("chart-empty").hidden = chartSamples.length > 0;
-  // SVG elements do not reflect the HTML hidden property. Toggle the attribute.
-  if (chartSamples.length === 0) $("chart-svg").setAttribute("hidden", "");
-  else $("chart-svg").removeAttribute("hidden");
-  $("chart-inspector").hidden = chartSamples.length === 0;
-  if (chartSamples.length === 0) {
-    $("chart-line").setAttribute("points", "");
-    $("chart-area").setAttribute("points", "");
-    $("chart-readout").textContent = "";
-    inspectedSampleTime = null;
-    return;
-  }
-  const maxX = Math.max(1, chartSamples[chartSamples.length - 1].elapsed_seconds);
-  const maxY = Math.max(1, ...chartSamples.map(sample => sample.output_tokens_per_second)) * 1.15;
-  chartScale = { maxX, maxY };
-  const coordinates = chartSamples.map(sample => [
-    52 + sample.elapsed_seconds / maxX * 728,
-    200 - sample.output_tokens_per_second / maxY * 176,
-  ]);
-  const points = coordinates.map(([x,y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
-  $("chart-line").setAttribute("points", points);
-  $("chart-area").setAttribute("points", `${coordinates[0][0].toFixed(1)},200 ${points} ${coordinates[coordinates.length - 1][0].toFixed(1)},200`);
-  $("chart-y-max").textContent = liveNumber(maxY);
-  $("chart-y-mid").textContent = liveNumber(maxY / 2);
-  $("chart-x-end").textContent = formatDuration(maxX);
-  $("chart-svg").setAttribute("aria-label", `Output throughput, ${chartSamples.length} observed samples across ${formatDuration(maxX)}. Cumulative average in tokens per second.`);
-  $("chart-scrub").max = String(chartSamples.length - 1);
-  let selected = chartSamples.length - 1;
-  if (inspectedSampleTime !== null) {
-    selected = chartSamples.reduce((best, sample, index) =>
-      Math.abs(sample.elapsed_seconds - inspectedSampleTime) < Math.abs(chartSamples[best].elapsed_seconds - inspectedSampleTime) ? index : best, 0);
-  }
-  inspectChartSample(selected);
-}
-
-$("chart-scrub").addEventListener("input", () => {
-  const index = Number($("chart-scrub").value);
-  inspectedSampleTime = chartSamples[index]?.elapsed_seconds ?? null;
-  inspectChartSample(index);
-});
-
-function renderConnectionStatus(runJob, telemetry) {
-  const el = $("log-connection-status");
-  if (runJob && !RUN_ACTIVE.has(runJob.status)) {
-    el.textContent = "Runner process exited.";
-    return;
-  }
-  if (telemetry && telemetry.available && typeof telemetry.updated_at === "number") {
-    const age = Date.now() / 1000 - telemetry.updated_at;
-    if (age > STALE_TELEMETRY_SECONDS) {
-      el.textContent = `Panel connected; no runner update in ${Math.round(age)}s (normal during a slow request).`;
-      return;
-    }
-  }
-  el.textContent = "Panel connected · refreshes automatically";
-}
-
-function renderTechnicalTelemetry(telemetry) {
-  const facts = $("telemetry-technical-facts");
-  facts.replaceChildren();
-  if (!telemetry || !telemetry.available) {
-    const dt = document.createElement("dt"), dd = document.createElement("dd");
-    dt.textContent = "Live telemetry";
-    dd.textContent = "Not available for this run.";
-    facts.append(dt, dd);
-    return;
-  }
-  const entries = [
-    ["Reported stage", telemetry.stage || "unknown"],
-    ["Remaining fraction", telemetry.remaining_fraction != null ? telemetry.remaining_fraction.toFixed(3) : "unknown"],
-    ["Remaining seconds (time limit)", telemetry.remaining_seconds_duration_limit != null ? Math.round(telemetry.remaining_seconds_duration_limit) : "unknown"],
-    ["Time budget", telemetry.duration_budget_exhausted === true
-      ? "Spent, the runner cannot interrupt an in-flight request, so it finishes the current one before stopping"
-      : "Within budget"],
-    ["Last update", new Date(telemetry.updated_at * 1000).toLocaleTimeString()],
-  ];
-  if (telemetry.observer_error) {
-    entries.push(["Live monitoring", `Stopped: ${telemetry.observer_error} (the benchmark itself is unaffected)`]);
-  }
-  entries.forEach(([label, value]) => {
-    const dt = document.createElement("dt"), dd = document.createElement("dd");
-    dt.textContent = label; dd.textContent = String(value); facts.append(dt, dd);
-  });
-}
-
+// One live frame of the managed flow, expressed in the shared dashboard's
+// vocabulary. Every rule about what may be displayed -- progress only from the
+// runner's own remaining_fraction, "Pending" rather than an invented zero,
+// never 100% before evidence finalization -- lives in that component and so is
+// identical on the advanced panel.
 function renderProgress(setupJob, runJob, benchJob, telemetry) {
   const key = currentStageKey(setupJob, runJob, telemetry);
   const cancelling = (setupJob && setupJob.status === "cancelling") || (runJob && runJob.status === "cancelling");
   if (key) lastKnownStageIndex = stageIndex(key);
-  renderStageList(lastKnownStageIndex, cancelling);
-  $("cancel-button").disabled = cancelling;
-  $("cancel-button").textContent = cancelling ? "Cancelling…" : "Cancel";
-
   const recipe = recipesById[runJob ? runJob.recipe : setupJob ? setupJob.recipe : selectedRecipeId];
-  const telemetryOk = telemetry && telemetry.available;
-  const elapsedSeconds = telemetryOk && typeof telemetry.elapsed_seconds === "number"
-    ? telemetry.elapsed_seconds
-    : (flowStartedAt ? (Date.now() - flowStartedAt) / 1000 : null);
-  $("elapsed").textContent = formatElapsed(flowStartedAt);
-  $("fact-elapsed").textContent = elapsedSeconds != null ? formatDuration(elapsedSeconds) : "N/A";
-
-  // The run's own time budget is spent, but the runner is still working:
-  // GuideLLM cannot interrupt an in-flight request, so it finishes the
-  // current one before stopping. This is reported by telemetry.py from
-  // GuideLLM's own clamped remaining_duration, and only ever while the run is
-  // still active -- never for a finished, cancelled, or failed run.
-  const overrunning = telemetryOk && telemetry.duration_budget_exhausted === true && key !== "saving";
-  if (key === "saving") {
-    $("fact-eta").textContent = "Saving results…";
-  } else if (overrunning) {
-    // Never "0s remaining": a countdown frozen at zero while work continues
-    // reads as a stuck run, not as an honest "we are past the budget".
-    $("fact-eta").textContent = "Time limit reached, finishing current request";
-  } else if (!telemetryOk) {
-    $("fact-eta").textContent = "N/A";
-  } else if (telemetry.eta_seconds === null || telemetry.eta_seconds === undefined) {
-    $("fact-eta").textContent = "Estimating…";
-  } else {
-    $("fact-eta").textContent = formatDuration(telemetry.eta_seconds) + " remaining";
-  }
-
-  if (telemetryOk && telemetry.requests) {
-    const r = telemetry.requests;
-    const total = r.total_budget != null ? r.total_budget : "?";
-    const target = telemetry.measured_requests_target;
-    $("fact-requests").textContent = `${r.processed ?? 0} / ${total} total requests`
-      + (target ? ` (target: ${target} measured)` : "");
-  } else {
-    $("fact-requests").textContent = "N/A";
-  }
-  // The ceiling bounds the benchmark's own execution, not model startup or
-  // cleanup -- which is why elapsed flow time can exceed it without the
-  // benchmark having overrun anything.
-  $("fact-max-duration").textContent = recipe && recipe.max_duration_seconds
-    ? `${Math.round(recipe.max_duration_seconds / 60)} min ceiling (benchmark execution only)`
-    : "N/A";
-
-  const percent = telemetryOk && telemetry.remaining_fraction != null ? (1 - telemetry.remaining_fraction) * 100 : null;
-  // Never record 100 for "saving": evidence finalization can still fail, and
-  // a frozen-at-100 bar would then describe a failed run as a finished one.
-  if (percent !== null) lastKnownPercent = percent;
-  if (key === "saving") {
-    // GuideLLM has stopped, but compression, environment.json, and
-    // reproduce.md are still being written. Not finished yet.
-    renderProgressBarSaving();
-  } else if (overrunning) {
-    // remaining_fraction is legitimately 0 once the budget is spent, which
-    // would render a finished-looking 100% bar over a still-running
-    // benchmark. Hold just short of complete and say why.
-    renderProgressBarOverrunning();
-  } else {
-    renderProgressBar(percent);
-  }
-  renderChart(telemetry);
-  renderConnectionStatus(runJob, telemetry);
-  renderTechnicalTelemetry(telemetry);
-
-  // Genuine byte-level download progress (never a manufactured percentage):
-  // straight from the resumable downloader's own done/total byte counts.
-  const progressContainer = $("download-progress");
-  progressContainer.replaceChildren();
-  if (setupJob && setupJob.progress) {
-    Object.entries(setupJob.progress).forEach(([label, info]) => {
-      const row = document.createElement("div");
-      row.className = "progress-row";
-      const donePercent = info.total ? Math.min(100, (100 * info.done) / info.total) : 0;
-      row.innerHTML = `<span>${label}: ${formatBytes(info.done)} / ${formatBytes(info.total)}</span>
-        <div class="progress-bar"><span style="width:${donePercent}%"></span></div>`;
-      progressContainer.append(row);
-    });
-  }
-
-  if (runJob && runJob.server_log) {
-    $("server-log-wrap").hidden = false;
-    $("server-log").textContent = runJob.server_log;
-  }
-  if (benchJob) renderLog(benchJob.log || "Waiting…");
-}
-
-function renderLog(text) {
-  if (text === lastLogText) return;
-  lastLogText = text;
-  const el = $("benchmark-log");
-  el.textContent = text;
-  if (logAutoFollow) {
-    el.scrollTop = el.scrollHeight;
-    $("jump-to-latest-button").hidden = true;
-  } else {
-    $("jump-to-latest-button").hidden = false;
-  }
-}
-
-function renderProgressBarSaving() {
-  // Deliberately 99%, not 100%: execution has finished, but the evidence
-  // files are still being written and that step can still fail. 100% is
-  // reserved for the terminal success path, after finalization succeeded.
-  const fill = $("progress-bar-fill"), label = $("progress-bar-label"), wrap = $("progress-bar-wrap");
-  fill.classList.remove("indeterminate");
-  fill.style.width = "99%";
-  label.textContent = "Benchmark finished, writing and verifying the evidence files";
-  wrap.setAttribute("aria-valuenow", "99");
-}
-
-function renderProgressBarOverrunning() {
-  // Deliberately 99%, not 100%: the benchmark's time budget is spent, but its
-  // last request is still streaming, so claiming completion would be wrong.
-  // Not indeterminate either -- real, near-complete progress is known.
-  const fill = $("progress-bar-fill"), label = $("progress-bar-label"), wrap = $("progress-bar-wrap");
-  fill.classList.remove("indeterminate");
-  fill.style.width = "99%";
-  label.textContent = "Time limit reached, the runner is finishing its current request and stopping";
-  wrap.setAttribute("aria-valuenow", "99");
-}
-
-function renderProgressBarFrozen() {
-  // A terminal state must never keep the indeterminate spinner animating
-  // (it is a pure CSS animation -- once polling stops, nothing else would
-  // ever remove it) and must never claim a percentage that was never
-  // actually observed. Freezes at whatever real, determinate value was
-  // last rendered; a bar that never left "indeterminate" is shown as no
-  // progress at all, honestly, rather than picking a number.
-  const fill = $("progress-bar-fill"), label = $("progress-bar-label"), wrap = $("progress-bar-wrap");
-  const wasIndeterminate = fill.classList.contains("indeterminate");
-  fill.classList.remove("indeterminate");
-  if (wasIndeterminate) {
-    fill.style.width = "0%";
-    label.textContent = "No progress was recorded before this run stopped.";
-    wrap.setAttribute("aria-valuenow", "0");
-  } else {
-    const value = wrap.getAttribute("aria-valuenow") || "0";
-    label.textContent = `${value}%, stopped here`;
-  }
+  dashboard.render({
+    stageKey: key,
+    lastKnownStageIndex,
+    cancelling,
+    runActive: !(runJob && !RUN_ACTIVE.has(runJob.status)),
+    telemetry,
+    maxDurationSeconds: recipe && recipe.max_duration_seconds,
+    startedAt: flowStartedAt,
+    logText: benchJob ? (benchJob.log || "Waiting…") : null,
+    serverLog: runJob && runJob.server_log,
+    // Genuine byte-level download progress (never a manufactured percentage):
+    // straight from the resumable downloader's own done/total byte counts.
+    downloadProgress: setupJob && setupJob.progress,
+  });
+  $("cancel-button").disabled = !!cancelling;
+  $("cancel-button").textContent = cancelling ? "Cancelling…" : "Cancel";
 }
 
 // True exactly when the runner (the GuideLLM-driving benchmark Controller
@@ -751,88 +425,31 @@ function runnerNeverStarted(runJob) {
 function finishFlow(success, errorMessage, runJob) {
   clearTimers();
   if (runJob?.history_warning) notice(runJob.history_warning, true);
-  $("cancel-button").hidden = true;
-  $("start-over-button").hidden = false;
 
-  // A real created_at/finished_at pair is the honest total duration,
-  // whether this is a live poll noticing the run just ended or a much
-  // later reopen -- never a live "elapsed" figure that would otherwise
-  // keep climbing against the current time once nothing is polling anymore.
-  if (runJob && runJob.created_at && runJob.finished_at) {
-    const totalSeconds = (new Date(runJob.finished_at).getTime() - new Date(runJob.created_at).getTime()) / 1000;
-    $("elapsed").textContent = formatDuration(totalSeconds) + " total";
-    $("fact-elapsed").textContent = formatDuration(totalSeconds);
-  }
-
-  if (success && runJob && runJob.result?.results && runJob.benchmark_job_id) {
-    // 100% only here: execution finished *and* local evidence finalization
-    // (compression, environment.json, reproduce.md) already completed --
-    // runJob only reaches a terminal "completed" status after that. Every
-    // other caller of renderProgressBar() is capped below 100 (see its
-    // `complete` option), so this is the single place that can display a
-    // finished run.
-    $("progress-heading").textContent = "Running";
-    renderProgressBar(100, { complete: true });
+  // Cancellation or failure: the stage list, chart, and technical facts were
+  // already rendered from the real last-known data by the renderProgress()
+  // call that always precedes this one (see pollFlow() and openTerminalRun())
+  // -- never reset to zero, never advanced past what the runner actually
+  // reached. The shared dashboard only freezes the still-live-looking pieces
+  // and makes the terminal state itself unmistakable.
+  const ok = !!(success && runJob && runJob.result?.results && runJob.benchmark_job_id);
+  dashboard.finish({
+    ok,
+    status: runJob?.status,
+    smoke: runJob && runJob.kind === "smoke",
+    kindLabel: runJob && runJob.kind === "smoke" ? "Server check, no benchmark measurements" : null,
+    runnerStarted: !runnerNeverStarted(runJob),
+    errorMessage,
+    createdAt: runJob?.created_at,
+    finishedAt: runJob?.finished_at,
+    hasServerLog: !!runJob?.server_log,
+  });
+  if (ok) {
     finishedManagedJob = runJob;
     benchmarkJobId = runJob.benchmark_job_id;
     showResults(runJob.result);
     showScreen("results");
-    loadRecentRuns().catch(() => {});
-    return;
   }
-
-  // Cancellation or failure: the stage list, chart, and technical facts
-  // were already rendered from the real last-known data by the
-  // renderProgress() call that always precedes this one (see pollFlow()
-  // and openTerminalRun()) -- never reset to zero, never advanced past
-  // what the runner actually reached. This section only freezes the
-  // still-live-looking pieces (the progress bar's animation) and makes the
-  // terminal state itself unmistakable, distinguishing a runner that never
-  // started from one that started and then exited or was cancelled.
-  const cancelled = runJob && runJob.status === "cancelled";
-  const interrupted = runJob && runJob.status === "interrupted";
-  const smoke = runJob && runJob.kind === "smoke";
-  const neverStarted = runnerNeverStarted(runJob);
-  $("progress-heading").textContent = interrupted ? "Benchmark interrupted"
-    : smoke ? "Server check, no benchmark measurements"
-    : runJob?.status === "unavailable" ? "Saved results unavailable" : cancelled
-    ? "Benchmark cancelled"
-    : neverStarted ? "Could not start benchmark" : "Benchmark failed";
-  renderProgressBarFrozen();
-  if (runJob && !runJob.finished_at) {
-    $("elapsed").textContent = "End time unknown";
-    $("fact-elapsed").textContent = "Unknown, panel interrupted";
-  }
-  // "Estimating…"/"Xm Ys remaining" implied more progress was still coming;
-  // once terminal, a remaining-time estimate is stale, not a real fact.
-  $("fact-eta").textContent = neverStarted ? "N/A" : cancelled ? "Cancelled" : "Stopped, did not finish";
-
-  if ($("chart-empty").hidden === false) {
-    $("chart-empty").textContent = neverStarted
-      ? "No measurements: the benchmark process never started."
-      : "No measurements were recorded before the run stopped.";
-  }
-  if (neverStarted) {
-    $("fact-requests").textContent = "Benchmark measurements never started.";
-    if (lastLogText === "" || lastLogText === "Waiting…") {
-      $("benchmark-log").textContent = "No runner log: the benchmark process never started.";
-    }
-    $("log-connection-status").textContent = "The benchmark runner never started.";
-    if (!runJob || !runJob.server_log) {
-      $("server-log-wrap").hidden = false;
-      $("server-log").textContent = "No managed server diagnostic log is available for this run.";
-    }
-  } else {
-    $("log-connection-status").textContent = interrupted
-      ? "Saved log only. This panel has not resumed the previous process."
-      : cancelled ? "Runner process stopped (cancelled)." : "Runner process exited.";
-  }
-
-  $("run-error").hidden = false;
-  $("run-error").textContent = errorMessage || (smoke
-    ? "This was a server readiness check. It produced no benchmark results to share." : neverStarted
-    ? "The benchmark process never started. See the technical details below for why."
-    : "The run did not finish. Local logs above describe what happened.");
   loadRecentRuns().catch(() => {});
 }
 
@@ -870,24 +487,15 @@ async function openTerminalRun(jobId) {
   benchmarkJobId = runJob.benchmark_job_id;
   flowStartedAt = new Date(runJob.created_at).getTime();
   lastKnownStageIndex = lastReachedStageIndexForTerminalJob(runJob, telemetry);
-  lastKnownPercent = telemetry && telemetry.available && telemetry.remaining_fraction != null
-    ? (1 - telemetry.remaining_fraction) * 100
-    : null;
   showScreen("run");
   $("summary-panel").hidden = true;
   $("progress-panel").hidden = false;
+  const recipe = recipesById[runJob.recipe];
+  dashboard.prepareForRun({
+    subtitle: recipe ? `${recipe.model_id} (${recipe.quantization}) · ${recipe.benchmark_profile} · ${recipe.execution_device.toUpperCase()}` : "",
+  });
   $("cancel-button").hidden = true;
   $("start-over-button").hidden = false;
-  $("run-error").hidden = true;
-  $("server-log-wrap").hidden = true;
-  lastLogText = "";
-  logAutoFollow = true;
-  $("jump-to-latest-button").hidden = true;
-  $("benchmark-log").textContent = "Waiting…";
-  const recipe = recipesById[runJob.recipe];
-  $("dashboard-subtitle").textContent = recipe
-    ? `${recipe.model_id} (${recipe.quantization}) · ${recipe.benchmark_profile} · ${recipe.execution_device.toUpperCase()}`
-    : "";
   renderProgress(null, runJob, benchJob, telemetry);
   finishFlow(runJob.status === "completed", runJob.error, runJob);
 }
@@ -939,7 +547,7 @@ function pollFlow() {
       timers.push(setTimeout(tick, 1200));
     } catch (error) {
       if (isUnknownJobError(error)) { interruptedByRestart(); return; }
-      $("log-connection-status").textContent = "Panel connection lost, retrying…";
+      dashboard.setLogStatus("Panel connection lost, retrying…");
       notice(error.message, true);
       timers.push(setTimeout(tick, 2500));
     }
@@ -961,32 +569,10 @@ function resetFlow() {
 
 // -- Screen 3: your results ----------------------------------------------------
 
-function metricWithNote(label, value, unit, note) {
-  const box = document.createElement("dl"), dt = document.createElement("dt"), dd = document.createElement("dd"),
-    suffix = document.createElement("span"), explain = document.createElement("p");
-  box.className = "metric";
-  dt.textContent = label;
-  dd.textContent = typeof value === "number" ? value.toLocaleString(undefined, { maximumFractionDigits: 2 }) : value;
-  suffix.textContent = unit; dd.append(suffix);
-  explain.className = "metric-note"; explain.textContent = note;
-  box.append(dt, dd, explain);
-  return box;
-}
-
 function showResults(summary) {
-  const r = summary.results;
   $("results-status").textContent = "Execution completed. These saved measurements can be reviewed without rerunning the benchmark. "
     + "Completion does not mean this result meets publication requirements; check acceptance and submission status in Share results.";
-  $("results-metrics").replaceChildren(
-    metricWithNote("Time to first token · p50", r.latency_ms.ttft.p50, "ms", "Median time until the first streamed token; lower is better."),
-    metricWithNote("Time to first token · p95", r.latency_ms.ttft.p95, "ms", "95th-percentile time until the first streamed token; lower is better."),
-    metricWithNote("Inter-token latency · p50", r.latency_ms.inter_token.p50, "ms", "Median delay between output tokens; lower is better."),
-    metricWithNote("Output tokens / second", r.output_tokens_per_second, "", "Output-token throughput; higher is better."),
-    metricWithNote("Total tokens / second", r.total_tokens_per_second, "", "Input-plus-output token throughput."),
-    metricWithNote("Requests / second", r.requests_per_second, "", "How many requests the workload completed per second."),
-    metricWithNote("Successful / attempted", `${r.requests.succeeded} / ${r.requests.attempted}`, "", "Requests that completed successfully, out of those attempted in the measured window."),
-    metricWithNote("Error rate", r.error_rate_percent, "%", "Share of attempted requests that failed or stayed incomplete; lower is better."),
-  );
+  $("results-metrics").replaceChildren(...BenchmarkDashboard.metricCards(summary));
   $("go-share-button").hidden = false;
 }
 
@@ -1069,25 +655,13 @@ async function enterShareScreen() {
   $("advanced-package-note").hidden = guidedPackaging;
   renderShareFacts(detail);
   statusChecklist(detail);
+  renderRequirements(await api(`/api/runs/${benchmarkJobId}/requirements`));
   $("validation-result").hidden = !detail.validation;
   $("prepare-review-button").hidden = !detail.validation?.valid;
   if (detail.validation) renderValidation(detail);
 }
 
 // -- Wiring ----------------------------------------------------------------
-
-$("benchmark-log").addEventListener("scroll", () => {
-  const el = $("benchmark-log");
-  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
-  logAutoFollow = atBottom;
-  $("jump-to-latest-button").hidden = atBottom;
-});
-$("jump-to-latest-button").addEventListener("click", () => {
-  const el = $("benchmark-log");
-  el.scrollTop = el.scrollHeight;
-  logAutoFollow = true;
-  $("jump-to-latest-button").hidden = true;
-});
 
 $("change-location-button").addEventListener("click", () => {
   const editor = $("storage-location-editor");
@@ -1101,14 +675,25 @@ $("start-over-button").addEventListener("click", () => action(async () => { rese
 $("run-another-button").addEventListener("click", () => action(async () => { resetFlow(); await loadRecipes(); await loadRecentRuns(); }));
 $("go-share-button").addEventListener("click", () => action(async () => { await enterShareScreen(); }));
 $("download-summary-button").addEventListener("click", () => action(async () => {
-  const recipe = recipesById[finishedManagedJob.recipe];
-  const summary = {
-    kind: "omobench-local-summary", execution_device: finishedManagedJob.execution_device || recipe?.execution_device,
-    model: finishedManagedJob.model || recipe?.model_id, profile: finishedManagedJob.profile || recipe?.benchmark_profile,
-    ...finishedManagedJob.result,
-  };
-  download(new Blob([JSON.stringify(summary, null, 2) + "\n"], { type: "application/json" }), `${finishedManagedJob.id}-local-summary.json`);
+  const report = await api(`/api/runs/${benchmarkJobId}/local-report`);
+  download(new Blob([JSON.stringify(report, null, 2) + "\n"], { type: "application/json" }), `${benchmarkJobId}-local-report.json`);
 }));
+
+// Every publication requirement at once, separate from the local report.
+function renderRequirements(report) {
+  $("publication-checklist").replaceChildren(...report.items.map((item) => {
+    const li = document.createElement("li");
+    li.className = `status-item ${item.ok === null ? "pending" : item.ok ? "ok" : "fail"}`;
+    const strong = document.createElement("strong"), span = document.createElement("span");
+    strong.textContent = item.label; span.textContent = item.detail;
+    li.append(strong, span);
+    return li;
+  }));
+  const missing = report.items.filter((item) => item.ok === false).length;
+  $("publication-summary").textContent = missing
+    ? `${missing} requirement${missing === 1 ? "" : "s"} still missing for a community submission. Your measurements stay available, and Save local report works regardless.`
+    : "Every requirement this panel can check is satisfied. Packaging and the registry validator remain the authority.";
+}
 
 $("edit-details-toggle").addEventListener("change", () => { $("package-editable").hidden = !$("edit-details-toggle").checked; });
 

@@ -5,7 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>OmoBench · Guided benchmark</title>
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/dashboard.css">
   <link rel="stylesheet" href="/guided.css">
+  <script src="/dashboard.js" defer></script>
   <script src="/community.js" defer></script>
   <script src="/guided.js" defer></script>
 </head>
@@ -69,72 +71,7 @@
           </div>
         </section>
         <section class="panel" id="progress-panel" hidden>
-          <div class="section-head">
-            <div><h2 id="progress-heading">Running</h2><p id="dashboard-subtitle" class="muted small"></p></div>
-            <span id="elapsed" class="pill"></span>
-          </div>
-
-          <div class="progress-bar-wrap" role="progressbar" id="progress-bar-wrap" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Benchmark progress">
-            <div class="progress-bar-track"><div class="progress-bar-fill" id="progress-bar-fill"></div></div>
-            <span id="progress-bar-label" class="progress-bar-label">Starting…</span>
-          </div>
-
-          <div class="performance-console">
-            <div class="throughput-score">
-              <p class="eyebrow">OUTPUT THROUGHPUT</p>
-              <div class="score-value" id="live-throughput">Pending</div>
-              <p class="score-unit">tokens / second</p>
-              <p class="score-note">Cumulative average across the run.<br>Final measured-window results follow.</p>
-              <div class="score-divider"></div>
-              <dl class="latency-pair"><div><dt>First token, mean</dt><dd id="live-ttft">Pending</dd></div><div><dt>Request time, mean</dt><dd id="live-request-latency">Pending</dd></div></dl>
-            </div>
-            <div class="chart-wrap">
-              <div class="section-head chart-head"><div><p class="eyebrow">PERFORMANCE OVER TIME</p><h3>Output throughput</h3></div><span class="chart-key"><i></i> tok/s</span></div>
-              <p class="hint" id="chart-label">Cumulative average since the first request · live estimate</p>
-              <div id="chart-empty" class="chart-empty"><span class="waiting-mark" aria-hidden="true">▥</span><strong>Waiting for the first measurement</strong><span>Your graph appears as the runner reports real samples.</span></div>
-              <svg id="chart-svg" viewBox="0 0 800 240" preserveAspectRatio="none" role="img" aria-label="Output tokens per second over elapsed time" hidden>
-                <defs><linearGradient id="throughput-gradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#f7bd55" stop-opacity=".25"/><stop offset="100%" stop-color="#f7bd55" stop-opacity="0"/></linearGradient></defs>
-                <path class="chart-grid" d="M52 24H780M52 112H780M52 200H780"/>
-                <text id="chart-y-max" x="42" y="28" text-anchor="end">0</text><text id="chart-y-mid" x="42" y="116" text-anchor="end">0</text><text x="42" y="204" text-anchor="end">0</text>
-                <text x="52" y="229">0m</text><text id="chart-x-end" x="780" y="229" text-anchor="end">0m</text>
-                <polygon id="chart-area" points="" fill="url(#throughput-gradient)"/>
-                <polyline id="chart-line" points=""/>
-                <line id="chart-cursor" x1="52" y1="24" x2="52" y2="200"/>
-                <circle id="chart-point" cx="52" cy="200" r="4"/>
-              </svg>
-              <div class="chart-inspector" id="chart-inspector" hidden><label for="chart-scrub">Inspect a sample</label><input id="chart-scrub" type="range" min="0" max="0" value="0" step="1" aria-label="Inspect throughput samples"><output id="chart-readout" for="chart-scrub"></output></div>
-            </div>
-          </div>
-          <dl class="dashboard-facts" id="dashboard-facts">
-            <div><dt>Elapsed</dt><dd id="fact-elapsed">Pending</dd></div>
-            <div><dt>Estimated remaining</dt><dd id="fact-eta">Estimating…</dd></div>
-            <div><dt>Requests completed</dt><dd id="fact-requests">Pending</dd></div>
-            <div><dt>Maximum duration</dt><dd id="fact-max-duration">Pending</dd></div>
-          </dl>
-          <div class="request-health"><span>All run phases</span><span>Successful <strong id="live-successful">Pending</strong></span><span>Errored <strong id="live-errors">Pending</strong></span><span>Cancelled <strong id="live-cancelled">Pending</strong></span></div>
-          <p id="eta-basis-note" class="hint">The run ends at its configured request or time limit, whichever comes first; it may finish earlier.</p>
-          <div class="stage-heading"><h3>Run stages</h3><span class="hint">From preparation to saved evidence</span></div>
-          <ol class="stage-list" id="stage-list"></ol>
-          <div id="download-progress"></div>
-
-          <p id="run-error" class="notice error" role="status" hidden></p>
-          <div class="actions">
-            <button id="cancel-button" type="button" class="danger">Cancel</button>
-            <button id="start-over-button" type="button" class="secondary" hidden>Choose a different test</button>
-          </div>
-
-          <details id="live-log-details" open>
-            <summary>Live log <span class="hint" id="log-connection-status">Refreshes automatically</span></summary>
-            <div class="log-toolbar">
-              <button id="jump-to-latest-button" type="button" class="quiet" hidden>Jump to latest ↓</button>
-            </div>
-            <pre id="benchmark-log" tabindex="0">Waiting…</pre>
-          </details>
-          <details id="technical-details-progress">
-            <summary>Technical details <span class="hint">Raw progress data and managed server diagnostic log</span></summary>
-            <div id="server-log-wrap" hidden><p class="hint">Managed server diagnostic log</p><pre id="server-log"></pre></div>
-            <dl class="kv" id="telemetry-technical-facts"></dl>
-          </details>
+          <div id="dashboard-mount"></div>
         </section>
       </section>
 
@@ -143,9 +80,10 @@
         <section class="panel">
           <div class="section-head"><div><span class="step">3</span><h2>Your performance report</h2></div></div>
           <p id="results-status" class="notice"></p>
+          <p class="hint">Your measurements are saved on this machine. <strong>Save local report</strong> exports them as a local record, for any model, with no publication metadata and no sign-in. Preparing a community submission is a separate step with its own requirements.</p>
           <div id="results-metrics" class="grid metrics"></div>
           <div class="actions">
-            <button id="download-summary-button" type="button" class="secondary">Download local summary</button>
+            <button id="download-summary-button" type="button" class="secondary">Save local report</button>
             <button id="run-another-button" type="button" class="secondary">Run another test</button>
             <button id="go-share-button" type="button" hidden>Prepare submission →</button>
           </div>
@@ -157,6 +95,11 @@
         <section class="panel">
           <div class="section-head"><div><span class="step">4</span><h2>Share results</h2></div></div>
           <ul class="status-checklist" id="status-checklist"></ul>
+
+          <h3>Publication requirements</h3>
+          <p class="hint">What the public registry needs beyond a completed benchmark. None of this affects the local report on the previous screen.</p>
+          <ul class="status-checklist" id="publication-checklist"></ul>
+          <p id="publication-summary" class="hint"></p>
 
           <details id="technical-details-package" open>
             <summary>Technical details <span class="hint">Recorded with this run; review before packaging</span></summary>

@@ -557,6 +557,111 @@ def profile_request_timeout_seconds(root: Path, profile_id: str) -> float | None
     return float(value) if value > 0 else None
 
 
+# A served model identifier and a tokenizer are two different identities. The
+# first is whatever string the inference API accepts ("qwen/qwen3-vl-4b:3" from
+# LM Studio, say); the second is the Hugging Face repository or local directory
+# whose tokenizer builds and counts the synthetic workload. GuideLLM 0.7.3
+# defaults the second to the first, which is correct only when the served alias
+# happens to also be a repository id -- otherwise the run fails while resolving
+# the tokenizer, before a single measurement.
+HF_REPO_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+TOKENIZER_FILES = ("tokenizer.json", "tokenizer_config.json", "vocab.json", "spiece.model", "tokenizer.model")
+
+
+def validate_tokenizer_source(value: str) -> str:
+    """Accept a Hugging Face repository id or an existing local directory.
+
+    Deliberately narrow: the value is passed to GuideLLM as part of a
+    comma-separated `kind=...` argument, and it must never be able to inject a
+    second setting (remote code execution, a different tokenizer kind) into it.
+    """
+    source = value.strip()
+    if not source:
+        raise ValueError("Tokenizer source cannot be empty.")
+    if any(character in source for character in ",="):
+        raise ValueError("A tokenizer source cannot contain ',' or '='.")
+    if any(ord(character) < 32 for character in source) or len(source) > 512:
+        raise ValueError("Tokenizer source is not a usable repository id or path.")
+    if HF_REPO_ID.fullmatch(source):
+        return source
+    path = Path(source).expanduser()
+    if path.is_dir():
+        return str(path)
+    raise ValueError(
+        "Enter a Hugging Face repository id such as Qwen/Qwen3-VL-4B-Instruct, "
+        "or the path of a local folder containing tokenizer files."
+    )
+
+
+def huggingface_cache_directories() -> list[Path]:
+    """Where the Hugging Face hub cache would be, without importing it."""
+    explicit = os.environ.get("HUGGINGFACE_HUB_CACHE") or os.environ.get("HF_HUB_CACHE")
+    if explicit:
+        return [Path(explicit)]
+    home = os.environ.get("HF_HOME")
+    if home:
+        return [Path(home) / "hub"]
+    return [Path.home() / ".cache" / "huggingface" / "hub"]
+
+
+def tokenizer_source_report(value: str, *, served_model: str | None = None) -> dict[str, Any]:
+    """Describe a tokenizer source without touching the network.
+
+    Says what the runner would do and whether files still have to be
+    downloaded, so the panel can explain that before anything is fetched. It
+    never downloads, never imports transformers, and never claims a local copy
+    it has not seen on disk.
+    """
+    source = (value or "").strip() or (served_model or "")
+    effective_default = not (value or "").strip()
+    try:
+        resolved = validate_tokenizer_source(source)
+    except ValueError as error:
+        return {
+            "ok": False,
+            "kind": "invalid",
+            "source": source,
+            "default": effective_default,
+            "message": (
+                f"The server model identifier {source!r} is not a Hugging Face repository id, "
+                "so the runner cannot use it to build the workload. Enter a tokenizer source."
+                if effective_default else str(error)
+            ),
+        }
+    if not HF_REPO_ID.fullmatch(resolved):
+        present = sorted(name for name in TOKENIZER_FILES if (Path(resolved) / name).is_file())
+        return {
+            "ok": bool(present),
+            "kind": "local",
+            "source": resolved,
+            "default": effective_default,
+            "cached": True,
+            "files": present,
+            "message": (
+                f"Local tokenizer folder, containing {', '.join(present)}. Nothing is downloaded."
+                if present else
+                "That folder exists but contains no recognizable tokenizer file "
+                f"({', '.join(TOKENIZER_FILES)})."
+            ),
+        }
+    flattened = "models--" + resolved.replace("/", "--")
+    cached = any((directory / flattened).is_dir() for directory in huggingface_cache_directories())
+    return {
+        "ok": True,
+        "kind": "huggingface",
+        "source": resolved,
+        "default": effective_default,
+        "cached": cached,
+        "message": (
+            f"Hugging Face repository {resolved}, already in this machine's local cache; "
+            "no download is needed." if cached else
+            f"Hugging Face repository {resolved}. Its tokenizer files are not in this machine's "
+            "cache yet, so the runner will download them from huggingface.co when the benchmark "
+            "starts. Model weights are not downloaded."
+        ),
+    }
+
+
 def build_guidellm_command(
     *,
     root: Path,
@@ -564,6 +669,7 @@ def build_guidellm_command(
     model: str,
     profile_id: str,
     raw_output_path: Path,
+    tokenizer: str | None = None,
 ) -> list[str]:
     spec = PROFILE_SPECS[profile_id]
     target = endpoint.rstrip("/")
@@ -583,11 +689,15 @@ def build_guidellm_command(
     timeout_seconds = profile_request_timeout_seconds(root, profile_id)
     if timeout_seconds is not None:
         backend += f",timeout={timeout_seconds}"
+    # An explicit tokenizer identity, only when one was supplied: the default
+    # (GuideLLM using the served model identifier) is left exactly as it was.
+    tokenizer_arguments = ["--tokenizer", f"kind=huggingface_auto,model={validate_tokenizer_source(tokenizer)}"] if tokenizer else []
     return [
         "guidellm",
         "run",
         "--backend",
         backend,
+        *tokenizer_arguments,
         "--data",
         f"kind=synthetic_text,prompt_tokens={spec['input_tokens']},output_tokens={spec['output_tokens']}",
         "--profile",
@@ -1160,12 +1270,19 @@ def write_local_run(args: argparse.Namespace) -> int:
         print("--output-dir must stay inside the OmoBench checkout.", file=sys.stderr)
         return 2
     raw_output_path = run_directory / "guidellm-benchmarks.json"
+    tokenizer = getattr(args, "tokenizer", None)
+    try:
+        tokenizer = validate_tokenizer_source(tokenizer) if tokenizer else None
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 2
     command = build_guidellm_command(
         root=root,
         endpoint=args.endpoint,
         model=args.model,
         profile_id=args.profile,
         raw_output_path=raw_output_path,
+        tokenizer=tokenizer,
     )
     safe_command = redact_endpoint(shlex.join(command), args.endpoint)
 
@@ -1202,7 +1319,12 @@ def write_local_run(args: argparse.Namespace) -> int:
     reproduce_path.write_text(
         "# Reproduce this local staging run\n\n"
         f"GuideLLM version: `{GUIDELLM_VERSION}`\n\n"
-        "Replace `<LOCAL_ENDPOINT>` with the local OpenAI-compatible endpoint.\n\n"
+        # Two identities, recorded separately: the string the server answered to,
+        # and the tokenizer that built and counted the workload.
+        + (f"Server model identifier: `{args.model}`\n\nTokenizer source (explicit override): `{tokenizer}`\n\n"
+           if tokenizer else
+           f"Server model identifier: `{args.model}`, also used as the tokenizer source.\n\n")
+        + "Replace `<LOCAL_ENDPOINT>` with the local OpenAI-compatible endpoint.\n\n"
         "```bash\n"
         f"{safe_command}\n"
         "```\n",
@@ -1587,6 +1709,16 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--profile", required=True, choices=sorted(PROFILE_SPECS), help="versioned OmoBench profile")
     run.add_argument("--output-dir", default=".omobench-runs", help="local staging directory, relative to repository root")
     run.add_argument("--execute", action="store_true", help="actually invoke GuideLLM; omit for a safe dry run")
+    run.add_argument(
+        "--tokenizer",
+        default=None,
+        help=(
+            "optional tokenizer source for building and counting the synthetic workload: a "
+            "Hugging Face repository id or a local tokenizer folder. Use it when --model is a "
+            "serving alias rather than a repository id. Omit to keep the existing default, which "
+            "is the --model value itself. This never changes which model the server serves."
+        ),
+    )
     run.add_argument(
         "--telemetry-dir",
         default=None,

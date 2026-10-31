@@ -70,16 +70,34 @@ extra includes `uvloop`, which does not support native Windows.
    [List your server's identifiers](model-server.md#address-and-model-identifier)
    if unsure. Click **Test connection**. This sends one tiny streaming request; it is not
    included in benchmark evidence.
-3. **Choose a fixed profile and declare the device.** The panel displays the
+3. **Set a tokenizer source if your server uses an alias.** The workload's prompts
+   are built and counted with a tokenizer, which the runner takes from the server
+   model identifier unless you say otherwise. That works when the identifier is
+   also a Hugging Face repository id. It does not work for a serving alias such as
+   LM Studio's `qwen/qwen3-vl-4b` or `qwen/qwen3-vl-4b:3`: the run would fail
+   while resolving the tokenizer, before any measurement. Put the compatible
+   repository or a local tokenizer folder in **Tokenizer source**, for example
+   `Qwen/Qwen3-VL-4B-Instruct`. Do not rename your served model.
+
+   **Test connection** and **Check tokenizer** are deliberately two checks. A
+   working `/v1/models` response says the server answers; it says nothing about
+   whether the workload can be built. **Check tokenizer** inspects the value
+   offline: it reports whether the files are already in this machine's Hugging
+   Face cache or will be downloaded from `huggingface.co` when the benchmark
+   starts, and it never downloads anything itself. Tokenizer files are small;
+   model weights are not downloaded. The override is recorded in the run's
+   `reproduce.md`, beside the served identifier, and is never used to infer what
+   the server actually loaded. Remote code execution stays disabled.
+4. **Choose a fixed profile and declare the device.** The panel displays the
    profile's token counts, load, and limits. Configure CPU/GPU use in the model
    server, then confirm it in the panel. Selecting a device does not change server
    settings. Disable GPU offload in the server before declaring a CPU run.
-4. Click **Run benchmark**. The panel launches the existing CLI as a subprocess.
+5. Click **Run benchmark**. The panel launches the existing CLI as a subprocess.
    Only one benchmark or packaging/submission operation runs at a time in a panel.
    Logs update automatically; output can arrive in bursts when the runner buffers it.
-5. Review the latency, throughput, success counts, and errors. Use **Download local
-   summary** to save the displayed measurements. This summary is clearly identified
-   as local data and is not a public `result.json`.
+6. Watch the run on the dashboard, then review the results. See
+   [the live dashboard](#the-live-dashboard) and
+   [saving a local report](#saving-a-local-report-is-not-submitting).
 
 For a CPU demonstration, load a small model with CPU execution explicitly
 enabled in your server, choose **chat-small-v1**, select **CPU**, and run. This is a
@@ -95,9 +113,81 @@ server stays running. Cancelled, failed, and interrupted runs are labelled accor
 partial output is kept locally and is not eligible for packaging through the panel.
 The panel allows only one instance per checkout, including across different ports.
 
+## The live dashboard
+
+A run against your own server shows the same dashboard as the guided recipes:
+the live throughput chart with a sample inspector, time to first token and
+request latency with their units, successful/errored/cancelled counts against
+the total request budget, progress, elapsed time and estimated remaining time,
+the run's stages, and collapsible runner log and raw telemetry.
+
+It is literally the same component, not a copy
+(`cli/src/omobench/web/dashboard.js` and `dashboard.css`, mounted by both
+pages), so the two routes cannot drift apart.
+
+What differs is only what OmoBench can honestly observe. For a server you run
+yourself it never downloaded weights, never started the server and never loaded
+a model, so those stages do not exist here: the stages are **starting the
+runner, warming up, running the benchmark, cooling down, saving results**, and
+warmup and cooldown appear only when GuideLLM itself reports them. Everything
+else follows the same rules as the guided page: a missing value reads "Pending"
+or "unavailable" rather than zero, progress comes from the runner's own
+remaining fraction rather than from elapsed time, a spent time budget is
+labelled instead of shown as a finished run, and 100% appears only once the
+evidence files are written.
+
+**Cancel benchmark** stops OmoBench's own runner process group. Your model
+server is started and owned by you; the panel has no handle on it and never
+signals it.
+
+## Saving a local report is not submitting
+
+**Save local report** downloads what this machine measured: the metrics, the
+profile, the server model identifier, the tokenizer source, the declared
+execution device, and whatever provenance OmoBench already recorded, with
+anything unknown written as `unknown` rather than guessed. It needs no
+publication metadata, no catalogued model and no GitHub sign-in, it works for a
+run reopened after the panel restarts, and it rereads the saved record rather
+than rerunning or rewriting any evidence. It deliberately excludes the runner
+log, the environment snapshot and the endpoint, so it cannot carry a token that
+appeared in a log.
+
+A local report is **not** a public result. It uses its own
+`omobench-local-report` format and makes no claim about publication
+eligibility; the registry's contract remains `result.json`, produced by
+packaging.
+
 ## Packaging and pull requests
 
-After a completed CPU or GPU run, **Review & submit** becomes available:
+After a completed CPU or GPU run, **Review & submit** becomes available. A
+community submission needs more than a finished benchmark, and **Check
+publication requirements** lists everything that is still missing at once,
+before packaging is attempted, rather than stopping at the first empty field.
+Six identities are easy to confuse, and only the first four are interchangeable
+in nobody's reading:
+
+| | What it is |
+| --- | --- |
+| Canonical model ID | The catalogued identity, for example `Qwen/Qwen3-4B`. |
+| Server model alias | The string your server's API accepts. May differ, and often does. |
+| Tokenizer source | The repository or folder whose tokenizer built the workload. |
+| Model revision | The immutable revision of the repository the weights really came from. |
+| File SHA-256 | A checksum of one downloaded file. Not a revision. |
+| OmoBench source commit | The revision of this tool. Recorded automatically; not a model revision. |
+
+A model revision must identify the weights source's own revision. `main`,
+`master` and `latest` move, so they identify nothing, and the validator rejects
+them. A file checksum or the OmoBench commit is not a substitute. When the
+weights came from a quantization repository, record that repository as the
+weights source and pin its own revision, consistently with the artifact URL.
+The exact serving runtime version is the runtime's own build, such as
+`llama.cpp b10621`; an application version, for example the LM Studio release,
+is a different thing, and OmoBench will not guess a build for you.
+
+If a model is not in `catalog/models/`, it is not currently eligible for the
+community registry. The panel says so and keeps local viewing and export
+available. It never relabels the run as a different, catalogued model. Adding a
+model to the catalog is a separate, reviewed change.
 
 1. Enter the canonical model ID, immutable model revision, framework and exact
    version, quantization, submitter, and the server's actual startup arguments.

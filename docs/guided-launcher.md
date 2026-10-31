@@ -52,6 +52,14 @@ then **Prepare submission** to review its recorded metadata, validation and
 submission status. Reopening never starts inference, downloads a model,
 packages evidence or uploads it. Completed runs that fail acceptance remain
 rejected; the existing packaging and validation rules still apply.
+The live dashboard is the shared component described in
+[the advanced panel's documentation](browser-control.md#the-live-dashboard); the
+guided page adds the stages only a managed recipe has (downloading, verifying
+and loading the model). **Save local report** on the results screen exports the
+same `omobench-local-report` document as the advanced panel, and **Share
+results** lists the publication requirements separately, so a completed
+benchmark and an eligible submission stay distinct.
+
 Browsing history preserves the recipe and storage folder selected for the next
 run. **Prepare and run** returns to that selection with a fresh read-only review,
 or explains that you need to choose a test if none is selected. Historical

@@ -14,6 +14,31 @@ if (incoming) {
 }
 const token = sessionStorage.getItem("omobench-token") || "";
 
+// The same component the guided recipes mount, with the stages OmoBench can
+// actually observe here: it did not download these weights, did not start this
+// server and did not load its model, so those stages do not exist on this route.
+const dashboard = new BenchmarkDashboard($("dashboard-mount"), {
+  stages: BenchmarkDashboard.EXTERNAL_STAGES,
+  stageNote: "Your server is already running; these are OmoBench's own runner stages",
+  downloadProgress: false,
+  serverLog: false,
+});
+let runStartedAt = null;
+let lastKnownStageIndex = 0;
+let requirements = null;
+
+// GuideLLM's own accumulator.timings.status, mapped in telemetry.py. Without a
+// snapshot the only honest statement is that OmoBench started its runner: it
+// cannot see warmup or measurement until the runner reports them.
+function externalStageKey(job, telemetry) {
+  if (!["running", "cancelling"].includes(job.status)) return null;
+  if (telemetry && telemetry.available) {
+    if (telemetry.stage) return telemetry.stage === "starting" ? "starting_runner" : telemetry.stage;
+    return "benchmarking";
+  }
+  return "starting_runner";
+}
+
 function notice(message, error = false) {
   $("notice").textContent = message;
   $("notice").classList.toggle("error", error);
@@ -44,7 +69,7 @@ function updateButtons() {
   $("prepare-button").disabled = busy;
   $("download-bundle").disabled = busy;
   $("submit-button").disabled = busy || !preview?.can_submit || !$("submit-confirmed").checked;
-  $("cancel-run").disabled = pending;
+  $("cancel-button").disabled = pending || jobs.find((job) => job.id === selected)?.status === "cancelling";
 }
 
 async function action(work) {
@@ -113,37 +138,52 @@ function renderJobs() {
   updateButtons();
 }
 
-function metric(label, value, unit = "") {
-  const box = document.createElement("dl"), dt = document.createElement("dt"), dd = document.createElement("dd"), suffix = document.createElement("span");
-  box.className = "metric"; dt.textContent = label;
-  dd.textContent = typeof value === "number" ? value.toLocaleString(undefined, {maximumFractionDigits: 2}) : value;
-  suffix.textContent = unit; dd.append(suffix); box.append(dt, dd); return box;
-}
-
-function renderRun(job) {
+function renderRun(job, telemetry = null) {
+  // A response that arrived after the selection moved on must never overwrite
+  // the run now on screen.
   if (job.id !== selected) return;
   $("run-panel").hidden = false;
   $("run-title").textContent = job.model;
   $("run-status").textContent = `${job.execution_device.toUpperCase()} · ${job.status}`;
   const duration = Math.max(0, Math.floor((new Date(job.finished_at || Date.now()) - new Date(job.created_at)) / 1000));
-  $("run-meta").textContent = `${job.profile} · ${Math.floor(duration / 60)}m ${duration % 60}s · ${new Date(job.created_at).toLocaleString()}`;
-  $("run-error").hidden = !job.error; $("run-error").textContent = job.error || "";
-  const log = $("log"), atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
-  log.textContent = job.log || "Waiting for the runner…";
-  if (atEnd) log.scrollTop = log.scrollHeight;
-  $("run-path").textContent = job.run_path ? `Evidence: ${job.run_path}` : "";
-  $("cancel-run").hidden = !["running", "cancelling"].includes(job.status);
-  $("cancel-run").textContent = job.status === "cancelling" ? "Cancelling…" : "Cancel benchmark";
+  $("run-meta").textContent = `${job.profile} · ${Math.floor(duration / 60)}m ${duration % 60}s · ${new Date(job.created_at).toLocaleString()}`
+    + (job.tokenizer ? ` · tokenizer ${job.tokenizer}` : "");
+
+  const active = ["running", "cancelling"].includes(job.status);
+  const stageKey = externalStageKey(job, telemetry);
+  if (stageKey) lastKnownStageIndex = Math.max(lastKnownStageIndex, dashboard.stageIndex(stageKey));
+  dashboard.render({
+    stageKey,
+    lastKnownStageIndex,
+    cancelling: job.status === "cancelling",
+    runActive: active,
+    telemetry,
+    maxDurationSeconds: setup?.profiles?.[job.profile]?.max_duration_seconds,
+    startedAt: runStartedAt,
+    logText: job.log || "Waiting for the runner…",
+  });
+  $("cancel-button").hidden = !active;
+  $("cancel-button").textContent = job.status === "cancelling" ? "Cancelling…" : "Cancel benchmark";
+  $("cancel-button").disabled = pending || job.status === "cancelling";
+  $("start-over-button").hidden = active;
+  if (!active) {
+    dashboard.finish({
+      ok: job.status === "completed" && !!job.summary,
+      status: job.status,
+      // The runner on this route is OmoBench's own CLI process, which the
+      // controller starts before the job exists at all.
+      runnerStarted: true,
+      errorMessage: job.error,
+      createdAt: job.created_at,
+      finishedAt: job.finished_at,
+    });
+  }
+
   $("metrics").hidden = !job.summary;
   $("download-summary").hidden = !job.summary;
   $("local-note").hidden = !job.summary || job.execution_device !== "cpu";
-  if (job.summary) {
-    const r = job.summary.results;
-    $("metrics").replaceChildren(metric("Time to first token · p50", r.latency_ms.ttft.p50, "ms"),
-      metric("Time to first token · p95", r.latency_ms.ttft.p95, "ms"), metric("Output tokens / second", r.output_tokens_per_second),
-      metric("Total tokens / second", r.total_tokens_per_second), metric("Successful / attempted", `${r.requests.succeeded} / ${r.requests.attempted}`),
-      metric("Error rate", r.error_rate_percent, "%"));
-  }
+  if (job.summary) $("metrics").replaceChildren(...BenchmarkDashboard.metricCards(job.summary));
+  $("run-path").textContent = job.run_path ? `Evidence: ${job.run_path}` : "";
   $("package-panel").hidden = !job.summary;
   $("package-panel-device").textContent = `${job.execution_device.toUpperCase()} evidence`;
   $("gpu-memory-field").hidden = job.execution_device === "cpu";
@@ -161,14 +201,44 @@ function renderRun(job) {
   }
 }
 
+// The whole set of publication requirements at once, before packaging is
+// attempted. Local export never depends on any of them.
+function renderRequirements(report) {
+  requirements = report;
+  $("publication-checklist").replaceChildren(...report.items.map((item) => {
+    const li = document.createElement("li");
+    li.className = `status-item ${item.ok === null ? "pending" : item.ok ? "ok" : "fail"}`;
+    const strong = document.createElement("strong"), span = document.createElement("span");
+    strong.textContent = item.label; span.textContent = item.detail;
+    li.append(strong, span);
+    return li;
+  }));
+  const missing = report.items.filter((item) => item.ok === false).length;
+  $("publication-summary").textContent = missing
+    ? `${missing} requirement${missing === 1 ? "" : "s"} still missing for a community submission. Your measurements are already saved, and "Save local report" works regardless.`
+    : "Every requirement this panel can check is satisfied. Packaging and the registry validator remain the authority.";
+}
+
 async function selectRun(id) {
-  selected = id; preview = null;
+  selected = id; preview = null; requirements = null;
   $("submission-preview").hidden = true; $("submit-confirmed").checked = false;
+  $("publication-checklist").replaceChildren(); $("publication-summary").textContent = "";
   const job = await api(`/api/runs/${id}`);
+  if (selected !== id) return;
   $("package-form").reset(); $("package-model").value = job.model; $("framework").value = "llama.cpp"; frameworkChanged();
   // Verified managed-run metadata, when present, so packaging never requires typing a source by hand.
   $("package-model-source").value = job.model_source || "";
-  renderRun(job); renderJobs();
+  runStartedAt = new Date(job.created_at).getTime();
+  lastKnownStageIndex = 0;
+  dashboard.prepareForRun({
+    subtitle: `${job.model} · ${job.profile} · ${job.execution_device.toUpperCase()} declared`
+      + (job.tokenizer ? ` · tokenizer ${job.tokenizer}` : ""),
+  });
+  // Best-effort: a run without telemetry (an older job, or one whose observer
+  // disabled itself) still renders, honestly reporting it as unavailable.
+  const telemetry = await api(`/api/runs/${id}/telemetry`).catch(() => null);
+  if (selected !== id) return;
+  renderRun(job, telemetry); renderJobs();
 }
 
 function download(blob, name) {
@@ -197,11 +267,23 @@ $("run-form").addEventListener("submit", (event) => {
     await selectRun(job.id); $("run-panel").scrollIntoView({behavior: "smooth"});
   });
 });
-$("cancel-run").addEventListener("click", () => action(async () => renderRun(await api(`/api/runs/${selected}/cancel`, {}))));
+// Cancels OmoBench's own runner process group only. The model server is
+// started and owned by the contributor, and is never signalled from here.
+$("cancel-button").addEventListener("click", () => action(async () => renderRun(await api(`/api/runs/${selected}/cancel`, {}))));
+$("start-over-button").textContent = "Start another run";
+$("start-over-button").addEventListener("click", () => { $("configure").scrollIntoView({behavior: "smooth"}); $("model").focus(); });
 $("download-summary").addEventListener("click", () => action(async () => {
-  const job = await api(`/api/runs/${selected}`);
-  const summary = {kind: "omobench-local-summary", execution_device: job.execution_device, model: job.model, profile: job.profile, ...job.summary};
-  download(new Blob([JSON.stringify(summary, null, 2) + "\n"], {type: "application/json"}), `${job.id}-local-summary.json`);
+  const report = await api(`/api/runs/${selected}/local-report`);
+  download(new Blob([JSON.stringify(report, null, 2) + "\n"], {type: "application/json"}), `${selected}-local-report.json`);
+}));
+$("check-requirements").addEventListener("click", () => action(async () => {
+  const data = Object.fromEntries(new FormData($("package-form")));
+  renderRequirements(await api(`/api/runs/${selected}/requirements`, data));
+}));
+$("check-tokenizer").addEventListener("click", () => action(async () => {
+  const report = await api("/api/tokenizer-check", {tokenizer: $("tokenizer").value, model: $("model").value});
+  $("tokenizer-result").textContent = report.message;
+  $("tokenizer-result").classList.toggle("error", !report.ok);
 }));
 $("package-form").addEventListener("submit", (event) => {
   event.preventDefault(); action(async () => {
@@ -211,6 +293,10 @@ $("package-form").addEventListener("submit", (event) => {
     data.gpu_memory_gb = data.gpu_memory_gb && currentJob?.execution_device !== "cpu" ? Number(data.gpu_memory_gb) : null;
     if (data.framework !== "openai-compatible-other") data.server_description = "";
     preview = null; $("submission-preview").hidden = true; $("submit-confirmed").checked = false;
+    renderRequirements(await api(`/api/runs/${selected}/requirements`, data));
+    if (!requirements.ready) {
+      throw new Error("This run is not ready for a community submission. The checklist above lists every missing requirement. Your measurements are kept either way.");
+    }
     renderRun(await api(`/api/runs/${selected}/package`, data));
   });
 });
@@ -244,11 +330,18 @@ $("submit-button").addEventListener("click", () => action(async () => {
   notice("Submission available on GitHub. Follow its checks and maintainer review there."); $("submit-confirmed").checked = false;
 }));
 
+// Exactly one polling loop for the whole page: selecting another run changes
+// what it asks for, it never starts a second loop.
 async function poll() {
   try {
     if (!pending) {
       jobs = await api("/api/runs"); renderJobs();
-      if (selected) renderRun(await api(`/api/runs/${selected}`));
+      if (selected) {
+        const id = selected;
+        const job = await api(`/api/runs/${id}`);
+        const telemetry = await api(`/api/runs/${id}/telemetry`).catch(() => null);
+        if (id === selected) renderRun(job, telemetry);
+      }
     }
   } catch (error) { notice(`Local panel connection: ${error.message} Keep omobench ui running.`, true); }
   finally { setTimeout(poll, 1500); }

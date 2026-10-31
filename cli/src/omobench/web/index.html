@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>OmoBench · Local control</title>
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/dashboard.css">
+  <script src="/dashboard.js" defer></script>
   <script src="/community.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
@@ -35,26 +37,31 @@
             <label>Benchmark profile<select id="profile" name="profile"></select></label>
             <label>Server execution device<select id="execution-device" name="execution_device"><option value="cpu">CPU</option><option value="gpu">GPU</option></select></label>
           </div>
+          <label>Tokenizer source <span class="muted small">optional</span><input id="tokenizer" name="tokenizer" placeholder="Hugging Face repository or local tokenizer folder" spellcheck="false">
+            <span class="hint">Leave blank to use the server model identifier above. Set it when that identifier is a serving alias rather than a Hugging Face repository — an LM Studio alias such as <code>qwen/qwen3-vl-4b:3</code>, for example. The workload's prompts are built and counted with this tokenizer; it never changes which model your server serves, and it is not a claim about which weights are loaded.</span></label>
           <p id="profile-detail" class="profile-detail"></p>
           <label class="check"><input id="device-confirmed" type="checkbox" required><span>I have configured this device in my model server and confirmed inference actually runs there (in the server logs or telemetry).</span></label>
           <p class="hint">Selecting CPU or GPU records your declaration; it does not change the model server. CPU and GPU results are both eligible for packaging and submission.</p>
-          <div class="actions"><button id="test-connection" type="button" class="secondary">Test connection</button><button id="start-run" type="submit">Run benchmark <span aria-hidden="true">↗</span></button></div>
+          <div class="actions"><button id="test-connection" type="button" class="secondary">Test connection</button><button id="check-tokenizer" type="button" class="secondary">Check tokenizer</button><button id="start-run" type="submit">Run benchmark <span aria-hidden="true">↗</span></button></div>
           <p id="connection-result" class="hint" role="status"></p>
+          <p id="tokenizer-result" class="hint" role="status"></p>
+          <p class="hint">Two separate checks: <strong>Test connection</strong> sends one small streaming request to your server, and <strong>Check tokenizer</strong> inspects the tokenizer configuration offline. A working server does not mean the benchmark can start — the workload also needs tokenizer files, which the runner downloads from Hugging Face on first use unless they are already cached locally.</p>
         </form>
       </section>
       <section id="run-panel" class="panel" hidden>
         <div class="section-head"><div><span class="step">02</span><h2 id="run-title">Benchmark</h2></div><span id="run-status" class="pill"></span></div>
         <p id="run-meta" class="muted"></p>
-        <p id="run-error" class="notice error" role="status" hidden></p>
+        <!-- The same dashboard component the guided recipes mount, with the
+             stages OmoBench actually observes against a server you run. -->
+        <div id="dashboard-mount"></div>
         <div id="metrics" class="grid metrics" hidden></div>
-        <p id="local-note" class="notice" hidden>These are CPU measurements. Package and review them below the same way as a GPU run, or download this summary for a quick local record.</p>
-        <div class="actions"><button id="cancel-run" type="button" class="danger" hidden>Cancel benchmark</button><button id="download-summary" type="button" class="secondary" hidden>Download local summary</button></div>
-        <details id="log-details" open><summary>Live runner log <span class="hint">Latest output · refreshes automatically</span></summary><pre id="log" tabindex="0">Waiting for the runner…</pre></details>
+        <p id="local-note" class="notice" hidden>These are CPU measurements. Package and review them below the same way as a GPU run, or save a local report for your own records.</p>
+        <div class="actions"><button id="download-summary" type="button" class="secondary" hidden>Save local report</button></div>
         <p id="run-path" class="hint path"></p>
       </section>
       <section id="package-panel" class="panel" hidden>
         <div class="section-head"><div><span class="step">03</span><h2>Review &amp; submit</h2></div><span id="package-panel-device" class="pill">Evidence</span></div>
-        <p class="muted">Record the model and serving configuration used for this run. Packaging uses the existing CLI and registry validator.</p>
+        <p class="muted">Two separate things. <strong>Save local report</strong>, above, needs none of this: it exports the measurements this machine recorded, for any model, with no sign-in. Everything below prepares a <strong>community submission</strong>, which additionally needs catalogued model identity, an immutable weights revision and the profile's acceptance thresholds. Packaging uses the existing CLI and registry validator.</p>
 <div class="community-submission">
             <label>Submission destination<select id="submission-mode">
               <option value="community">OmoBench community registry</option>
@@ -80,20 +87,22 @@
               </details>
             </section>
           </div>
+        <ul class="status-checklist" id="publication-checklist"></ul>
+        <p id="publication-summary" class="hint"></p>
         <form id="package-form">
           <div class="grid two">
-            <label>Canonical model ID<input name="model" id="package-model" list="catalog-models" required spellcheck="false"><datalist id="catalog-models"></datalist><span class="hint">Public results must use a model listed in the catalog.</span></label>
-            <label>Immutable model revision<input name="model_revision" required placeholder="Model commit SHA or immutable revision" spellcheck="false"></label>
+            <label>Canonical model ID<input name="model" id="package-model" list="catalog-models" spellcheck="false"><datalist id="catalog-models"></datalist><span class="hint">The catalogued identity of the model, which is not the same as the alias your server answers to. Public results must use a model listed in the catalog.</span></label>
+            <label>Immutable model revision<input name="model_revision" placeholder="Commit SHA of the weights repository" spellcheck="false"><span class="hint">The repository revision of the weights you actually ran. Not the file's SHA-256 checksum and not the OmoBench commit; 'main' and 'latest' move, so they identify nothing.</span></label>
             <label>Framework<select name="framework" id="framework"></select></label>
-            <label>Exact framework version<input name="framework_version" required placeholder="Version, build, and commit where available"></label>
-            <label>Quantization<input name="quantization" placeholder="For example BF16 or Q4_K_M"></label>
-            <label>Submitter<input id="submitter" name="submitter" required placeholder="GitHub username or organization"></label>
+            <label>Exact framework version<input name="framework_version" placeholder="Runtime build, e.g. llama.cpp b10621"><span class="hint">The serving runtime's own build. An application version, such as the LM Studio release, is a different thing; record the runtime build rather than guessing one.</span></label>
+            <label>Quantization<input name="quantization" placeholder="For example BF16 or Q4_K_M"><span class="hint">A label, not proof of identity on its own.</span></label>
+            <label>Submitter<input id="submitter" name="submitter" placeholder="GitHub username or organization"></label>
           </div>
           <label>Model weights source (optional)<input name="model_source" id="package-model-source" type="url" placeholder="Exact pinned download URL, if different from a generic catalog reference" spellcheck="false"><span class="hint">When set, the model revision above is understood as this source's own repository, not necessarily the canonical model ID's repository. Prefilled automatically for a managed CPU run.</span></label>
           <label id="description-field" hidden>Server description<input name="server_description" id="server-description" placeholder="Name and details of the generic server"></label>
           <label>Runtime startup arguments<textarea name="runtime_args" rows="3" placeholder="One argument per line, e.g. --ctx-size=2048"></textarea><span class="hint">Record the actual server settings, including GPU offload. Do not include tokens or passwords.</span></label>
           <details><summary>Hardware details, if detection is incomplete</summary><div class="grid two"><label id="gpu-memory-field">GPU memory per card (GB)<input name="gpu_memory_gb" type="number" min="0.01" step="any" placeholder="Only if detected VRAM is unknown"></label><label>CPU description<input name="cpu" placeholder="Leave blank to use detected CPU"></label></div></details>
-          <div class="actions"><button id="package-button" type="submit">Package &amp; validate</button></div>
+          <div class="actions"><button id="check-requirements" type="button" class="secondary">Check publication requirements</button><button id="package-button" type="submit">Package &amp; validate</button></div>
         </form>
         <p id="validation-result" class="notice" role="status" hidden></p>
         <button id="prepare-button" class="secondary" type="button" hidden>Review submission files</button>

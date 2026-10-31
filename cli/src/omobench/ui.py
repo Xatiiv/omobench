@@ -110,7 +110,18 @@ def run_config(data: dict) -> dict:
         raise UIError("Choose CPU or GPU execution.")
     if data.get("device_confirmed") is not True:
         raise UIError("Confirm the execution device in your model server first.")
-    return {"endpoint": endpoint, "model": model, "profile": profile, "execution_device": device}
+    # Two separate identities. `model` is the exact string the server's API
+    # accepts; `tokenizer` is the repository or folder whose tokenizer builds
+    # and counts the workload. Blank keeps GuideLLM's existing default, which
+    # is to use `model` for both.
+    tokenizer = text_field(data, "tokenizer", optional=True)
+    if tokenizer:
+        try:
+            tokenizer = cli.validate_tokenizer_source(tokenizer)
+        except ValueError as error:
+            raise UIError(str(error)) from error
+    return {"endpoint": endpoint, "model": model, "profile": profile,
+            "execution_device": device, "tokenizer": tokenizer or None}
 
 
 def safe_log(value: str) -> str:
@@ -222,17 +233,8 @@ class Controller:
         report = cli.doctor_report()
         preflight = cli.guidellm_runner_preflight()
         native_windows = sys.platform == "win32"
-        catalog = []
-        import yaml
-        for path in sorted((self.root / "catalog" / "models").glob("*.yaml")):
-            try:
-                document = yaml.safe_load(path.read_text(encoding="utf-8"))
-                catalog.extend(entry["id"] for entry in document.get("models", [])
-                               if isinstance(entry, dict) and entry.get("modality") == "text-generation" and isinstance(entry.get("id"), str))
-            except (OSError, ValueError, AttributeError, yaml.YAMLError):
-                continue
         return {"environment": report, "profiles": cli.PROFILE_SPECS,
-                "frameworks": cli.RUNTIME_FRAMEWORKS, "catalog": sorted(set(catalog)),
+                "frameworks": cli.RUNTIME_FRAMEWORKS, "catalog": self.catalog_models(),
                 "can_execute": not native_windows and preflight.ok,
                 "runner_message": ("Start this panel from WSL2 or Linux to execute benchmarks." if native_windows else
                     preflight.message),
@@ -268,6 +270,7 @@ class Controller:
             directory.mkdir()
             job = {"id": job_id, "created_at": datetime.now(UTC).isoformat(), "status": "running",
                    "model": config["model"], "profile": config["profile"], "execution_device": config["execution_device"],
+                   "tokenizer": config.get("tokenizer"),
                    "summary": None, "error": None, "validation": None, "submission": None}
             self.jobs[job_id] = job
             self._save(job)
@@ -275,6 +278,8 @@ class Controller:
             arguments = ["run", f"--endpoint={config['endpoint']}", f"--model={config['model']}",
                          f"--profile={config['profile']}", f"--output-dir={directory.relative_to(self.root).as_posix()}",
                          f"--telemetry-dir={telemetry_dir}", "--execute"]
+            if config.get("tokenizer"):
+                arguments.append(f"--tokenizer={config['tokenizer']}")
             self.worker = threading.Thread(target=self._execute, args=(job, arguments), daemon=True)
             self.worker.start()
             return dict(job)
@@ -404,6 +409,178 @@ class Controller:
                     logs.append(safe_log(stream.read(MAX_LOG_BYTES).decode("utf-8", errors="replace")))
         job["log"] = "\n".join(logs)
         return job
+
+    def catalog_models(self) -> list[str]:
+        """The catalogued model IDs, the registry's own source of truth."""
+        import yaml
+
+        catalog: list[str] = []
+        for path in sorted((self.root / "catalog" / "models").glob("*.yaml")):
+            try:
+                document = yaml.safe_load(path.read_text(encoding="utf-8"))
+                catalog.extend(entry["id"] for entry in document.get("models", [])
+                               if isinstance(entry, dict) and entry.get("modality") == "text-generation"
+                               and isinstance(entry.get("id"), str))
+            except (OSError, ValueError, AttributeError, yaml.YAMLError):
+                continue
+        return sorted(set(catalog))
+
+    def local_report(self, job_id: str) -> dict:
+        """A local record of what this machine measured.
+
+        Deliberately not the public result.json contract: it needs no
+        publication metadata, works for an uncatalogued model and an unknown
+        revision, and says "unknown" instead of inventing anything. It carries
+        measurements and the identities OmoBench itself recorded -- never the
+        runner log, the environment snapshot, the endpoint, or anything else
+        that could hold a secret.
+        """
+        with self.lock:
+            job = dict(self._get(job_id))
+        if not job.get("summary"):
+            raise UIError("This run has no completed measurements to export.")
+        summary = job["summary"]
+        tokenizer = job.get("tokenizer")
+
+        def declared(value):
+            return value if value else "unknown"
+
+        return {
+            "kind": "omobench-local-report",
+            "format_version": 1,
+            "note": (
+                "A local record of measurements taken on this machine. This is not an OmoBench "
+                "public result: the registry's contract is result.json, produced by packaging, "
+                "which additionally requires catalogued model identity, an immutable revision, "
+                "exact runtime provenance and the profile's acceptance thresholds. Completing a "
+                "benchmark and being eligible for publication are separate things."
+            ),
+            "run": {
+                "id": job["id"],
+                "status": job["status"],
+                "created_at": job["created_at"],
+                "finished_at": job.get("finished_at"),
+                "profile_id": job["profile"],
+                "runner": "guidellm",
+                "runner_version": summary.get("runner_version", "unknown"),
+                "started_at": summary.get("started_at"),
+            },
+            "server": {
+                "model_identifier": job["model"],
+                "identifier_is": "the string this run sent to the server's API, not a catalog identity",
+                "execution_device": job["execution_device"],
+                "execution_device_source": "declared by the person running the benchmark",
+            },
+            "workload": {
+                "tokenizer_source": tokenizer or job["model"],
+                "tokenizer_source_explicit": bool(tokenizer),
+                "tokenizer_note": (
+                    "An explicit tokenizer source was used to build and count the workload."
+                    if tokenizer else
+                    "No override was given, so the server model identifier was also used as the tokenizer source."
+                ),
+            },
+            "recorded_provenance": {
+                "observed_by_omobench": {
+                    "profile_id": job["profile"],
+                    "runner_version": summary.get("runner_version", "unknown"),
+                    "measurements": "produced by this run",
+                },
+                "declared_or_prefilled": {
+                    "model_revision": declared(job.get("model_revision")),
+                    "model_source": declared(job.get("model_source")),
+                    "quantization": declared(job.get("quantization")),
+                    "runtime_framework": declared(job.get("framework")),
+                    "runtime_version": declared(job.get("framework_version")),
+                    "runtime_arguments": job.get("runtime_args") or [],
+                },
+            },
+            "measurements": summary.get("results"),
+            "publication": self.publication_requirements(job_id),
+        }
+
+    def publication_requirements(self, job_id: str, data: dict | None = None) -> dict:
+        """Everything the public registry needs that this run does not have yet.
+
+        A readable list, computed before packaging is attempted, so the whole
+        set of missing requirements is visible at once instead of one native
+        form popup at a time. It never relaxes anything: packaging and the
+        registry validator remain the authority, and this only reports.
+        """
+        with self.lock:
+            job = dict(self._get(job_id))
+        values = data or {}
+        catalog = self.catalog_models()
+        model = (values.get("model") if isinstance(values.get("model"), str) else None) or job["model"]
+        revision = values.get("model_revision") if isinstance(values.get("model_revision"), str) else job.get("model_revision")
+        framework = values.get("framework") if isinstance(values.get("framework"), str) else job.get("framework")
+        version = values.get("framework_version") if isinstance(values.get("framework_version"), str) else job.get("framework_version")
+        submitter = values.get("submitter") if isinstance(values.get("submitter"), str) else None
+        mutable = {"main", "master", "latest", "head"}
+
+        items = [{
+            "field": None,
+            "label": "Benchmark completed with measurements",
+            "ok": bool(job.get("summary")),
+            "detail": "This run produced measurements." if job.get("summary")
+                      else "Only a completed run can be packaged.",
+        }, {
+            "field": "model",
+            "label": "Canonical model ID is in the OmoBench catalog",
+            "ok": model in catalog,
+            "detail": (f"{model} is catalogued." if model in catalog else
+                       f"{model} is not currently eligible for the community registry: the catalog "
+                       f"({', '.join(catalog)}) is the registry's source of truth, and a model is added "
+                       "to it by a separate, reviewed change. You can still view and export this run's "
+                       "local report. Never substitute a different, catalogued model for the one you ran."),
+        }, {
+            "field": "model_revision",
+            "label": "Immutable revision of the actual weights source",
+            "ok": bool(revision) and revision.strip().lower() not in mutable,
+            "detail": ("Recorded." if revision and revision.strip().lower() not in mutable else
+                       "A commit SHA or other immutable revision of the repository the weights really "
+                       "came from. 'main', 'master' and 'latest' move, so they identify nothing. This is "
+                       "not the file's SHA-256 checksum and not the OmoBench source commit. When the "
+                       "weights come from a quantization repository, record that repository as the "
+                       "weights source and pin its own revision."),
+        }, {
+            "field": "framework_version",
+            "label": "Exact serving runtime version",
+            "ok": bool(framework) and bool(version),
+            "detail": ("Recorded." if framework and version else
+                       "The inference runtime and its exact version, for example llama.cpp build b10621. "
+                       "An application version (the LM Studio release, say) is a different thing from the "
+                       "llama.cpp build it embeds; record the runtime build, and do not guess one."),
+        }, {
+            "field": "submitter",
+            "label": "Submitter identity",
+            "ok": submitter is None or bool(submitter.strip()),
+            "detail": "Your GitHub username or organization, recorded in the bundle.",
+        }, {
+            "field": None,
+            "label": "Profile acceptance",
+            "ok": (None if not job.get("validation") else
+                   not any("acceptance:" in message for message in job["validation"].get("errors", []))),
+            "detail": ("Checked when you package this run."
+                       if not job.get("validation") else
+                       " ".join(message for message in job["validation"].get("errors", []) if "acceptance:" in message)
+                       or "Meets this profile's minimum successful requests and maximum error rate."),
+        }]
+        return {
+            "model": model,
+            "catalog": catalog,
+            "catalogued": model in catalog,
+            "items": items,
+            "ready": all(item["ok"] is not False for item in items),
+            "local_export_available": bool(job.get("summary")),
+        }
+
+    def tokenizer_check(self, data: dict) -> dict:
+        """Inspect a tokenizer source offline, before anything is downloaded."""
+        return cli.tokenizer_source_report(
+            text_field(data, "tokenizer", optional=True),
+            served_model=text_field(data, "model", optional=True) or None,
+        )
 
     def listing(self) -> list[dict]:
         with self.lock:
@@ -619,7 +796,9 @@ class UIHandler(BaseHTTPRequestHandler):
                       "/guided": ("guided.html", "text/html; charset=utf-8"),
                       "/guided.js": ("guided.js", "text/javascript; charset=utf-8"),
                       "/community.js": ("community.js", "text/javascript; charset=utf-8"),
+                      "/dashboard.js": ("dashboard.js", "text/javascript; charset=utf-8"),
                       "/guided.css": ("guided.css", "text/css; charset=utf-8"),
+                      "/dashboard.css": ("dashboard.css", "text/css; charset=utf-8"),
                       "/advanced": ("index.html", "text/html; charset=utf-8"),
                       "/app.js": ("app.js", "text/javascript; charset=utf-8"),
                       "/style.css": ("style.css", "text/css; charset=utf-8")}
@@ -641,6 +820,14 @@ class UIHandler(BaseHTTPRequestHandler):
             match = re.fullmatch(r"/api/runs/(job-[a-f0-9]{16})/telemetry", self.path)
             if match:
                 return self._json(controller.telemetry(match[1]))
+            match = re.fullmatch(r"/api/runs/(job-[a-f0-9]{16})/local-report", self.path)
+            if match:
+                return self._json(controller.local_report(match[1]))
+            # Read-only, from what the run already recorded. The POST form of
+            # this path exists only to check values typed but not yet saved.
+            match = re.fullmatch(r"/api/runs/(job-[a-f0-9]{16})/requirements", self.path)
+            if match:
+                return self._json(controller.publication_requirements(match[1]))
             managed = self.server.managed
             if self.path == "/api/managed/recipes":
                 return self._json({"recipes": managed.recipes(), "default_storage_dir": managed.default_storage_dir()})
@@ -677,8 +864,13 @@ class UIHandler(BaseHTTPRequestHandler):
                 return self._json(controller.github_action(auth[1]))
             if self.path == "/api/connection":
                 return self._json(controller.connection(data))
+            if self.path == "/api/tokenizer-check":
+                return self._json(controller.tokenizer_check(data))
             if self.path == "/api/runs":
                 return self._json(controller.start(data), 202)
+            match = re.fullmatch(r"/api/runs/(job-[a-f0-9]{16})/requirements", self.path)
+            if match:
+                return self._json(controller.publication_requirements(match[1], data))
             match = re.fullmatch(r"/api/runs/(job-[a-f0-9]{16})/(cancel|package|prepare|submit)", self.path)
             if match:
                 job_id, action = match.groups()
