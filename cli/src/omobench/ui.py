@@ -553,9 +553,13 @@ class Controller:
                        "llama.cpp build it embeds; record the runtime build, and do not guess one."),
         }, {
             "field": "submitter",
+            # Not yet typed is not the same as satisfied: with no value to look
+            # at, the honest answer is that this has not been checked.
             "label": "Submitter identity",
-            "ok": submitter is None or bool(submitter.strip()),
-            "detail": "Your GitHub username or organization, recorded in the bundle.",
+            "ok": None if submitter is None else bool(submitter.strip()),
+            "detail": ("Your GitHub username or organization, recorded in the bundle."
+                       if submitter is None or submitter.strip()
+                       else "Enter the GitHub username or organization to record in the bundle."),
         }, {
             "field": None,
             "label": "Profile acceptance",

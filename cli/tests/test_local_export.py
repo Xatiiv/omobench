@@ -204,6 +204,15 @@ class LocalExportTests(unittest.TestCase):
         self.assertIn("29 successful requests", acceptance["detail"])
         self.assertFalse(report["ready"])
 
+    def test_a_submitter_that_was_never_entered_is_unchecked_not_satisfied(self):
+        item = next(entry for entry in self.controller.publication_requirements(self.job()["id"])["items"]
+                    if entry["field"] == "submitter")
+        self.assertIsNone(item["ok"])
+        blank = next(entry for entry in self.controller.publication_requirements(
+            self.job()["id"], {"submitter": "  "})["items"] if entry["field"] == "submitter")
+        self.assertFalse(blank["ok"])
+        self.assertIn("Enter the GitHub username", blank["detail"])
+
     def test_acceptance_is_reported_as_unchecked_before_packaging(self):
         acceptance = next(item for item in self.controller.publication_requirements(self.job()["id"])["items"]
                           if item["label"] == "Profile acceptance")
