@@ -95,11 +95,19 @@ networking or run a server in the same WSL environment. Do not replace localhost
 with a LAN address: this version of the panel accepts loopback endpoints only.
 Authentication headers and redirects are also unsupported.
 
+A server that answers a benchmark request with a redirect fails that request
+rather than being followed, and this now applies to the benchmark itself and
+not only to the panel's connection check. That is deliberate: a result names
+the endpoint it was told to measure, so the requests behind it must go to that
+endpoint and nowhere else. If your server redirects — some proxies add a
+trailing-slash or HTTPS redirect — point OmoBench at the address it redirects
+to.
+
 ## Run is unavailable, slow, or interrupted
 
 - **Run benchmark** is disabled when the pinned runner is missing, native Windows
   is detected, or another operation is active. Check the setup message.
-- Start with `chat-small-v1`. Its duration constraint is 900 seconds; setup,
+- Start with `chat-small-v2`. Its duration constraint is 900 seconds; setup,
   warm-up/cool-down, and in-flight requests mean this is not an exact stopwatch
   deadline. CPU runs may be slow, and log output may arrive in bursts.
 - Do not chat with the model or run another benchmark at the same time.

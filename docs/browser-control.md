@@ -174,7 +174,7 @@ extra includes `uvloop`, which does not support native Windows.
    [saving a local report](#saving-a-local-report-is-not-submitting).
 
 For a CPU demonstration, load a small model with CPU execution explicitly
-enabled in your server, choose **chat-small-v1**, select **CPU**, and run. This is a
+enabled in your server, choose **chat-small-v2**, select **CPU**, and run. This is a
 real inference workload on your CPU, not a general CPU hardware test. Slower CPUs
 may reach the profile's time limit; the UI does not shorten or alter the workload.
 CPU and GPU results are both eligible for packaging and submission through the panel.

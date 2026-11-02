@@ -935,6 +935,17 @@ def build_guidellm_command(
     spec = PROFILE_SPECS[profile_id]
     target = endpoint.rstrip("/")
     backend = f"kind=openai_http,target={target},model={model},request_format=/v1/chat/completions"
+    # The benchmark must measure the destination that was selected, and only
+    # that one. OpenAIHTTPBackendArgs.follow_redirects defaults to *True* in
+    # GuideLLM 0.7.3 (guidellm/backends/openai/http.py), so without this a
+    # loopback server answering 307 sends every benchmark request -- prompts
+    # included -- to whatever host it names, while the result still records the
+    # loopback target as the thing that was measured. The panel's own
+    # connection checks already refuse a redirect (ui.NoRedirect); this is the
+    # same rule for the requests that actually produce the measurements.
+    # Demonstrated both ways against a redirecting fixture in
+    # cli/tests/test_redirect_destination.py.
+    backend += ",follow_redirects=false"
     # execution.request_timeout_seconds -> OpenAIHTTPBackendArgs.timeout, which
     # GuideLLM 0.7.3 passes to httpx as its READ timeout
     # (httpx.Timeout(read=args.timeout, connect=args.timeout_connect, ...), see

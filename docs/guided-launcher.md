@@ -19,15 +19,16 @@ fully available at `/advanced` in the same panel, and from the CLI.
 - **Reviewed recipes**, not a general downloader. A recipe in
   [`catalog/downloads/cpu-v1.json`](../catalog/downloads/cpu-v1.json) pins an
   exact HTTPS URL, an immutable revision, a file size, a SHA-256 hash, and a
-  licence for one model file and one runtime archive. This milestone ships
-  two recipes, both Qwen3 4B (Q4_K_M GGUF) with the same matching llama.cpp
-  CPU build and the same pinned artifacts: `qwen3-4b-cpu-v1` (the existing
-  `chat-small-v1` profile) and `qwen3-4b-cpu-extended-v1` (the same workload
-  on the longer-duration `chat-small-extended-v1` profile, see
+  licence for one model file and one runtime archive. Three recipes are
+  shipped, all Qwen3 4B (Q4_K_M GGUF) with the same matching llama.cpp CPU
+  build and the same pinned artifacts, differing only in the profile they
+  run: `qwen3-4b-cpu-v2` (`chat-small-v2`, the recommended choice),
+  `qwen3-4b-cpu-extended-v1` (`chat-small-extended-v1`, see
   [the proposal](proposals/chat-small-extended-v1.md), for hardware that
-  needs more than 15 minutes to collect enough measured samples). Selecting
-  the extended recipe never re-downloads anything already installed for the
-  classic one: both recipes pin identical model/runtime artifacts.
+  needs more than 15 minutes to collect enough measured samples), and
+  `qwen3-4b-cpu-v1` (`chat-small-v1`, kept so earlier results can be
+  reproduced). Switching between them never re-downloads anything already
+  installed: all three pin identical model/runtime artifacts.
 - It never runs an installer or touches system packages. It downloads two
   verified files and extracts one archive under a storage folder you choose,
   below `omobench-managed-v1/`.
@@ -233,8 +234,9 @@ own direct use is completely unaffected either way.
   a finished 100%.
 - **Completed requests and total budget.** Two different numbers, kept
   visibly separate: the runner's total request budget (`total_budget`,
-  including warmup and cooldown, 60 for `chat-small-extended-v1`) and the
-  profile's own declared measured-request target (`measured_requests_target`, 50 for both `chat-small-v1` and `chat-small-extended-v1`). Neither
+  including warmup and cooldown, 60 for `chat-small-v2` and
+  `chat-small-extended-v1`) and the profile's own declared measured-request
+  target (`measured_requests_target`, 50 for every short profile). Neither
   changes how many requests actually run; see
   [what each step does](#what-each-step-does) above for why the two numbers
   differ for the extended profile specifically.
