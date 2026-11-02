@@ -56,6 +56,7 @@ namespace OmoBench.Installer
             "cli/src/omobench/web/community.js",
             "cli/src/omobench/web/dashboard.js",
             "cli/src/omobench/web/dashboard.css",
+            "cli/src/omobench/web/favicon.svg",
             "cli/src/omobench/web/style.css",
             "cli/src/omobench/web/guided.html",
             "cli/src/omobench/web/guided.js",
