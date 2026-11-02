@@ -32,7 +32,15 @@ namespace OmoBench.Companion
             "import json,sys,importlib.metadata as md;" +
             "import omobench.cli as c;" +
             "g=next((d.version for d in md.distributions() if (d.metadata['Name'] or '').lower()=='guidellm'), None);" +
-            "print('OMOBENCH_PROBE ' + json.dumps({'module':c.__file__,'pinned':c.GUIDELLM_VERSION,'runner':g,'executable':sys.executable}))";
+            // Installed metadata is not health. This imports the runner in a
+            // bounded child process of its own, so an environment that cannot
+            // load it is reported here rather than at the start of a benchmark
+            // -- and a crash on import takes down the probe's child, not the
+            // probe. It downloads nothing and runs no inference.
+            "h=c.runner_health_check(timeout=90);" +
+            "print('OMOBENCH_PROBE ' + json.dumps({'module':c.__file__,'pinned':c.GUIDELLM_VERSION,'runner':g,"
+            + "'executable':sys.executable,'health':h.kind,'health_ok':h.ok,'health_message':h.message,"
+            + "'health_detail':h.detail}))";
 
         public static List<string> BuildProbeProgram(string pythonWslPath)
         {
@@ -98,12 +106,37 @@ namespace OmoBench.Companion
                     "Reinstall the runner extra from this checkout so the pinned version is used.");
             }
 
+            // Installed is not usable. An environment can carry the pinned
+            // version and still fail to import it, which is how a prepared
+            // environment looked ready and then crashed on torch. Readiness is
+            // only reported once the runner has actually been imported.
+            string health = ReadString(document, "health");
+            string healthMessage = ReadString(document, "health_message");
+            string healthDetail = ReadString(document, "health_detail");
+            if (string.IsNullOrEmpty(health))
+            {
+                return Fail("This environment check could not report whether the runner imports.",
+                    "Its probe did not answer that question. Reinstall the runner extra from this "
+                    + "checkout, then try again:\n    python -m pip install -e './cli[ui,runner]'");
+            }
+            if (!string.Equals(health, "ok", StringComparison.Ordinal))
+            {
+                return Fail(
+                    string.IsNullOrEmpty(healthMessage)
+                        ? "The pinned runner is installed but could not be imported (" + health + ")."
+                        : healthMessage,
+                    string.IsNullOrEmpty(healthDetail)
+                        ? "Benchmarks cannot start in this environment."
+                        : Diagnostics.Redact(healthDetail));
+            }
+
             return new EnvironmentCheckResult
             {
                 Ok = true,
-                Summary = "Ready: OmoBench imports from the selected checkout, GuideLLM "
-                    + runner + " is installed.",
-                Detail = "Interpreter: " + executable + "\nOmoBench module: " + modulePath,
+                Summary = "Ready: OmoBench imports from the selected checkout, and GuideLLM "
+                    + runner + " imports successfully.",
+                Detail = "Interpreter: " + executable + "\nOmoBench module: " + modulePath
+                    + (string.IsNullOrEmpty(healthMessage) ? "" : "\n" + healthMessage),
                 ModulePath = modulePath,
                 PinnedRunnerVersion = pinned,
                 InstalledRunnerVersion = runner,

@@ -210,6 +210,15 @@ remaining fraction rather than from elapsed time, a spent time budget is
 labelled instead of shown as a finished run, and 100% appears only once the
 evidence files are written.
 
+The profile's declared measured-request count is a *declaration*, not a
+guarantee. Three of the four shipped profiles resolve warmup and cooldown
+against the clock rather than against request counts, so their measured window
+is a fixed slice of the duration limit and how many requests land inside it
+depends on how long each request takes. The dashboard says so where it applies,
+and `docs/proposals/profile-phase-mapping-v2.md` records the confirmed
+declared-versus-enforced mapping for every profile along with a proposed
+correction that is not yet active.
+
 The request counts are deliberately two different sets. The live counters —
 **Requests finished** and the Successful/Errored/Cancelled row — come from the
 runner's scheduler, which has no phase concept: they count every request that
@@ -239,6 +248,35 @@ A local report is **not** a public result. It uses its own
 `omobench-local-report` format and makes no claim about publication
 eligibility; the registry's contract remains `result.json`, produced by
 packaging.
+
+### Comparing results
+
+The report records comparison context in three groups, because they answer
+different questions:
+
+| Group | Contents | Role in a comparison |
+| --- | --- | --- |
+| Workload definition | profile id and `profile_sha256`, request format, concurrency, input and requested output tokens, the profile's real phase contract | Must match for a comparison to be **controlled** |
+| Model configuration | server identifier, canonical id, revision, quantization, tokenizer source | Must match for a comparison to be about one model |
+| Execution configuration | hardware, the CPU/GPU declaration, serving runtime and version, runtime arguments | Usually the **subject** of the comparison |
+
+Comparing CPU against GPU, or one machine against another, on an otherwise
+identical workload is a controlled comparison and exactly what the execution
+group exists for. A difference there is a dimension, not a disqualification.
+A difference in the model or the workload makes the comparison *exploratory*:
+still informative, but a comparison between different things rather than a
+ranking of one thing.
+
+Two cautions the report states explicitly. Token counts come from the tokenizer
+named in the report, so the same token count under two different tokenizers has
+not necessarily processed the same text or done the same work. And unknown
+provenance means comparability is **not fully established** for those fields --
+not that a comparison is certified, and not that it is forbidden; the report
+lists exactly which fields are unknown.
+
+None of this is publication eligibility. A result can be entirely comparable and
+still ineligible for the registry, whose schema, catalog, provenance and
+acceptance checks are unchanged.
 
 ## Packaging and pull requests
 

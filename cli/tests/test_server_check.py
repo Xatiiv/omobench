@@ -17,6 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
+from omobench import cli
 from omobench.ui import UIError, endpoint_origin, served_models, server_check
 
 
@@ -238,6 +239,47 @@ class StagedServerCheckTests(unittest.TestCase):
         self.assertEqual(tokenizer["state"], "ok")
         self.assertEqual(tokenizer["kind"], "local")
         self.assertIn("Nothing is downloaded", tokenizer["detail"])
+
+
+class RunnerStageTests(unittest.TestCase):
+    """The runner stage says which question it answered."""
+
+    def setUp(self):
+        self.server = fixture_server(models=["served/one"])
+        self.endpoint = self.server.__enter__()
+        self.addCleanup(self.server.__exit__, None, None, None)
+
+    def check(self, **kwargs):
+        return server_check({"endpoint": self.endpoint, "model": "served/one",
+                             "tokenizer": TOKENIZER}, **kwargs)
+
+    def test_without_a_health_result_the_stage_admits_it_read_metadata_only(self):
+        report = self.check(can_execute=True, runner_message="GuideLLM 0.7.3 ready.")
+        runner = stages(report)["runner"]
+        self.assertEqual(runner["title"], "Benchmark runner available")
+        self.assertIn("installed metadata only", runner["detail"])
+        self.assertIn("not whether the runner imports", runner["detail"])
+
+    def test_a_real_import_is_reported_as_one(self):
+        health = cli.runner_health_check(
+            probe=("import json, sys; print('OMOBENCH_RUNNER_HEALTH ' + json.dumps("
+                   f"{{'guidellm': {cli.GUIDELLM_VERSION!r}, 'python': sys.version.split()[0],"
+                   " 'executable': sys.executable}))"),
+            timeout=30)
+        report = self.check(can_execute=True, runner_health=health)
+        runner = stages(report)["runner"]
+        self.assertEqual(runner["title"], "Benchmark runner imports")
+        self.assertEqual(runner["state"], "ok")
+        self.assertIn("imported successfully", runner["detail"])
+        self.assertIn("nothing was downloaded", runner["checked"])
+
+    def test_an_environment_that_cannot_import_blocks_readiness(self):
+        health = cli.runner_health_check(probe="import omobench_not_a_real_module", timeout=30)
+        report = self.check(can_execute=True, runner_health=health)
+        runner = stages(report)["runner"]
+        self.assertEqual(runner["state"], "failed")
+        self.assertIn("not fully installed", runner["detail"])
+        self.assertFalse(report["ready"])
 
 
 class LoopbackBoundaryTests(unittest.TestCase):

@@ -82,8 +82,9 @@ globalThis.BenchmarkDashboard = class BenchmarkDashboard {
         <div><dt>Requests finished</dt><dd id="fact-requests">Pending</dd></div>
         <div><dt>Maximum duration</dt><dd id="fact-max-duration">Pending</dd></div>
       </dl>
-      <div class="request-health"><span>All phases, warmup and cooldown included</span><span>Successful <strong id="live-successful">Pending</strong></span><span>Errored <strong id="live-errors">Pending</strong></span><span>Cancelled <strong id="live-cancelled">Pending</strong></span><span>Measured-window target <strong id="live-measured-target">Pending</strong></span></div>
-      <p id="eta-basis-note" class="hint">The run ends at its configured request cap or time limit, whichever comes first, so a run bounded by time finishes below the cap. The counts above are every request the runner finished, warmup and cooldown included; the published measurements come from the measured window alone, which is why the final successful/attempted figures are smaller.</p>
+      <div class="request-health"><span>All phases, warmup and cooldown included</span><span>Successful <strong id="live-successful">Pending</strong></span><span>Errored <strong id="live-errors">Pending</strong></span><span>Cancelled <strong id="live-cancelled">Pending</strong></span><span>Declared measured target <strong id="live-measured-target">Pending</strong></span></div>
+      <p id="eta-basis-note" class="hint">The run ends at its configured request limit or its time limit, whichever comes first, so a run bounded by time finishes below the request limit. The counts above are every request the runner finished, warmup and cooldown included; the published measurements come from the measured window alone, which is why the final successful/attempted figures are smaller.</p>
+      <p id="measured-window-note" class="hint" hidden></p>
       <div class="stage-heading"><h3>Run stages</h3><span class="hint">${stageNote}</span></div>
       <ol class="stage-list" id="stage-list"></ol>
       ${downloadProgress ? '<div id="download-progress"></div>' : ""}
@@ -362,6 +363,36 @@ globalThis.BenchmarkDashboard = class BenchmarkDashboard {
     el.textContent = "Panel connected · refreshes automatically";
   }
 
+  // A declared request-count phase that the runner resolves as a clock window
+  // is a real mismatch, and the dashboard says so rather than repeating the
+  // declared target as though it were guaranteed.
+  renderMeasuredWindow(contract) {
+    const note = this.$("measured-window-note");
+    if (!note) return;
+    if (!contract || !contract.phase_basis) {
+      note.hidden = true;
+      note.textContent = "";
+      return;
+    }
+    if (contract.phase_basis === "requests") {
+      note.textContent = `Measured window: this profile excludes ${contract.warmup} warmup and `
+        + `${contract.cooldown} cooldown requests by count, so its declared measured target is what the runner enforces.`;
+      note.classList.remove("error");
+    } else {
+      const window = contract.measured_window_seconds;
+      note.textContent = "Measured window: a fixed slice of the clock, not a request count — the runner excludes the first "
+        + `${Math.round(contract.warmup)} s and the last ${Math.round(contract.cooldown)} s of this profile's `
+        + `${contract.enforced_max_duration_seconds} s limit, leaving ${window != null ? Math.round(window) : "?"} s. `
+        + (contract.declaration_matches_execution
+          ? ""
+          : `The profile declares ${contract.declared_measured_requests} measured, `
+            + `${contract.declared_warmup_requests} warmup and ${contract.declared_cooldown_requests} cooldown requests; `
+            + "those counts are not what is enforced, so how many requests land inside the window depends on how long each one takes.");
+      note.classList.toggle("error", !contract.declaration_matches_execution);
+    }
+    note.hidden = false;
+  }
+
   renderTechnicalTelemetry(telemetry) {
     const facts = this.$("telemetry-technical-facts");
     facts.replaceChildren();
@@ -372,8 +403,18 @@ globalThis.BenchmarkDashboard = class BenchmarkDashboard {
       facts.append(dt, dd);
       return;
     }
+    const counts = telemetry.requests && typeof telemetry.requests === "object" ? telemetry.requests : {};
     const entries = [
       ["Reported stage", typeof telemetry.stage === "string" && telemetry.stage ? telemetry.stage : "unknown"],
+      ["Configured request limit (enforced)", BenchmarkDashboard.finite(telemetry.configured_max_requests)
+        ? String(telemetry.configured_max_requests) : "unknown"],
+      ["Runner-reported request total", BenchmarkDashboard.finite(counts.total_budget)
+        ? `${counts.total_budget} (the scheduler's own figure for whichever request constraint it is reporting)`
+        : "unknown"],
+      ["Requests finished (all phases)", BenchmarkDashboard.finite(counts.processed)
+        ? String(counts.processed) : "unknown"],
+      ["Remaining requests (runner estimate)", BenchmarkDashboard.finite(telemetry.remaining_requests)
+        ? String(telemetry.remaining_requests) : "not reported"],
       ["Remaining fraction", BenchmarkDashboard.finite(telemetry.remaining_fraction) ? telemetry.remaining_fraction.toFixed(3) : "unknown"],
       ["Remaining seconds (time limit)", BenchmarkDashboard.finite(telemetry.remaining_seconds_duration_limit)
         ? Math.round(telemetry.remaining_seconds_duration_limit) : "unknown"],
@@ -465,9 +506,10 @@ globalThis.BenchmarkDashboard = class BenchmarkDashboard {
     const counts = telemetryOk && view.telemetry.requests;
     const target = telemetryOk ? view.telemetry.measured_requests_target : null;
     this.$("live-measured-target").textContent = BenchmarkDashboard.finite(target) ? String(target) : "Pending";
+    const configuredLimit = telemetryOk ? view.telemetry.configured_max_requests : null;
     if (counts && typeof counts === "object" && BenchmarkDashboard.finite(counts.processed)) {
-      this.$("fact-requests").textContent = BenchmarkDashboard.finite(counts.total_budget)
-        ? `${counts.processed} finished, of at most ${counts.total_budget}`
+      this.$("fact-requests").textContent = BenchmarkDashboard.finite(configuredLimit)
+        ? `${counts.processed} finished, of at most ${configuredLimit} configured`
         : `${counts.processed} finished`;
     } else {
       this.$("fact-requests").textContent = "N/A";
@@ -494,6 +536,7 @@ globalThis.BenchmarkDashboard = class BenchmarkDashboard {
     } else {
       this.renderProgressBar(percent);
     }
+    this.renderMeasuredWindow(telemetryOk ? view.telemetry.phase_contract : null);
     this.renderChart(view.telemetry);
     this.renderConnectionStatus(view.runActive, view.telemetry);
     this.renderTechnicalTelemetry(view.telemetry);

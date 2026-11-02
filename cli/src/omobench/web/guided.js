@@ -147,9 +147,20 @@ async function loadRecipes() {
     const duration = minutes
       ? `Ends at its configured request or time limit, up to ${minutes} minutes, whichever comes first; it may finish earlier.`
       : "Ends at its own configured request or time limit; it may finish earlier.";
+    // The profile's declared measured-request count is a declaration, not a
+    // guarantee: where its phases resolve against the clock, how many requests
+    // land in the measured window depends on how long each one takes.
+    const contract = recipe.phase_contract || {};
+    const measured = recipe.measured_requests
+      ? contract.phase_basis === "duration"
+        ? `Declares ${recipe.measured_requests} measured requests; the runner measures the middle `
+          + `${Math.round(contract.measured_window_seconds || 0)} s of its ${contract.enforced_max_duration_seconds} s limit, `
+          + "so the number actually measured depends on how long each request takes. "
+        : `Targets ${recipe.measured_requests} measured requests. `
+      : "";
     card.innerHTML = `${badge}<h3>${recipe.title}</h3>
       <p class="hint">Model ${recipe.model_id} (${recipe.quantization}) · ${recipe.execution_device.toUpperCase()} only</p>
-      <p class="hint">${recipe.measured_requests ? `Targets ${recipe.measured_requests} measured requests. ` : ""}${duration}</p>`;
+      <p class="hint">${measured}${duration}</p>`;
     card.addEventListener("click", () => action(() => chooseRecipe(recipe.id)));
     list.append(card);
   });

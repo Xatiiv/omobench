@@ -163,6 +163,50 @@ trying to do them for you:
 
 Run either from inside your distribution, then press **Try again**.
 
+## Supported, tested and recommended are three different things
+
+Package metadata allows a range. It does not promise that every point in that
+range works on a fresh machine, and this project does not claim otherwise.
+
+| | What it means | Today |
+| --- | --- | --- |
+| **Supported by metadata** | What `pyproject.toml` and the pinned runner permit | Python ≥ 3.10, < 4.0 (`omobench` requires ≥ 3.10; `guidellm[recommended]==0.7.3` requires `<4.0,>=3.10.0`) |
+| **Tested** | What this project has actually run a benchmark or a full check on | Python 3.12.3 on Ubuntu 24.04.2 LTS under WSL2, x86-64 |
+| **Recommended** | What a new contributor should choose | The distribution's own `python3` on a current Ubuntu LTS under WSL2 |
+
+A version inside the supported range but outside the tested row is **untested**,
+not blessed. The installer uses whatever `python3` the chosen distribution
+provides and creates a virtual environment from it; it does not select a version
+for you and does not install one.
+
+### Why readiness now means "it imported"
+
+Preparation used to finish by confirming that the pinned runner's *metadata* was
+present in the new environment. Installed is not usable: a contributor's
+prepared environment reported the pinned version and then died with a SIGBUS
+while importing `torch`. Replacing `torch` with a CPU build let it import again,
+but that is **not** a demonstration that the Python version or the GPU vendor
+caused it — the same installation had also hit storage problems, which is a
+known cause of exactly this failure, and no controlled comparison was made.
+OmoBench does not record a root cause it cannot show.
+
+What changed is the check, not the diagnosis. Preparation now imports the
+runner's own entry point in a **separate, bounded child process** before
+reporting readiness:
+
+- it imports libraries only — no model, no tokenizer, no download, no inference,
+  and no remote code (the child runs with `HF_HUB_OFFLINE`,
+  `TRANSFORMERS_OFFLINE` and telemetry disabled);
+- a crash is reported as a crash, naming the signal, and says plainly that
+  OmoBench cannot tell a damaged install from unusable storage from here;
+- a timeout, a non-zero exit and a missing dependency are three different,
+  actionable messages;
+- cancellation is answered promptly, and nothing is launched as a fallback;
+- diagnostics are redacted and length-bounded before they are shown or logged.
+
+Because the import is a real one, preparation and the Setup window now take a few
+seconds longer than before. That is the point.
+
 ## If WSL is missing
 
 Installing WSL is a Windows operation that needs administrator rights and a

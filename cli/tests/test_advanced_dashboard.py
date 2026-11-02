@@ -63,10 +63,10 @@ class AdvancedDashboardTests(unittest.TestCase):
         self.assertEqual(warmup["live"]["successful"], "11")
         self.assertEqual(warmup["live"]["errored"], "1")
         self.assertEqual(warmup["live"]["cancelled"], "0")
-        # A cap is an upper bound, not a promise, and the measured-window
-        # target is reported beside the measured window rather than mixed into
-        # an all-phase count.
-        self.assertEqual(warmup["facts"]["requests"], "12 finished, of at most 50")
+        # "of at most N" comes only from the limit OmoBench configured and the
+        # runner enforces; the declared measured target is reported separately,
+        # as a declaration.
+        self.assertEqual(warmup["facts"]["requests"], "12 finished, of at most 50 configured")
         self.assertEqual(warmup["live"]["measuredTarget"], "50")
         self.assertEqual(self.states["completed"]["metricCount"], 8)
 
@@ -113,6 +113,23 @@ class AdvancedDashboardTests(unittest.TestCase):
 
     def test_a_completed_run_stops_estimating_remaining_time(self):
         self.assertEqual(self.states["completed"]["facts"]["eta"], "Completed")
+
+    def test_an_unproven_request_total_is_not_presented_as_a_limit(self):
+        # Without a configured limit in the snapshot, the panel states only what
+        # it can: how many requests finished.
+        self.assertEqual(self.states["withoutConfiguredLimit"]["facts"]["requests"], "12 finished")
+        self.assertNotIn("at most", self.states["withoutConfiguredLimit"]["facts"]["requests"])
+        self.assertTrue(self.states["withoutConfiguredLimit"]["measuredWindowHidden"])
+
+    def test_a_clock_based_measured_window_is_described_as_one(self):
+        note = self.states["measuring"]["measuredWindowNote"]
+        self.assertIn("fixed slice of the clock", note)
+        self.assertIn("first 90 s", note)
+        self.assertIn("last 90 s", note)
+        self.assertIn("720 s", note)
+        # And the declared request counts are named as not enforced.
+        self.assertIn("declares 50 measured", note)
+        self.assertIn("not what is enforced", note)
 
     # -- telemetry that is missing, stale, malformed or interrupted ------------
 

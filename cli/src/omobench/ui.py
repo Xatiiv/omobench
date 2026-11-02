@@ -230,7 +230,8 @@ def served_models(endpoint: str, *, timeout: float = 8.0) -> dict:
             "detail": "Served identifiers listed by the server itself."}
 
 
-def server_check(data: dict, *, can_execute: bool = True, runner_message: str = "") -> dict:
+def server_check(data: dict, *, can_execute: bool = True, runner_message: str = "",
+                 runner_health: Any = None) -> dict:
     """What can actually be established about a contributor's own server.
 
     Deliberately staged rather than a single pass/fail: "the server answered"
@@ -266,9 +267,18 @@ def server_check(data: dict, *, can_execute: bool = True, runner_message: str = 
                 "checked_from": checked_from(can_execute),
                 "not_established": NOT_ESTABLISHED}
 
-    stage("runner", "Benchmark runner available", "ok" if can_execute else "failed",
-          runner_message or ("This environment can run the benchmark." if can_execute
-                             else "This environment cannot run the benchmark."))
+    # Installed metadata is not health. When a real import was attempted, that
+    # is what this stage reports; otherwise it says only what it checked.
+    if runner_health is not None:
+        stage("runner", "Benchmark runner imports", "ok" if runner_health.ok else "failed",
+              runner_health.message, detail_extra=runner_health.detail or None,
+              checked="the runner was imported in a separate, bounded process; "
+                      "nothing was downloaded and no inference ran")
+    else:
+        stage("runner", "Benchmark runner available", "ok" if can_execute else "failed",
+              (runner_message or ("This environment can run the benchmark." if can_execute
+                                  else "This environment cannot run the benchmark."))
+              + " This checked installed metadata only, not whether the runner imports.")
 
     listing = served_models(endpoint)
     identifiers, listing_detail = listing["models"], listing["detail"]
@@ -665,27 +675,106 @@ class Controller:
                 },
             },
             "measurements": summary.get("results"),
-            # What has to match before two of these numbers mean anything side
-            # by side. A different model, quantization or tokenizer is a
-            # different workload, not a better or worse score on the same one.
-            "comparability": {
-                "compare_only_against": ["model identity", "quantization", "tokenizer source",
-                                         "benchmark profile", "declared execution device"],
-                "note": (
-                    "These measurements describe this model, at this quantization, with this "
-                    "tokenizer, under this profile, on this machine's declared device. Results "
-                    "that differ in any of those are not a ranking of the same workload. The "
-                    "execution device is the contributor's declaration about their own server; "
-                    "OmoBench does not detect it, and OmoBench's own Python dependencies say "
-                    "nothing about which device that server used."
-                ),
-                "model_identifier": job["model"],
-                "quantization": declared(job.get("quantization")),
-                "tokenizer_source": tokenizer or job["model"],
-                "profile_id": job["profile"],
-                "execution_device": job["execution_device"],
-            },
+            # The context a comparison needs, in the three groups that answer
+            # different questions. Hardware and CPU/GPU are the *point* of many
+            # comparisons, so they are an execution dimension rather than a
+            # reason two results cannot be compared; the workload definition is
+            # what has to match for a comparison to be controlled.
+            "comparability": self.comparison_context(job, tokenizer),
             "publication": self.publication_requirements(job_id),
+        }
+
+    def comparison_context(self, job: dict, tokenizer: str | None) -> dict:
+        """What a reader needs to know before putting two of these side by side.
+
+        Three groups, because they answer different questions. The *workload
+        definition* is what must match for a comparison to be controlled: the
+        same profile bytes, request format, concurrency and token targets.
+        *Model configuration* decides whether the same thing is being served.
+        *Execution configuration* -- hardware, the CPU/GPU declaration, the
+        serving runtime -- is usually the dimension under study, so a difference
+        there invites a comparison rather than forbidding one.
+
+        Nothing here grants or withholds permission to compare. It states what
+        differs so a reader can judge, and marks unknowns as unknown rather than
+        as either compatible or disqualifying.
+        """
+        from . import cli as omobench_cli
+
+        profile_id = job["profile"]
+        spec = omobench_cli.PROFILE_SPECS.get(profile_id, {})
+        profile_path = self.root / "benchmarks" / "profiles" / f"{profile_id}.yaml"
+        try:
+            profile_sha256 = omobench_cli.sha256_file(profile_path)
+        except OSError:
+            profile_sha256 = None
+
+        def declared(value):
+            return value if value else "unknown"
+
+        workload = {
+            "profile_id": profile_id,
+            "profile_sha256": profile_sha256 or "unknown",
+            "request_format": "streaming OpenAI-compatible /v1/chat/completions",
+            "concurrency": spec.get("profile"),
+            "input_tokens": spec.get("input_tokens"),
+            "requested_output_tokens": spec.get("output_tokens"),
+            "phase_contract": omobench_cli.profile_phase_contract(self.root, profile_id),
+        }
+        model = {
+            "server_model_identifier": job["model"],
+            "canonical_model_id": declared(job.get("canonical_model")),
+            "model_revision": declared(job.get("model_revision")),
+            "quantization": declared(job.get("quantization")),
+            "tokenizer_source": tokenizer or job["model"],
+            "tokenizer_source_explicit": bool(tokenizer),
+        }
+        execution = {
+            "execution_device_declared": job["execution_device"],
+            "serving_runtime": declared(job.get("framework")),
+            "serving_runtime_version": declared(job.get("framework_version")),
+            "runtime_arguments": job.get("runtime_args") or [],
+            "runner_host": "this machine; see the environment snapshot in the evidence bundle",
+        }
+        unknowns = sorted(
+            key for group in (model, execution)
+            for key, value in group.items() if value == "unknown"
+        )
+        return {
+            "workload_definition": workload,
+            "model_configuration": model,
+            "execution_configuration": execution,
+            "controlled_comparison_requires": [
+                "the same workload_definition (profile id and bytes, request format, "
+                "concurrency and token targets)",
+                "the same model_configuration (identity, revision, quantization and tokenizer source)",
+            ],
+            "intended_comparison_dimensions": [
+                "execution_configuration: hardware, the CPU/GPU declaration and the serving "
+                "runtime and its settings. Comparing CPU against GPU, or one machine against "
+                "another, on an otherwise identical workload is a controlled comparison, not a "
+                "mismatch.",
+            ],
+            "exploratory_when": [
+                "the model, its quantization or its tokenizer source differs: still informative, "
+                "but it is a comparison between different things, not a ranking of one thing",
+                "the profile or its bytes differ: a different workload definition entirely",
+            ],
+            "unknown_fields": unknowns,
+            "comparability_established": not unknowns,
+            "notes": [
+                "Token counts are produced by the tokenizer named above. Two results that report "
+                "the same token count under different tokenizers have not necessarily processed "
+                "the same text or done the same amount of work.",
+                "The execution device is the contributor's declaration about their own server. "
+                "OmoBench does not detect or verify it, and OmoBench's own Python dependencies "
+                "say nothing about which device that server used.",
+                "Unknown fields mean comparability is not fully established for those fields. "
+                "They neither certify a comparison nor forbid one.",
+                "Comparison context is not publication eligibility. A result can be perfectly "
+                "comparable and still ineligible for the registry, and the registry's schema, "
+                "catalog, provenance and acceptance checks are unchanged by anything here.",
+            ],
         }
 
     def publication_requirements(self, job_id: str, data: dict | None = None) -> dict:
@@ -863,6 +952,10 @@ class Controller:
                 runner_message=("Start this panel from WSL2, Linux or macOS to execute benchmarks. "
                                 "The panel itself works here for setup and review."
                                 if native_windows else setup.message),
+                # Only worth importing when metadata already agrees, and never
+                # on a platform that cannot run a benchmark at all.
+                runner_health=(cli.runner_health_check(timeout=120, cancel=lambda: self.closing)
+                               if setup.ok and not native_windows else None),
             )
         finally:
             with self.lock:

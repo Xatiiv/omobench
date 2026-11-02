@@ -543,9 +543,16 @@ namespace OmoBench.Companion.Tests
             Check("the probe runs the configured interpreter directly",
                 program.Count == 3 && program[0] == "/home/sam/.venvs/omo/bin/python" && program[1] == "-c");
 
+            // Installed metadata is not health: the probe must actually import
+            // the runner, in a bounded child process of its own.
+            Check("the probe asks whether the runner really imports",
+                EnvironmentCheck.ProbeScript.Contains("runner_health_check"));
+            Check("and bounds that check so a hung environment cannot hang setup",
+                EnvironmentCheck.ProbeScript.Contains("timeout=90"));
+
             string checkout = "/mnt/c/Users/sam/Code/omobench";
-            string good = "OMOBENCH_PROBE {\"module\": \"" + checkout + "/cli/src/omobench/cli.py\", " +
-                "\"pinned\": \"0.7.3\", \"runner\": \"0.7.3\", \"executable\": \"/home/sam/.venvs/omo/bin/python\"}";
+            string good = ProbeAnswer(checkout + "/cli/src/omobench/cli.py", "0.7.3", "0.7.3",
+                "/home/sam/.venvs/omo/bin/python");
 
             EnvironmentCheckResult ok = EnvironmentCheck.Interpret(0, good, checkout, false);
             Check("a matching environment passes", ok.Ok);
@@ -560,6 +567,24 @@ namespace OmoBench.Companion.Tests
                 0, good.Replace("\"runner\": \"0.7.3\"", "\"runner\": null"), checkout, false);
             Check("a missing pinned runner is refused",
                 !noRunner.Ok && noRunner.Summary.Contains("GuideLLM runner is not installed"));
+
+            EnvironmentCheckResult crashed = EnvironmentCheck.Interpret(
+                0, ProbeAnswer(checkout + "/cli/src/omobench/cli.py", "0.7.3", "0.7.3",
+                    "/home/sam/.venvs/omo/bin/python", "crashed"), checkout, false);
+            Check("an environment whose runner crashes on import is not ready",
+                !crashed.Ok);
+            Check("and the crash is what is reported, not a missing package",
+                crashed.Summary.Contains("crashed") && !crashed.Summary.Contains("not installed"));
+
+            EnvironmentCheckResult timedOutImport = EnvironmentCheck.Interpret(
+                0, ProbeAnswer(checkout + "/cli/src/omobench/cli.py", "0.7.3", "0.7.3",
+                    "/home/sam/.venvs/omo/bin/python", "timeout"), checkout, false);
+            Check("an import that never finishes is not ready either", !timedOutImport.Ok);
+
+            EnvironmentCheckResult silentHealth = EnvironmentCheck.Interpret(
+                0, good.Replace(", \"health\": \"ok\"", ""), checkout, false);
+            Check("a probe that cannot answer the import question is not ready",
+                !silentHealth.Ok && silentHealth.Summary.Contains("could not report"));
 
             EnvironmentCheckResult wrongRunner = EnvironmentCheck.Interpret(
                 0, good.Replace("\"runner\": \"0.7.3\"", "\"runner\": \"0.8.0\""), checkout, false);
@@ -1892,9 +1917,21 @@ namespace OmoBench.Companion.Tests
 
         private static string ProbeAnswer(string module, string pinned, string runner, string executable)
         {
+            return ProbeAnswer(module, pinned, runner, executable, "ok");
+        }
+
+        private static string ProbeAnswer(
+            string module, string pinned, string runner, string executable, string health)
+        {
             return "OMOBENCH_PROBE {\"module\": \"" + module + "\", \"pinned\": \"" + pinned
                 + "\", \"runner\": " + (runner == null ? "null" : "\"" + runner + "\"")
-                + ", \"executable\": \"" + executable + "\"}";
+                + ", \"executable\": \"" + executable + "\""
+                + ", \"health\": \"" + health + "\""
+                + ", \"health_message\": \""
+                + (health == "ok" ? "the runner imported successfully"
+                    : "importing the runner ended as " + health)
+                + "\""
+                + ", \"health_detail\": \"\"}";
         }
 
         private static void DiscoveryOutcomeTests()

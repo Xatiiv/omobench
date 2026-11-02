@@ -14,8 +14,10 @@ import platform
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -237,6 +239,201 @@ def guidellm_runner_preflight() -> RunnerPreflight:
             ),
         )
     return RunnerPreflight(ok=True, kind="ok", version=version, message=f"GuideLLM {GUIDELLM_VERSION} ready.")
+
+
+def sanitize_diagnostics(text: str, *, limit: int = 2000) -> str:
+    """Keep a diagnostic useful without carrying a secret or a wall of output."""
+    cleaned = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text or "")
+    cleaned = re.sub(r"(?i)(api[_-]?key|token|authorization|secret|password)(\s*[:=]\s*)\S+",
+                     r"\1\2<REDACTED>", cleaned)
+    cleaned = re.sub(r"https?://[^\s\"\'<>]+", "<URL>", cleaned)
+    cleaned = cleaned.strip()
+    if len(cleaned) > limit:
+        # The end of a traceback is the part that names the failure.
+        cleaned = "…\n" + cleaned[-limit:]
+    return cleaned
+
+
+# What the runner must be able to import before it can start at all: its own
+# entry point, the OpenAI-compatible backend OmoBench uses, and the tokenizer
+# implementation that builds the workload. Nothing here downloads a model or a
+# tokenizer, performs inference, or executes code from a model repository --
+# these are library imports only.
+RUNNER_HEALTH_PROBE = (
+    "import json, sys;"
+    "import guidellm;"
+    "import guidellm.__main__;"
+    "import guidellm.backends.openai.http;"
+    "import guidellm.data.tokenizers.huggingface;"
+    "import importlib.metadata as md;"
+    "print('OMOBENCH_RUNNER_HEALTH ' + json.dumps({"
+    "'guidellm': md.version('guidellm'),"
+    "'python': sys.version.split()[0],"
+    "'executable': sys.executable}))"
+)
+
+RUNNER_HEALTH_ENVIRONMENT = {
+    # Belt and braces: the probe imports libraries only, and these make a
+    # download impossible rather than merely unlikely.
+    "HF_HUB_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1",
+    "HF_HUB_DISABLE_TELEMETRY": "1",
+    "TOKENIZERS_PARALLELISM": "false",
+}
+
+
+@dataclass
+class RunnerHealth:
+    """The outcome of actually importing the runner, not of reading metadata.
+
+    `kind` is one of: ok, missing, version_mismatch, import_failed, crashed,
+    timeout, cancelled, unavailable.
+    """
+
+    ok: bool
+    kind: str
+    message: str
+    detail: str = ""
+    seconds: float = 0.0
+    version: str | None = None
+
+
+def runner_health_check(
+    *,
+    interpreter: str | None = None,
+    timeout: float = 120.0,
+    cancel: Any = None,
+    probe: str | None = None,
+) -> RunnerHealth:
+    """Import the pinned runner in a bounded child process and report what happened.
+
+    Installed metadata is not health: a distribution can be present at exactly
+    the pinned version and still fail to import, which is how a working-looking
+    environment produced a SIGBUS from torch on a contributor's machine. This
+    runs the import in a separate process so a crash is reported rather than
+    taken down with it, bounded by `timeout`, cancellable through `cancel`
+    (any callable returning truthy, polled while waiting), and never falling
+    back to launching a benchmark.
+
+    It downloads nothing, runs no inference, and enables no remote code.
+    """
+    executable = interpreter or sys.executable
+    source = probe if probe is not None else RUNNER_HEALTH_PROBE
+    environment = {**os.environ, **RUNNER_HEALTH_ENVIRONMENT}
+    started = time.monotonic()
+    try:
+        process = subprocess.Popen(
+            # -I: isolated, so a stray PYTHONPATH or user site-packages cannot
+            # make this answer about a different installation than the one the
+            # benchmark will use.
+            [executable, "-I", "-c", source],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=environment, start_new_session=os.name != "nt",
+        )
+    except OSError as error:
+        return RunnerHealth(
+            ok=False, kind="unavailable",
+            message=f"Could not start {executable} to check the runner.",
+            detail=sanitize_diagnostics(str(error)),
+            seconds=time.monotonic() - started,
+        )
+
+    cancelled = False
+    deadline = started + max(1.0, timeout)
+    while True:
+        try:
+            stdout, stderr = process.communicate(timeout=0.25)
+            break
+        except subprocess.TimeoutExpired:
+            pass
+        if cancel is not None and cancel():
+            cancelled = True
+        if cancelled or time.monotonic() > deadline:
+            _terminate_process_tree(process)
+            try:
+                stdout, stderr = process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = "", ""
+            elapsed = time.monotonic() - started
+            if cancelled:
+                return RunnerHealth(ok=False, kind="cancelled", seconds=elapsed,
+                                    message="The runner check was cancelled. Nothing was started.")
+            return RunnerHealth(
+                ok=False, kind="timeout", seconds=elapsed,
+                message=(f"Importing the runner did not finish within {int(timeout)} s. "
+                         "That usually means the environment is unusable rather than slow; "
+                         "check the storage holding it and try again."),
+                detail=sanitize_diagnostics(stderr),
+            )
+
+    elapsed = time.monotonic() - started
+    combined = sanitize_diagnostics((stderr or "") + ("\n" + stdout if stdout else ""))
+    code = process.returncode
+    if code == 0 and "OMOBENCH_RUNNER_HEALTH" in (stdout or ""):
+        document = {}
+        with contextlib.suppress(ValueError):
+            document = json.loads((stdout or "").split("OMOBENCH_RUNNER_HEALTH", 1)[1].strip().splitlines()[0])
+        version = document.get("guidellm") if isinstance(document, dict) else None
+        if version and version != GUIDELLM_VERSION:
+            return RunnerHealth(
+                ok=False, kind="version_mismatch", version=version, seconds=elapsed,
+                message=(f"The runner imports, but it is GuideLLM {version}; OmoBench v1 pins "
+                         f"{GUIDELLM_VERSION}."),
+            )
+        return RunnerHealth(
+            ok=True, kind="ok", version=version, seconds=elapsed,
+            message=(f"The runner imported successfully in {elapsed:.1f} s"
+                     + (f" (GuideLLM {version}" if version else "")
+                     + (f", Python {document.get('python')})" if isinstance(document, dict)
+                        and document.get("python") else ")" if version else "")
+                     + ". Nothing was downloaded and no inference ran."),
+        )
+    if code is not None and code < 0:
+        name = _signal_name(-code)
+        return RunnerHealth(
+            ok=False, kind="crashed", seconds=elapsed,
+            message=(f"Importing the runner crashed ({name}) after {elapsed:.1f} s. The packages are "
+                     "installed, but this environment cannot load them. A crash on import is "
+                     "commonly a damaged or partially written install, or storage that cannot "
+                     "serve the files; OmoBench cannot tell which from here, and does not guess."),
+            detail=combined,
+        )
+    if "ModuleNotFoundError" in combined or "No module named" in combined:
+        return RunnerHealth(
+            ok=False, kind="missing", seconds=elapsed,
+            message=("The runner is not fully installed in this environment. Install it with: "
+                     "python -m pip install -e './cli[ui,runner]'"),
+            detail=combined,
+        )
+    return RunnerHealth(
+        ok=False, kind="import_failed", seconds=elapsed,
+        message=(f"Importing the runner failed with exit code {code} after {elapsed:.1f} s. "
+                 "The reported error below is the runner's own."),
+        detail=combined,
+    )
+
+
+def _terminate_process_tree(process: subprocess.Popen) -> None:
+    """Stop the probe and anything it started, without touching this process."""
+    with contextlib.suppress(Exception):
+        if os.name != "nt":
+            os.killpg(process.pid, signal.SIGTERM)
+        else:
+            process.terminate()
+    with contextlib.suppress(Exception):
+        process.wait(timeout=5)
+    if process.poll() is None:
+        with contextlib.suppress(Exception):
+            if os.name != "nt":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+
+
+def _signal_name(number: int) -> str:
+    with contextlib.suppress(ValueError):
+        return signal.Signals(number).name
+    return f"signal {number}"
 
 
 def detect_nvidia_gpus() -> list[dict[str, Any]]:
@@ -757,6 +954,84 @@ def build_guidellm_command(
     ]
 
 
+def profile_phase_contract(root: Path, profile_id: str) -> dict[str, Any]:
+    """How this profile's warmup and cooldown phases actually resolve, beside
+    what its YAML declares.
+
+    GuideLLM 0.7.3's TransientPhaseConfig resolves a fractional phase value
+    against *duration* whenever a duration budget exists, because its default
+    mode is `prefer_duration`: `compute_limits()` computes both a duration and a
+    request count and then discards the request count. So
+    `kind=synchronous,warmup=0.1` with a 900 s ceiling is a 90-second warmup,
+    not a five-request warmup -- regardless of what the profile's
+    `warmup_requests` says. Only an explicit `mode=requests` phase counts
+    requests. Established against the pinned runner's own accumulator in
+    cli/tests/test_profile_phase_semantics.py.
+
+    This reads OmoBench's own runner mapping and the profile's own declaration;
+    it does not reimplement the runner's resolution, which the tests pin.
+    """
+    spec = PROFILE_SPECS.get(profile_id)
+    if spec is None:
+        return {}
+    mapping = spec["profile"]
+    max_duration = spec.get("max_duration_seconds")
+    max_requests = spec.get("max_requests")
+
+    def phase(name: str) -> tuple[str | None, float | None]:
+        fraction = re.search(rf"{name}=([0-9.]+)", mapping)
+        explicit = re.search(rf"{name}\.value=([0-9.]+)", mapping)
+        requests_mode = f"{name}.mode=requests" in mapping
+        if fraction and not explicit:
+            value = float(fraction.group(1))
+            if value < 1.0 and max_duration is not None:
+                # percent + a duration budget -> duration, via prefer_duration
+                return "duration", value * max_duration
+            if value < 1.0 and max_requests is not None:
+                return "requests", float(int(value * max_requests))
+            return "requests", value
+        if explicit:
+            value = float(explicit.group(1))
+            return ("requests" if requests_mode else "duration"), value
+        return None, None
+
+    warmup_basis, warmup_value = phase("warmup")
+    cooldown_basis, cooldown_value = phase("cooldown")
+    declared = {}
+    try:
+        import yaml
+
+        document = yaml.safe_load((root / "benchmarks" / "profiles" / f"{profile_id}.yaml").read_text(encoding="utf-8"))
+        declared = (document or {}).get("execution", {}) if isinstance(document, dict) else {}
+    except (OSError, ValueError, ImportError):
+        declared = {}
+
+    basis = warmup_basis if warmup_basis == cooldown_basis else "mixed"
+    declares_request_phases = any(declared.get(key) for key in ("warmup_requests", "cooldown_requests"))
+    return {
+        "profile_id": profile_id,
+        # What the runner enforces, from the command OmoBench itself builds.
+        "enforced_max_requests": max_requests,
+        "enforced_max_duration_seconds": max_duration,
+        "phase_basis": basis,
+        "warmup": warmup_value,
+        "cooldown": cooldown_value,
+        # What the profile's own YAML declares.
+        "declared_measured_requests": declared.get("measured_requests"),
+        "declared_warmup_requests": declared.get("warmup_requests"),
+        "declared_cooldown_requests": declared.get("cooldown_requests"),
+        # A declared request-count phase that the runner resolves as a duration
+        # window is a real mismatch: the measured window is then a fixed slice
+        # of the clock, and how many requests land inside it depends entirely on
+        # per-request latency.
+        "declaration_matches_execution": not (declares_request_phases and basis == "duration"),
+        "measured_window_seconds": (
+            None if basis != "duration" or max_duration is None or warmup_value is None
+            or cooldown_value is None else max_duration - warmup_value - cooldown_value
+        ),
+    }
+
+
 def profile_measured_requests(root: Path, profile_id: str) -> int | None:
     """The profile's own declared measured-request target
     (execution.measured_requests in benchmarks/profiles/<id>.yaml),
@@ -904,6 +1179,8 @@ def run_guidellm_command(
             stdout_log_path=log_path,
             run_label=profile_id,
             total_measured_requests=profile_measured_requests(root, profile_id),
+            configured_max_requests=PROFILE_SPECS[profile_id].get("max_requests"),
+            phase_contract=profile_phase_contract(root, profile_id),
         )
     except telemetry_module.TelemetryUnavailable as error:
         return plain_subprocess(f"OmoBench: live telemetry unavailable ({error}); running without it.\n")

@@ -212,6 +212,10 @@ class ManagedController:
                     # "measured requests". For chat-small-extended-v1 this is 50,
                     # even though its runner budget (max_requests, above) is 60.
                     "measured_requests": execution.get("measured_requests"),
+                    # How this profile's warmup/cooldown actually resolve, so a
+                    # recipe card can state a declared target as a declaration
+                    # rather than as a promise (see cli.profile_phase_contract).
+                    "phase_contract": omobench_cli.profile_phase_contract(self.root, recipe["benchmark_profile"]),
                 }
             )
         return results

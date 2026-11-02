@@ -322,10 +322,16 @@ class OmoBenchTelemetryProgress:
     into GuideLLM's own execution loop.
     """
 
-    def __init__(self, writer: TelemetryWriter, *, run_label: str, total_measured_requests: int | None):
+    def __init__(self, writer: TelemetryWriter, *, run_label: str, total_measured_requests: int | None,
+                 configured_max_requests: int | None = None, phase_contract: dict | None = None):
         self.writer = writer
         self.run_label = run_label
         self.total_measured_requests = total_measured_requests
+        # The request limit OmoBench itself put on the command line, so the
+        # panel can say "of at most N" about a limit it can prove, rather than
+        # about whichever constraint the scheduler happens to be reporting.
+        self.configured_max_requests = configured_max_requests
+        self.phase_contract = phase_contract or {}
         self._started_monotonic: float | None = None
         self._last_requests: dict[str, Any] | None = None
 
@@ -351,6 +357,10 @@ class OmoBenchTelemetryProgress:
                 "elapsed_seconds": 0.0,
                 "requests": {"processed": 0, "successful": 0, "errored": 0, "cancelled": 0, "total_budget": None},
                 "measured_requests_target": self.total_measured_requests,
+            "configured_max_requests": self.configured_max_requests,
+            "phase_contract": self.phase_contract,
+                "configured_max_requests": self.configured_max_requests,
+                "phase_contract": self.phase_contract,
                 "remaining_fraction": None,
                 "remaining_seconds_duration_limit": None,
                 "eta_seconds": None,
@@ -403,6 +413,10 @@ class OmoBenchTelemetryProgress:
                 "elapsed_seconds": elapsed,
                 "requests": self._last_requests,
                 "measured_requests_target": self.total_measured_requests,
+            "configured_max_requests": self.configured_max_requests,
+            "phase_contract": self.phase_contract,
+                "configured_max_requests": self.configured_max_requests,
+                "phase_contract": self.phase_contract,
                 "remaining_fraction": progress.remaining_fraction,
                 "remaining_seconds_duration_limit": progress.remaining_duration,
                 "eta_seconds": eta,
@@ -461,6 +475,8 @@ class OmoBenchTelemetryProgress:
             "elapsed_seconds": 0.0,
             "requests": {"processed": 0, "successful": 0, "errored": 0, "cancelled": 0, "total_budget": None},
             "measured_requests_target": self.total_measured_requests,
+            "configured_max_requests": self.configured_max_requests,
+            "phase_contract": self.phase_contract,
             "remaining_fraction": None,
             "remaining_seconds_duration_limit": None,
             "eta_seconds": None,
@@ -478,6 +494,8 @@ class OmoBenchTelemetryProgress:
             "elapsed_seconds": elapsed,
             "requests": self._last_requests,
             "measured_requests_target": self.total_measured_requests,
+            "configured_max_requests": self.configured_max_requests,
+            "phase_contract": self.phase_contract,
             "remaining_fraction": 0.0,
             "remaining_seconds_duration_limit": None,
             "eta_seconds": None,
@@ -496,7 +514,8 @@ def _progress_base_class() -> type:
     return BenchmarkerProgress
 
 
-def build_progress_observer(writer: TelemetryWriter, *, run_label: str, total_measured_requests: int | None):
+def build_progress_observer(writer: TelemetryWriter, *, run_label: str, total_measured_requests: int | None,
+                            configured_max_requests: int | None = None, phase_contract: dict | None = None):
     """Construct a real `BenchmarkerProgress` subclass instance. Deferred
     until GuideLLM is confirmed available, per `_progress_base_class`."""
     base = _progress_base_class()
@@ -505,7 +524,8 @@ def build_progress_observer(writer: TelemetryWriter, *, run_label: str, total_me
     # is not declared a subclass until here, keeping this module importable
     # without GuideLLM installed.
     combined = type("OmoBenchTelemetryProgressImpl", (OmoBenchTelemetryProgress, base), {})
-    instance = combined(writer, run_label=run_label, total_measured_requests=total_measured_requests)
+    instance = combined(writer, run_label=run_label, total_measured_requests=total_measured_requests,
+                        configured_max_requests=configured_max_requests, phase_contract=phase_contract)
     base.__init__(instance)
     return instance
 
@@ -554,6 +574,8 @@ def run_generative_benchmark_with_telemetry(
     stdout_log_path: Path,
     run_label: str,
     total_measured_requests: int | None,
+    configured_max_requests: int | None = None,
+    phase_contract: dict | None = None,
     min_emit_interval: float = DEFAULT_MIN_EMIT_INTERVAL_SECONDS,
     history_maxlen: int = DEFAULT_HISTORY_MAXLEN,
 ) -> int:
@@ -588,7 +610,10 @@ def run_generative_benchmark_with_telemetry(
             min_interval=min_emit_interval,
             history_maxlen=history_maxlen,
         )
-        observer = build_progress_observer(writer, run_label=run_label, total_measured_requests=total_measured_requests)
+        observer = build_progress_observer(writer, run_label=run_label,
+                                           total_measured_requests=total_measured_requests,
+                                           configured_max_requests=configured_max_requests,
+                                           phase_contract=phase_contract)
         log_file = stdout_log_path.open("w", encoding="utf-8")
         console = Console(file=log_file)
     except TelemetryUnavailable:

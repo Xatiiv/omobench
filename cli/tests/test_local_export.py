@@ -139,19 +139,66 @@ class LocalExportTests(unittest.TestCase):
         self.assertEqual(before, {path: (path.read_bytes(), path.stat().st_mtime_ns)
                                   for path in self.root.rglob("*") if path.is_file()})
 
-    def test_the_export_states_what_it_may_be_compared_against(self):
+    def test_the_export_separates_workload_model_and_execution_context(self):
         report = self.controller.local_report(self.job(quantization="Q4_K_M")["id"])
         context = report["comparability"]
-        self.assertEqual(context["model_identifier"], ALIAS)
-        self.assertEqual(context["quantization"], "Q4_K_M")
-        self.assertEqual(context["tokenizer_source"], UNCATALOGUED)
-        self.assertEqual(context["profile_id"], "chat-small-v1")
-        self.assertEqual(context["execution_device"], "cpu")
-        self.assertIn("not a ranking of the same workload", context["note"])
-        self.assertIn("Python dependencies say nothing", context["note"])
-        for field in ("model identity", "quantization", "tokenizer source",
-                      "benchmark profile", "declared execution device"):
-            self.assertIn(field, context["compare_only_against"])
+        self.assertEqual(context["workload_definition"]["profile_id"], "chat-small-v1")
+        self.assertRegex(context["workload_definition"]["profile_sha256"], r"^sha256:[a-f0-9]{64}$")
+        self.assertIn("/v1/chat/completions", context["workload_definition"]["request_format"])
+        self.assertEqual(context["model_configuration"]["server_model_identifier"], ALIAS)
+        self.assertEqual(context["model_configuration"]["quantization"], "Q4_K_M")
+        self.assertEqual(context["model_configuration"]["tokenizer_source"], UNCATALOGUED)
+        self.assertEqual(context["execution_configuration"]["execution_device_declared"], "cpu")
+
+    def test_hardware_and_device_are_a_comparison_dimension_not_a_disqualifier(self):
+        context = self.controller.local_report(self.job()["id"])["comparability"]
+        dimensions = " ".join(context["intended_comparison_dimensions"])
+        self.assertIn("CPU against GPU", dimensions)
+        self.assertIn("controlled comparison, not a", dimensions)
+        # The workload definition is what must match; execution is the subject.
+        requires = " ".join(context["controlled_comparison_requires"])
+        self.assertIn("workload_definition", requires)
+        self.assertNotIn("hardware", requires)
+
+    def test_equal_token_counts_under_different_tokenizers_are_not_claimed_equal(self):
+        notes = " ".join(self.controller.local_report(self.job()["id"])["comparability"]["notes"])
+        self.assertIn("not necessarily processed", notes)
+        self.assertIn("same amount of work", notes)
+        self.assertIn("Python dependencies", notes)
+
+    def test_unknown_provenance_leaves_comparability_unestablished_not_forbidden(self):
+        context = self.controller.local_report(self.job()["id"])["comparability"]
+        self.assertFalse(context["comparability_established"])
+        self.assertIn("model_revision", context["unknown_fields"])
+        self.assertIn("serving_runtime", context["unknown_fields"])
+        notes = " ".join(context["notes"])
+        self.assertIn("neither certify a comparison nor forbid one", notes)
+
+    def test_full_provenance_establishes_comparability(self):
+        job = self.job(model_revision="a" * 40, framework="llama.cpp",
+                       framework_version="b10621", quantization="Q4_K_M",
+                       canonical_model="Qwen/Qwen3-4B")
+        context = self.controller.local_report(job["id"])["comparability"]
+        self.assertEqual(context["unknown_fields"], [])
+        self.assertTrue(context["comparability_established"])
+
+    def test_comparison_context_is_not_publication_eligibility(self):
+        job = self.job(model_revision="a" * 40, framework="llama.cpp",
+                       framework_version="b10621", quantization="Q4_K_M",
+                       canonical_model="Qwen/Qwen3-4B")
+        report = self.controller.local_report(job["id"])
+        self.assertTrue(report["comparability"]["comparability_established"])
+        # Still uncatalogued, so still not publishable.
+        self.assertFalse(report["publication"]["catalogued"])
+        self.assertFalse(report["publication"]["ready"])
+        notes = " ".join(report["comparability"]["notes"])
+        self.assertIn("not publication eligibility", notes)
+
+    def test_the_workload_definition_carries_the_profiles_real_phase_contract(self):
+        context = self.controller.local_report(self.job()["id"])["comparability"]
+        contract = context["workload_definition"]["phase_contract"]
+        self.assertEqual(contract["phase_basis"], "duration")
+        self.assertFalse(contract["declaration_matches_execution"])
 
     # -- B: public submission --------------------------------------------------
 

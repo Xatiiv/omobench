@@ -125,7 +125,16 @@ function telemetry(changes = {}) {
   return {
     available: true, stage: "benchmarking", elapsed_seconds: 120,
     requests: { processed: 12, successful: 11, errored: 1, cancelled: 0, total_budget: 50 },
-    measured_requests_target: 50, remaining_fraction: 0.6,
+    measured_requests_target: 50,
+    // What OmoBench itself put on the command line, and how this profile's
+    // phases really resolve (cli.profile_phase_contract).
+    configured_max_requests: 50,
+    phase_contract: { profile_id: "chat-small-v1", phase_basis: "duration", warmup: 90.0,
+                      cooldown: 90.0, enforced_max_requests: 50, enforced_max_duration_seconds: 900,
+                      measured_window_seconds: 720.0, declared_measured_requests: 50,
+                      declared_warmup_requests: 5, declared_cooldown_requests: 5,
+                      declaration_matches_execution: false },
+    remaining_fraction: 0.6,
     remaining_seconds_duration_limit: 500, eta_seconds: 400,
     duration_budget_exhausted: false,
     latest_metrics: { output_tokens_per_second: 11.5, time_to_first_token_ms: 1200, request_latency_seconds: 44 },
@@ -165,6 +174,8 @@ function snapshot() {
       cancelled: get("live-cancelled").textContent,
       measuredTarget: get("live-measured-target").textContent,
     },
+    measuredWindowNote: get("measured-window-note").textContent,
+    measuredWindowHidden: get("measured-window-note").hidden,
     chartHidden: get("chart-svg").getAttribute("hidden") !== null,
     chartPoints: get("chart-line").getAttribute("points"),
     chartEmpty: get("chart-empty").textContent,
@@ -273,6 +284,10 @@ await openRun(job(), {
   chart_history: "not a list", updated_at: "never",
 });
 results.malformed = snapshot();
+
+// 9b. Telemetry without a configured limit: no "of at most" may appear.
+await openRun(job(), (() => { const t = telemetry(); delete t.configured_max_requests; delete t.phase_contract; return t; })());
+results.withoutConfiguredLimit = snapshot();
 
 // 10. No telemetry at all (an older run, or an observer that disabled itself).
 await openRun(job({ status: "completed", finished_at: "2026-10-29T10:20:00Z", summary: SUMMARY }), null);
