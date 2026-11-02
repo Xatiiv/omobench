@@ -604,32 +604,62 @@ def huggingface_cache_directories() -> list[Path]:
     return [Path.home() / ".cache" / "huggingface" / "hub"]
 
 
+# The four separate things a tokenizer check can be asked about. Only the first
+# two are ever decided here: this check stays offline, so it neither loads a
+# tokenizer nor compares it against the served weights, and it says so rather
+# than letting a passing syntax check imply either.
+TOKENIZER_NOT_LOADED = (
+    "Not loaded here. This check stays offline and does not import the tokenizer, so "
+    "\"the files are present\" is all it can tell you; the runner loads it when the benchmark starts."
+)
+TOKENIZER_NOT_COMPARED = (
+    "Not verified, and not verifiable from here. A tokenizer that parses is not thereby the "
+    "tokenizer your server's weights were trained with. Choosing the wrong one changes how prompts "
+    "are built and how tokens are counted, which changes the measurements -- so pick the repository "
+    "the model card names, not merely one that loads."
+)
+
+
 def tokenizer_source_report(value: str, *, served_model: str | None = None) -> dict[str, Any]:
     """Describe a tokenizer source without touching the network.
 
     Says what the runner would do and whether files still have to be
     downloaded, so the panel can explain that before anything is fetched. It
     never downloads, never imports transformers, and never claims a local copy
-    it has not seen on disk.
+    it has not seen on disk -- nor that the tokenizer matches the weights.
     """
     source = (value or "").strip() or (served_model or "")
     effective_default = not (value or "").strip()
     try:
         resolved = validate_tokenizer_source(source)
     except ValueError as error:
+        message = (
+            f"The server model identifier {source!r} is not a Hugging Face repository id, "
+            "so the runner cannot use it to build the workload. Enter a tokenizer source."
+            if effective_default else str(error)
+        )
         return {
             "ok": False,
             "kind": "invalid",
             "source": source,
             "default": effective_default,
-            "message": (
-                f"The server model identifier {source!r} is not a Hugging Face repository id, "
-                "so the runner cannot use it to build the workload. Enter a tokenizer source."
-                if effective_default else str(error)
-            ),
+            "message": message,
+            "checks": [
+                {"id": "syntax", "state": "failed", "detail": message},
+                {"id": "files", "state": "skipped",
+                 "detail": "Not looked for: there is no usable repository id or path to look for."},
+                {"id": "loaded", "state": "untested", "detail": TOKENIZER_NOT_LOADED},
+                {"id": "compatibility", "state": "unverified", "detail": TOKENIZER_NOT_COMPARED},
+            ],
         }
     if not HF_REPO_ID.fullmatch(resolved):
         present = sorted(name for name in TOKENIZER_FILES if (Path(resolved) / name).is_file())
+        message = (
+            f"Local tokenizer folder, containing {', '.join(present)}. Nothing is downloaded."
+            if present else
+            "That folder exists but contains no recognizable tokenizer file "
+            f"({', '.join(TOKENIZER_FILES)})."
+        )
         return {
             "ok": bool(present),
             "kind": "local",
@@ -637,28 +667,37 @@ def tokenizer_source_report(value: str, *, served_model: str | None = None) -> d
             "default": effective_default,
             "cached": True,
             "files": present,
-            "message": (
-                f"Local tokenizer folder, containing {', '.join(present)}. Nothing is downloaded."
-                if present else
-                "That folder exists but contains no recognizable tokenizer file "
-                f"({', '.join(TOKENIZER_FILES)})."
-            ),
+            "message": message,
+            "checks": [
+                {"id": "syntax", "state": "ok", "detail": "Accepted as a local directory path."},
+                {"id": "files", "state": "ok" if present else "missing", "detail": message},
+                {"id": "loaded", "state": "untested", "detail": TOKENIZER_NOT_LOADED},
+                {"id": "compatibility", "state": "unverified", "detail": TOKENIZER_NOT_COMPARED},
+            ],
         }
     flattened = "models--" + resolved.replace("/", "--")
     cached = any((directory / flattened).is_dir() for directory in huggingface_cache_directories())
+    message = (
+        f"Hugging Face repository {resolved}, already in this machine's local cache; "
+        "no download is needed." if cached else
+        f"Hugging Face repository {resolved}. Its tokenizer files are not in this machine's "
+        "cache yet, so the runner will download them from huggingface.co when the benchmark "
+        "starts. Model weights are not downloaded."
+    )
     return {
         "ok": True,
         "kind": "huggingface",
         "source": resolved,
         "default": effective_default,
         "cached": cached,
-        "message": (
-            f"Hugging Face repository {resolved}, already in this machine's local cache; "
-            "no download is needed." if cached else
-            f"Hugging Face repository {resolved}. Its tokenizer files are not in this machine's "
-            "cache yet, so the runner will download them from huggingface.co when the benchmark "
-            "starts. Model weights are not downloaded."
-        ),
+        "message": message,
+        "checks": [
+            {"id": "syntax", "state": "ok",
+             "detail": f"Accepted as a Hugging Face repository id: {resolved}."},
+            {"id": "files", "state": "ok" if cached else "missing", "detail": message},
+            {"id": "loaded", "state": "untested", "detail": TOKENIZER_NOT_LOADED},
+            {"id": "compatibility", "state": "unverified", "detail": TOKENIZER_NOT_COMPARED},
+        ],
     }
 
 

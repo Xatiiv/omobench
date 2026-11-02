@@ -139,6 +139,20 @@ class LocalExportTests(unittest.TestCase):
         self.assertEqual(before, {path: (path.read_bytes(), path.stat().st_mtime_ns)
                                   for path in self.root.rglob("*") if path.is_file()})
 
+    def test_the_export_states_what_it_may_be_compared_against(self):
+        report = self.controller.local_report(self.job(quantization="Q4_K_M")["id"])
+        context = report["comparability"]
+        self.assertEqual(context["model_identifier"], ALIAS)
+        self.assertEqual(context["quantization"], "Q4_K_M")
+        self.assertEqual(context["tokenizer_source"], UNCATALOGUED)
+        self.assertEqual(context["profile_id"], "chat-small-v1")
+        self.assertEqual(context["execution_device"], "cpu")
+        self.assertIn("not a ranking of the same workload", context["note"])
+        self.assertIn("Python dependencies say nothing", context["note"])
+        for field in ("model identity", "quantization", "tokenizer source",
+                      "benchmark profile", "declared execution device"):
+            self.assertIn(field, context["compare_only_against"])
+
     # -- B: public submission --------------------------------------------------
 
     def test_the_same_run_is_blocked_from_public_submission(self):

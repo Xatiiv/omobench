@@ -116,3 +116,6 @@
   .dashboard-facts>div{padding:13px}
   .request-health{gap:10px 16px}
 }
+
+/* Sub-checks under a staged check: one claim per line, each stating its own state. */
+.status-item .sub-check{display:block;color:var(--muted);font-size:11px;margin-top:6px;padding-left:12px;border-left:1px solid var(--line)}

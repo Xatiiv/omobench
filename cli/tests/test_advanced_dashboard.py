@@ -63,8 +63,11 @@ class AdvancedDashboardTests(unittest.TestCase):
         self.assertEqual(warmup["live"]["successful"], "11")
         self.assertEqual(warmup["live"]["errored"], "1")
         self.assertEqual(warmup["live"]["cancelled"], "0")
-        self.assertIn("12 / 60 total requests", warmup["facts"]["requests"])
-        self.assertIn("target: 50 measured", warmup["facts"]["requests"])
+        # A cap is an upper bound, not a promise, and the measured-window
+        # target is reported beside the measured window rather than mixed into
+        # an all-phase count.
+        self.assertEqual(warmup["facts"]["requests"], "12 finished, of at most 50")
+        self.assertEqual(warmup["live"]["measuredTarget"], "50")
         self.assertEqual(self.states["completed"]["metricCount"], 8)
 
     # -- lifecycle -------------------------------------------------------------

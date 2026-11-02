@@ -138,6 +138,58 @@ class TokenizerReportTests(unittest.TestCase):
             self.assertTrue(cli.tokenizer_source_report(TOKENIZER)["ok"])
 
 
+class TokenizerCheckClaimTests(unittest.TestCase):
+    """Four separate questions, four separate answers."""
+
+    def checks(self, value, served_model=None):
+        return {entry["id"]: entry for entry in
+                cli.tokenizer_source_report(value, served_model=served_model)["checks"]}
+
+    def test_loading_and_compatibility_are_never_claimed_by_an_offline_check(self):
+        with tempfile.TemporaryDirectory() as cache:
+            (Path(cache) / "models--Qwen--Qwen3-VL-4B-Instruct").mkdir()
+            with patch.dict("os.environ", {"HUGGINGFACE_HUB_CACHE": cache}):
+                found = self.checks(TOKENIZER)
+        self.assertEqual(found["syntax"]["state"], "ok")
+        self.assertEqual(found["files"]["state"], "ok")  # cached, so the files are there
+        self.assertEqual(found["loaded"]["state"], "untested")
+        self.assertEqual(found["compatibility"]["state"], "unverified")
+        self.assertIn("does not import the tokenizer", found["loaded"]["detail"])
+        self.assertIn("not thereby the tokenizer", found["compatibility"]["detail"])
+
+    def test_an_uncached_repository_separates_syntax_from_files(self):
+        with tempfile.TemporaryDirectory() as cache:
+            with patch.dict("os.environ", {"HUGGINGFACE_HUB_CACHE": cache}):
+                found = self.checks(TOKENIZER)
+        self.assertEqual(found["syntax"]["state"], "ok")
+        self.assertEqual(found["files"]["state"], "missing")
+        self.assertIn("download them from huggingface.co", found["files"]["detail"])
+
+    def test_an_incomplete_local_folder_fails_only_the_files_check(self):
+        with tempfile.TemporaryDirectory() as folder:
+            found = self.checks(folder)
+        self.assertEqual(found["syntax"]["state"], "ok")
+        self.assertEqual(found["files"]["state"], "missing")
+        self.assertIn("no recognizable tokenizer file", found["files"]["detail"])
+
+    def test_a_rejected_identifier_does_not_pretend_to_have_looked_for_files(self):
+        found = self.checks("", served_model=ALIAS)
+        self.assertEqual(found["syntax"]["state"], "failed")
+        self.assertEqual(found["files"]["state"], "skipped")
+        self.assertIn("no usable repository id or path", found["files"]["detail"])
+
+    def test_malformed_options_are_refused_at_the_syntax_check(self):
+        for hostile in ("Qwen/Qwen3,load_kwargs={}", "kind=hf_auto,model=x", "a/b=c"):
+            with self.subTest(hostile=hostile):
+                self.assertEqual(self.checks(hostile)["syntax"]["state"], "failed")
+
+    def test_the_explanation_names_why_the_choice_changes_measurements(self):
+        detail = self.checks(TOKENIZER)["compatibility"]["detail"]
+        self.assertIn("how prompts", detail)
+        self.assertIn("how tokens are counted", detail)
+        self.assertIn("changes the measurements", detail)
+
+
 class TokenizerRunConfigTests(unittest.TestCase):
     BASE = {"endpoint": "http://127.0.0.1:1234/v1", "model": ALIAS,
             "profile": "chat-small-v1", "execution_device": "cpu", "device_confirmed": True}

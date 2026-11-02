@@ -92,8 +92,13 @@ def endpoint_origin(endpoint: str) -> str:
             or url.username is not None or url.password is not None
             or url.query or url.fragment or url.path.rstrip("/") not in {"", "/v1"}
             or port == 0):
-        raise UIError("Use a localhost model server, such as http://127.0.0.1:8092. "
-                      "Remote servers and credentials in URLs are not supported by this local panel.")
+        raise UIError(
+            "Enter the loopback address your model server listens on, such as "
+            "http://127.0.0.1:<port> (an optional /v1 suffix is accepted). This panel only "
+            "contacts loopback addresses on the machine the benchmark runner runs on: it "
+            "records that machine's hardware as the result's hardware, and it must not be "
+            "usable to reach arbitrary hosts. A server on another machine, or on the Windows "
+            "side of a WSL runner, needs a loopback forwarder you set up yourself.")
     return f"{url.scheme}://{url.netloc}"
 
 
@@ -137,6 +142,26 @@ class NoRedirect(HTTPRedirectHandler):
         raise UIError("The model server redirected the request. Enter its direct localhost address.")
 
 
+def streaming_probe(endpoint: str, model: str) -> tuple[str, str]:
+    """One small streaming request, reported rather than raised.
+
+    This is the check that matters: OmoBench's workload is streaming
+    `/v1/chat/completions`, so a server that answers /v1/models but cannot
+    stream chat completions cannot run a benchmark.
+    """
+    try:
+        probe_connection({"endpoint": endpoint, "model": model})
+    except UIError as error:
+        message = str(error)
+        if "redirected" in message or "streaming" in message or "chunk" in message:
+            return "failed", (
+                message + " OmoBench's workload is streaming /v1/chat/completions; a server that "
+                "cannot stream it cannot run this benchmark, whatever else it supports.")
+        return "failed", message
+    return "ok", ("One small streaming chat completion arrived, so this server accepts this identifier "
+                  "and streams responses. The test request is not benchmark evidence.")
+
+
 def probe_connection(data: dict) -> dict:
     endpoint = endpoint_origin(text_field(data, "endpoint"))
     model = text_field(data, "model")
@@ -160,9 +185,153 @@ def probe_connection(data: dict) -> dict:
                         return {"message": "Streaming connection works. The test request is not benchmark evidence."}
             raise UIError("No valid streaming chat chunk arrived.")
     except HTTPError as error:
-        raise UIError(f"The model server returned HTTP {error.code}. Check the model identifier and server settings.") from error
+        raise UIError(
+            f"The model server answered HTTP {error.code} for a streaming chat completion. "
+            "That usually means the model identifier is not the one it serves, or the server "
+            "rejects this request shape.") from error
     except (URLError, TimeoutError, OSError, ValueError) as error:
         raise UIError("Could not read a streaming response. Check that the model is loaded and the server is running.") from error
+
+
+def served_models(endpoint: str, *, timeout: float = 8.0) -> dict:
+    """Ask the server which models it serves, if it implements that endpoint.
+
+    Only the endpoint the contributor entered is contacted, and only on
+    loopback; nothing is discovered, scanned or guessed. A server that does not
+    implement /v1/models is normal, not a failure.
+    """
+    request = Request(endpoint + "/v1/models", headers={"Accept": "application/json"})
+    try:
+        with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=timeout) as response:
+            document = json.loads(response.read(1024 * 1024))
+    except HTTPError as error:
+        code = error.code
+        error.close()
+        # The server answered, so it is reachable; it simply does not offer a listing.
+        return {"models": None, "reachable": True, "detail":
+                f"This server answered HTTP {code} for /v1/models, so its served identifiers could not be listed."}
+    except UIError as error:
+        return {"models": None, "reachable": True, "detail": str(error)}
+    except (URLError, TimeoutError, OSError) as error:
+        return {"models": None, "reachable": False, "detail": f"No response from {endpoint}: {type(error).__name__}."}
+    except ValueError:
+        return {"models": None, "reachable": True,
+                "detail": "This server's /v1/models response was not readable JSON."}
+    entries = document.get("data") if isinstance(document, dict) else None
+    if not isinstance(entries, list):
+        return {"models": None, "reachable": True,
+                "detail": "This server's /v1/models response did not contain a model list."}
+    identifiers = [entry["id"] for entry in entries
+                   if isinstance(entry, dict) and isinstance(entry.get("id"), str) and entry["id"]]
+    if not identifiers:
+        return {"models": [], "reachable": True,
+                "detail": "This server listed no models. Load a model in the server first."}
+    return {"models": identifiers, "reachable": True,
+            "detail": "Served identifiers listed by the server itself."}
+
+
+def server_check(data: dict, *, can_execute: bool = True, runner_message: str = "") -> dict:
+    """What can actually be established about a contributor's own server.
+
+    Deliberately staged rather than a single pass/fail: "the server answered"
+    and "this benchmark can run" are different claims, and a working
+    /v1/models response establishes neither streaming support nor a usable
+    tokenizer. Every stage says what it checked, and the report ends by naming
+    what it did not establish.
+
+    Runs in this process, which is the same environment the benchmark runner is
+    launched from, so a reachability result here is a reachability result for
+    the run.
+    """
+    stages: list[dict] = []
+    model = text_field(data, "model", optional=True)
+    tokenizer = text_field(data, "tokenizer", optional=True)
+
+    def stage(identifier, title, state, detail, **extra):
+        stages.append({"id": identifier, "title": title, "state": state, "detail": detail, **extra})
+
+    try:
+        endpoint = endpoint_origin(text_field(data, "endpoint"))
+        stage("endpoint", "Server address accepted", "ok",
+              f"{endpoint} is a loopback address on this machine, which is where the runner runs.")
+    except UIError as error:
+        stage("endpoint", "Server address accepted", "failed", str(error))
+        for identifier, title in (("runner", "Benchmark runner available"),
+                                  ("reachable", "Server reachable"),
+                                  ("model", "Served model identifier"),
+                                  ("streaming", "Streaming chat completions"),
+                                  ("tokenizer", "Tokenizer source")):
+            stage(identifier, title, "skipped", "Not attempted: enter a usable server address first.")
+        return {"stages": stages, "models": None, "ready": False,
+                "checked_from": checked_from(can_execute),
+                "not_established": NOT_ESTABLISHED}
+
+    stage("runner", "Benchmark runner available", "ok" if can_execute else "failed",
+          runner_message or ("This environment can run the benchmark." if can_execute
+                             else "This environment cannot run the benchmark."))
+
+    listing = served_models(endpoint)
+    identifiers, listing_detail = listing["models"], listing["detail"]
+    if not listing["reachable"]:
+        stage("reachable", "Server reachable", "failed",
+              listing_detail + " Start the model server, confirm its port, and confirm it listens on "
+              "loopback on this machine rather than only on another interface or another host.")
+        stage("model", "Served model identifier", "skipped", "Not attempted: the server did not answer.")
+        stage("streaming", "Streaming chat completions", "skipped", "Not attempted: the server did not answer.")
+    else:
+        stage("reachable", "Server reachable", "ok", "The server answered this panel's request.")
+        if identifiers is None:
+            stage("model", "Served model identifier", "unknown",
+                  listing_detail + " Enter the identifier your server documents; the streaming check below "
+                  "is what actually proves the identifier works.")
+        elif not model:
+            stage("model", "Served model identifier", "unknown",
+                  "Choose one of the identifiers this server listed.", options=identifiers)
+        elif model in identifiers:
+            stage("model", "Served model identifier", "ok",
+                  f"{model} is served by this server.", options=identifiers)
+        else:
+            stage("model", "Served model identifier", "failed",
+                  f"This server does not list {model}. It serves: {', '.join(identifiers)}. "
+                  "Use the identifier exactly as the server reports it, including any suffix.",
+                  options=identifiers)
+        if model:
+            state, detail = streaming_probe(endpoint, model)
+            stage("streaming", "Streaming chat completions", state, detail)
+        else:
+            stage("streaming", "Streaming chat completions", "skipped",
+                  "Not attempted: enter or choose a served model identifier first.")
+
+    report = cli.tokenizer_source_report(tokenizer, served_model=model or None)
+    stage("tokenizer", "Tokenizer source", "ok" if report["ok"] else "failed", report["message"],
+          cached=report.get("cached"), kind=report["kind"], source=report["source"],
+          checks=report.get("checks", []))
+
+    # "Ready" means every check passed, except that a server which does not
+    # publish a model list leaves that one unconfirmable -- which must not block
+    # a run the server itself accepted.
+    ready = bool(model) and all(
+        entry["state"] == "ok" or (entry["id"] == "model" and entry["state"] == "unknown")
+        for entry in stages)
+    return {"stages": stages, "models": identifiers, "ready": ready,
+            "checked_from": checked_from(can_execute),
+            "not_established": NOT_ESTABLISHED}
+
+
+def checked_from(can_execute: bool) -> str:
+    return ("Checked from the environment that launches the benchmark runner"
+            if can_execute else
+            "Checked from this panel process, which cannot run the benchmark itself")
+
+
+# Things no reachability or syntax check can establish, stated rather than implied.
+NOT_ESTABLISHED = [
+    "That this tokenizer matches the weights the server actually loaded. Loading a tokenizer "
+    "proves only that its files parse.",
+    "Which device performed inference. CPU or GPU is your declaration about the server.",
+    "The throughput or latency of a full profile run, which only a benchmark measures.",
+    "That the result qualifies for the community registry, which is a separate check.",
+]
 
 
 class Controller:
@@ -496,6 +665,26 @@ class Controller:
                 },
             },
             "measurements": summary.get("results"),
+            # What has to match before two of these numbers mean anything side
+            # by side. A different model, quantization or tokenizer is a
+            # different workload, not a better or worse score on the same one.
+            "comparability": {
+                "compare_only_against": ["model identity", "quantization", "tokenizer source",
+                                         "benchmark profile", "declared execution device"],
+                "note": (
+                    "These measurements describe this model, at this quantization, with this "
+                    "tokenizer, under this profile, on this machine's declared device. Results "
+                    "that differ in any of those are not a ranking of the same workload. The "
+                    "execution device is the contributor's declaration about their own server; "
+                    "OmoBench does not detect it, and OmoBench's own Python dependencies say "
+                    "nothing about which device that server used."
+                ),
+                "model_identifier": job["model"],
+                "quantization": declared(job.get("quantization")),
+                "tokenizer_source": tokenizer or job["model"],
+                "profile_id": job["profile"],
+                "execution_device": job["execution_device"],
+            },
             "publication": self.publication_requirements(job_id),
         }
 
@@ -658,6 +847,26 @@ class Controller:
                 self.busy = False
                 self._save(job)
         return self.detail(job_id)
+
+    def server_check(self, data: dict) -> dict:
+        """Staged check against a server the contributor runs themselves."""
+        with self.lock:
+            if self.busy or self.closing:
+                raise UIError("Wait for the active operation before checking the server.", 409)
+            self.busy = True
+        try:
+            setup = cli.guidellm_runner_preflight()
+            native_windows = sys.platform == "win32"
+            return server_check(
+                data,
+                can_execute=not native_windows and setup.ok,
+                runner_message=("Start this panel from WSL2, Linux or macOS to execute benchmarks. "
+                                "The panel itself works here for setup and review."
+                                if native_windows else setup.message),
+            )
+        finally:
+            with self.lock:
+                self.busy = False
 
     def github_action(self, action: str) -> dict:
         with self.lock:
@@ -870,6 +1079,8 @@ class UIHandler(BaseHTTPRequestHandler):
                 return self._json(controller.connection(data))
             if self.path == "/api/tokenizer-check":
                 return self._json(controller.tokenizer_check(data))
+            if self.path == "/api/server-check":
+                return self._json(controller.server_check(data))
             if self.path == "/api/runs":
                 return self._json(controller.start(data), 202)
             match = re.fullmatch(r"/api/runs/(job-[a-f0-9]{16})/requirements", self.path)

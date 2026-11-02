@@ -22,6 +22,75 @@ no terminal, no WSL activation, and no connection token to copy. It only opens
 the panel, everything below works exactly as it does when you run
 `omobench ui` yourself.
 
+## What this panel can benchmark
+
+The two guided recipes are presets, not the boundary. The advanced panel will
+benchmark any local model server that meets the requirements below, whatever
+serves it and whatever model it holds.
+
+**Server API.** Streaming OpenAI-compatible `POST /v1/chat/completions` that
+returns `text/event-stream` chunks. `GET /v1/models` is optional: when a server
+offers it, the panel lists its identifiers for you to choose from; when it does
+not, you type the identifier the server documents and the streaming check is
+what proves it works. A server that answers `/v1/models` but cannot stream chat
+completions cannot run this benchmark.
+
+**Server location.** A loopback address on the machine the benchmark runner
+runs on — `http://127.0.0.1:<port>`, `http://localhost:<port>` or
+`http://[::1]:<port>`, with an optional `/v1` suffix. Any port. This is a
+deliberate boundary, not a missing feature: the result records *this machine's*
+hardware as the hardware that served the run, and a local panel must not be
+usable to reach arbitrary hosts. Nothing is discovered, scanned or guessed; the
+panel contacts only the address you type.
+
+**Model.** Any text-generation model your server can serve, catalogued or not.
+Local measurement and local export never require catalog membership. Only
+public submission does. A vision-capable model can be benchmarked, but this
+workload sends text prompts only: it measures text generation on that model and
+says nothing about its image handling.
+
+**Runner.** The pinned GuideLLM version, in a Python environment on Linux,
+macOS or WSL2. The runner's own dependencies are irrelevant to your server's
+hardware: OmoBench never infers that a GPU is required, or that it must be any
+particular vendor, from the packages its runner installs.
+
+**Server-side hardware.** Any. The CPU/GPU selector records *your declaration*
+about where your server performed inference; GPU covers any vendor's
+accelerator, and the result's GPU metadata is vendor-neutral. OmoBench does not
+detect, configure or verify your server's device.
+
+### Where this leaves a Windows-hosted server
+
+A benchmark runner in WSL2 and a model server running on the Windows side are
+two different loopback namespaces. The panel will not dial the Windows host's
+WSL-facing address, because allowing non-loopback targets would turn a local
+panel into a general-purpose client for arbitrary hosts. Running a loopback
+forwarder yourself, so that the server appears on `127.0.0.1:<port>` inside the
+runner's environment, is the supported workaround and the panel treats it as an
+ordinary local server. A first-class, sandboxed Windows/WSL bridge would need
+its own design and its own review, and does not exist today: this is a
+documented limitation, not a setting you can relax.
+
+### Checking a server before you run
+
+**Check this server** runs five checks from the environment the runner is
+launched from and reports each separately, because they establish different
+things:
+
+| Check | What a pass means |
+| --- | --- |
+| Server address accepted | The address is loopback on this machine. |
+| Benchmark runner available | This environment can execute a benchmark at all. |
+| Server reachable | Something answered at that address. |
+| Served model identifier | The server lists this identifier, or does not publish a list. |
+| Streaming chat completions | One small streaming completion actually arrived. |
+| Tokenizer source | The identifier is usable and whether its files are already local. |
+
+It ends by naming what it did *not* establish: that the tokenizer matches the
+served weights, which device performed inference, what a full run will measure,
+and whether the result qualifies for the registry. A green row is a statement
+about one check, never about the whole benchmark.
+
 ## First-time setup
 
 1. Open a terminal in your existing OmoBench checkout. Use Linux, macOS, or WSL2
@@ -79,15 +148,20 @@ extra includes `uvloop`, which does not support native Windows.
    repository or a local tokenizer folder in **Tokenizer source**, for example
    `Qwen/Qwen3-VL-4B-Instruct`. Do not rename your served model.
 
-   **Test connection** and **Check tokenizer** are deliberately two checks. A
-   working `/v1/models` response says the server answers; it says nothing about
-   whether the workload can be built. **Check tokenizer** inspects the value
-   offline: it reports whether the files are already in this machine's Hugging
-   Face cache or will be downloaded from `huggingface.co` when the benchmark
-   starts, and it never downloads anything itself. Tokenizer files are small;
-   model weights are not downloaded. The override is recorded in the run's
-   `reproduce.md`, beside the served identifier, and is never used to infer what
-   the server actually loaded. Remote code execution stays disabled.
+   **Check tokenizer** answers four separate questions and never merges them:
+   whether the identifier is *accepted* as a repository id or local path,
+   whether its *files are located* in this machine's Hugging Face cache or the
+   folder you named, whether it was *loaded* (it is not — this check stays
+   offline and does not import the tokenizer), and whether it *matches the
+   served weights* (never verified, and not verifiable from here). Syntax and
+   cache presence are not compatibility. Pick the repository the model card
+   names: the tokenizer determines how prompts are built and how output tokens
+   are counted, so choosing a different one changes the measurements rather
+   than merely the plumbing. Nothing is downloaded by the check; the runner
+   fetches tokenizer files — not weights — from `huggingface.co` at benchmark
+   start if they are not already cached. The override is recorded in the run's
+   `reproduce.md` beside the served identifier, and remote code execution stays
+   disabled.
 4. **Choose a fixed profile and declare the device.** The panel displays the
    profile's token counts, load, and limits. Configure CPU/GPU use in the model
    server, then confirm it in the panel. Selecting a device does not change server
@@ -135,6 +209,15 @@ or "unavailable" rather than zero, progress comes from the runner's own
 remaining fraction rather than from elapsed time, a spent time budget is
 labelled instead of shown as a finished run, and 100% appears only once the
 evidence files are written.
+
+The request counts are deliberately two different sets. The live counters —
+**Requests finished** and the Successful/Errored/Cancelled row — come from the
+runner's scheduler, which has no phase concept: they count every request that
+finished, warmup and cooldown included, against the profile's request *cap*,
+which is an upper bound that a run bounded by its time limit never reaches. The
+published figures in **Successful / attempted** come from the measured window
+alone, after warmup and before cooldown, which is why they are smaller. A
+completed benchmark is not thereby publication-eligible.
 
 **Cancel benchmark** stops OmoBench's own runner process group. Your model
 server is started and owned by you; the panel has no handle on it and never

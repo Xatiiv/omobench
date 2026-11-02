@@ -79,11 +79,11 @@ globalThis.BenchmarkDashboard = class BenchmarkDashboard {
       <dl class="dashboard-facts" id="dashboard-facts">
         <div><dt>Elapsed</dt><dd id="fact-elapsed">Pending</dd></div>
         <div><dt>Estimated remaining</dt><dd id="fact-eta">Estimating…</dd></div>
-        <div><dt>Requests completed</dt><dd id="fact-requests">Pending</dd></div>
+        <div><dt>Requests finished</dt><dd id="fact-requests">Pending</dd></div>
         <div><dt>Maximum duration</dt><dd id="fact-max-duration">Pending</dd></div>
       </dl>
-      <div class="request-health"><span>All run phases</span><span>Successful <strong id="live-successful">Pending</strong></span><span>Errored <strong id="live-errors">Pending</strong></span><span>Cancelled <strong id="live-cancelled">Pending</strong></span></div>
-      <p id="eta-basis-note" class="hint">The run ends at its configured request or time limit, whichever comes first; it may finish earlier. Warmup and cooldown requests are counted in all run phases above, outside the measured window.</p>
+      <div class="request-health"><span>All phases, warmup and cooldown included</span><span>Successful <strong id="live-successful">Pending</strong></span><span>Errored <strong id="live-errors">Pending</strong></span><span>Cancelled <strong id="live-cancelled">Pending</strong></span><span>Measured-window target <strong id="live-measured-target">Pending</strong></span></div>
+      <p id="eta-basis-note" class="hint">The run ends at its configured request cap or time limit, whichever comes first, so a run bounded by time finishes below the cap. The counts above are every request the runner finished, warmup and cooldown included; the published measurements come from the measured window alone, which is why the final successful/attempted figures are smaller.</p>
       <div class="stage-heading"><h3>Run stages</h3><span class="hint">${stageNote}</span></div>
       <ol class="stage-list" id="stage-list"></ol>
       ${downloadProgress ? '<div id="download-progress"></div>' : ""}
@@ -463,14 +463,16 @@ globalThis.BenchmarkDashboard = class BenchmarkDashboard {
     }
 
     const counts = telemetryOk && view.telemetry.requests;
+    const target = telemetryOk ? view.telemetry.measured_requests_target : null;
+    this.$("live-measured-target").textContent = BenchmarkDashboard.finite(target) ? String(target) : "Pending";
     if (counts && typeof counts === "object" && BenchmarkDashboard.finite(counts.processed)) {
-      const total = BenchmarkDashboard.finite(counts.total_budget) ? counts.total_budget : "?";
-      const target = view.telemetry.measured_requests_target;
-      this.$("fact-requests").textContent = `${counts.processed} / ${total} total requests`
-        + (BenchmarkDashboard.finite(target) ? ` (target: ${target} measured)` : "");
+      this.$("fact-requests").textContent = BenchmarkDashboard.finite(counts.total_budget)
+        ? `${counts.processed} finished, of at most ${counts.total_budget}`
+        : `${counts.processed} finished`;
     } else {
       this.$("fact-requests").textContent = "N/A";
     }
+
     // The ceiling bounds the benchmark's own execution, not model startup or
     // cleanup -- which is why elapsed flow time can exceed it without the
     // benchmark having overrun anything.
@@ -633,7 +635,7 @@ globalThis.BenchmarkDashboard = class BenchmarkDashboard {
       BenchmarkDashboard.metricCard("Output tokens / second", r.output_tokens_per_second, "", "Output-token throughput; higher is better."),
       BenchmarkDashboard.metricCard("Total tokens / second", r.total_tokens_per_second, "", "Input-plus-output token throughput."),
       BenchmarkDashboard.metricCard("Requests / second", r.requests_per_second, "", "How many requests the workload completed per second."),
-      BenchmarkDashboard.metricCard("Successful / attempted", `${r.requests.succeeded} / ${r.requests.attempted}`, "", "Requests that completed successfully, out of those attempted in the measured window."),
+      BenchmarkDashboard.metricCard("Successful / attempted", `${r.requests.succeeded} / ${r.requests.attempted}`, "", "Measured window only: requests that completed successfully, out of those attempted after warmup and before cooldown. Smaller than the live all-phase counts, by design."),
       BenchmarkDashboard.metricCard("Error rate", r.error_rate_percent, "%", "Share of attempted requests that failed or stayed incomplete; lower is better."),
     ];
   }

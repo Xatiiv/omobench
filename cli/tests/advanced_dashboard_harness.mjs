@@ -38,7 +38,7 @@ const SUMMARY = {
 };
 const SETUP = {
   environment: { cpu: "Fixture CPU", ram_gb: 32, gpus: [], operating_system: "Fixture Linux", guidellm: "0.7.3" },
-  profiles: { "chat-small-v1": { profile: "concurrent,streams=1", input_tokens: 512, output_tokens: 128, max_requests: 60, max_duration_seconds: 900 } },
+  profiles: { "chat-small-v1": { profile: "synchronous,warmup=0.1,cooldown=0.1", input_tokens: 1024, output_tokens: 256, max_requests: 50, max_duration_seconds: 900 } },
   frameworks: ["llama.cpp", "vllm", "openai-compatible-other"],
   catalog: ["Qwen/Qwen3-4B"],
   can_execute: true, can_validate: true, runner_message: "GuideLLM 0.7.3 ready.",
@@ -124,7 +124,7 @@ function job(changes = {}) {
 function telemetry(changes = {}) {
   return {
     available: true, stage: "benchmarking", elapsed_seconds: 120,
-    requests: { processed: 12, successful: 11, errored: 1, cancelled: 0, total_budget: 60 },
+    requests: { processed: 12, successful: 11, errored: 1, cancelled: 0, total_budget: 50 },
     measured_requests_target: 50, remaining_fraction: 0.6,
     remaining_seconds_duration_limit: 500, eta_seconds: 400,
     duration_budget_exhausted: false,
@@ -163,6 +163,7 @@ function snapshot() {
       successful: get("live-successful").textContent,
       errored: get("live-errors").textContent,
       cancelled: get("live-cancelled").textContent,
+      measuredTarget: get("live-measured-target").textContent,
     },
     chartHidden: get("chart-svg").getAttribute("hidden") !== null,
     chartPoints: get("chart-line").getAttribute("points"),

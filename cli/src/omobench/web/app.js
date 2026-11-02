@@ -255,10 +255,50 @@ $("profile").addEventListener("change", profileDetail);
 $("framework").addEventListener("change", frameworkChanged);
 $("refresh-setup").addEventListener("click", () => action(refreshSetup));
 $("new-run").addEventListener("click", () => { $("configure").scrollIntoView({behavior: "smooth"}); $("model").focus(); });
+// Staged rather than pass/fail: "the server answered" and "this benchmark can
+// run" are different claims, and the report says which one each stage made.
+function renderServerCheck(report) {
+  const state = { ok: "ok", failed: "fail", unknown: "pending", skipped: "pending" };
+  $("server-check").replaceChildren(...report.stages.map((stage) => {
+    const li = document.createElement("li");
+    li.className = `status-item ${state[stage.state] || "pending"}`;
+    const strong = document.createElement("strong"), span = document.createElement("span");
+    strong.textContent = stage.title;
+    span.textContent = stage.detail;
+    li.append(strong, span);
+    // The tokenizer stage answers four separate questions; a passing syntax
+    // check must not be read as a loaded, matching tokenizer.
+    (stage.checks || []).forEach((check) => {
+      const line = document.createElement("span");
+      line.className = "sub-check";
+      line.textContent = `${TOKENIZER_CHECK_LABELS[check.id] || check.id}: ${check.state} — ${check.detail}`;
+      li.append(line);
+    });
+    return li;
+  }));
+  // Offered by the server itself, so the identifier can be chosen rather than typed.
+  const served = report.models || [];
+  $("served-models").replaceChildren(...served.map((id) => option(id)));
+  const failed = report.stages.filter((stage) => stage.state === "failed");
+  $("connection-result").textContent = report.ready
+    ? `Ready for the checks performed, from: ${report.checked_from.toLowerCase()}.`
+    : failed.length
+    ? `${failed.length} check${failed.length === 1 ? "" : "s"} did not pass. ${report.checked_from}.`
+    : `Some checks could not be completed. ${report.checked_from}.`;
+  $("connection-result").classList.toggle("error", failed.length > 0);
+  $("server-check-unknowns").replaceChildren(...report.not_established.map((text) => {
+    const li = document.createElement("li");
+    li.textContent = text;
+    return li;
+  }));
+  $("server-check-limits").hidden = false;
+}
+
 $("test-connection").addEventListener("click", () => action(async () => {
-  $("connection-result").textContent = "Sending a small streaming request…";
-  try { const result = await api("/api/connection", {endpoint: $("endpoint").value, model: $("model").value}); $("connection-result").textContent = result.message; }
-  catch (error) { $("connection-result").textContent = "Connection test failed."; throw error; }
+  $("connection-result").textContent = "Checking the address, this environment, the server, its model list and one streaming request…";
+  renderServerCheck(await api("/api/server-check", {
+    endpoint: $("endpoint").value, model: $("model").value, tokenizer: $("tokenizer").value,
+  }));
 }));
 $("run-form").addEventListener("submit", (event) => {
   event.preventDefault(); action(async () => {
@@ -280,9 +320,22 @@ $("check-requirements").addEventListener("click", () => action(async () => {
   const data = Object.fromEntries(new FormData($("package-form")));
   renderRequirements(await api(`/api/runs/${selected}/requirements`, data));
 }));
+const TOKENIZER_CHECK_LABELS = {
+  syntax: "Identifier accepted",
+  files: "Files located",
+  loaded: "Loaded offline",
+  compatibility: "Matches the served weights",
+};
+
 $("check-tokenizer").addEventListener("click", () => action(async () => {
   const report = await api("/api/tokenizer-check", {tokenizer: $("tokenizer").value, model: $("model").value});
-  $("tokenizer-result").textContent = report.message;
+  $("tokenizer-result").replaceChildren(...(report.checks || []).map((check) => {
+    const line = document.createElement("span");
+    line.className = "sub-check";
+    line.textContent = `${TOKENIZER_CHECK_LABELS[check.id] || check.id}: ${check.state} — ${check.detail}`;
+    return line;
+  }));
+  if (!report.checks) $("tokenizer-result").textContent = report.message;
   $("tokenizer-result").classList.toggle("error", !report.ok);
 }));
 $("package-form").addEventListener("submit", (event) => {
