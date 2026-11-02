@@ -133,8 +133,15 @@ async function loadRecipes() {
   recipes = data.recipes;
   recipesById = Object.fromEntries(recipes.map((r) => [r.id, r]));
   storageDir = data.default_storage_dir || "";
-  const recommendedId = recipes.length > 1
-    ? recipes.reduce((a, b) => (b.max_duration_seconds || 0) > (a.max_duration_seconds || 0) ? b : a).id
+  // Two different recommendations, and a label for anything whose declared
+  // phases its runner does not enforce. "Recommended" is the shortest profile
+  // that measures what it declares; "for slower hardware" is the longest one.
+  const honest = recipes.filter((recipe) => recipe.phase_contract?.declaration_matches_execution);
+  const recommendedId = honest.length
+    ? honest.reduce((a, b) => (b.max_duration_seconds || 0) < (a.max_duration_seconds || 0) ? b : a).id
+    : null;
+  const slowerId = honest.length > 1
+    ? honest.reduce((a, b) => (b.max_duration_seconds || 0) > (a.max_duration_seconds || 0) ? b : a).id
     : null;
   const list = $("recipe-list");
   list.replaceChildren();
@@ -143,7 +150,12 @@ async function loadRecipes() {
     card.type = "button";
     card.className = "recipe-card";
     const minutes = recipe.max_duration_seconds ? Math.round(recipe.max_duration_seconds / 60) : null;
-    const badge = recipe.id === recommendedId ? '<span class="badge">Recommended for slower hardware</span>' : "";
+    const legacy = recipe.phase_contract && !recipe.phase_contract.declaration_matches_execution;
+    const badge = legacy
+      ? '<span class="badge legacy">Legacy</span>'
+      : recipe.id === recommendedId ? '<span class="badge">Recommended</span>'
+      : recipe.id === slowerId ? '<span class="badge">Recommended for slower hardware</span>'
+      : "";
     const duration = minutes
       ? `Ends at its configured request or time limit, up to ${minutes} minutes, whichever comes first; it may finish earlier.`
       : "Ends at its own configured request or time limit; it may finish earlier.";
@@ -158,9 +170,14 @@ async function loadRecipes() {
           + "so the number actually measured depends on how long each request takes. "
         : `Targets ${recipe.measured_requests} measured requests. `
       : "";
+    const legacyNote = legacy
+      ? `<p class="hint legacy-note">Kept so earlier ${recipe.benchmark_profile} results can be reproduced. `
+        + "Its measured window is a slice of the clock rather than the request counts it declares, "
+        + "so how much it measures depends on how fast each request is. Prefer the recommended test for a new run.</p>"
+      : "";
     card.innerHTML = `${badge}<h3>${recipe.title}</h3>
       <p class="hint">Model ${recipe.model_id} (${recipe.quantization}) · ${recipe.execution_device.toUpperCase()} only</p>
-      <p class="hint">${measured}${duration}</p>`;
+      <p class="hint">${measured}${duration}</p>${legacyNote}`;
     card.addEventListener("click", () => action(() => chooseRecipe(recipe.id)));
     list.append(card);
   });

@@ -103,7 +103,8 @@ class GuidedServiceTests(unittest.TestCase):
         self.assertEqual(status, 200)
         payload = json.loads(body)
         self.assertEqual(
-            [r["id"] for r in payload["recipes"]], ["qwen3-4b-cpu-v1", "qwen3-4b-cpu-extended-v1"]
+            [r["id"] for r in payload["recipes"]],
+            ["qwen3-4b-cpu-v2", "qwen3-4b-cpu-v1", "qwen3-4b-cpu-extended-v1"],
         )
 
     def test_extended_recipe_is_selectable_alongside_the_classic_one(self):

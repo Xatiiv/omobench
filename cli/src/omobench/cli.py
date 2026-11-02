@@ -126,6 +126,31 @@ PROFILE_SPECS: dict[str, dict[str, Any]] = {
     # requests with six warmup requests excluded instead of the declared five.
     # See ChatSmallExtendedBoundaryTests in cli/tests/test_cli.py and
     # docs/proposals/chat-small-extended-v1.md.
+    # The corrected short profile. Same workload as chat-small-v1, but its
+    # phases are counted in requests instead of being taken as a fraction of the
+    # duration ceiling -- which is what chat-small-v1's `warmup=0.1` actually
+    # does, because GuideLLM 0.7.3 resolves a fraction against duration whenever
+    # a duration budget exists (TransientPhaseConfig.compute_limits, mode
+    # `prefer_duration`). That made chat-small-v1's measured window a fixed
+    # 720-second slice of the clock: a host answering in a second measured
+    # nothing at all, and the profile could only satisfy its own acceptance
+    # floor at roughly 9-18 seconds per request.
+    #
+    # warmup.value=4/cooldown.value=4, not 5: each of GuideLLM 0.7.3's
+    # request-count phase boundaries excludes one more request than it is given.
+    # The same compensation chat-small-extended-v1 ships, and verified here the
+    # same way plus end to end -- the real scheduler, accumulator and report
+    # against a streaming fixture server, with the server's own request log
+    # naming which requests were excluded: requests 1-5 warmup, 6-55 measured,
+    # 56-60 cooldown, identical at 0.02 s and 0.5 s per request. See
+    # cli/tests/test_chat_small_v2.py and docs/proposals/profile-phase-mapping-v2.md.
+    "chat-small-v2": {
+        "input_tokens": 1024,
+        "output_tokens": 256,
+        "profile": "kind=synchronous,warmup.value=4,warmup.mode=requests,cooldown.value=4,cooldown.mode=requests",
+        "max_requests": 60,
+        "max_duration_seconds": 900,
+    },
     "chat-small-extended-v1": {
         "input_tokens": 1024,
         "output_tokens": 256,
@@ -1007,6 +1032,21 @@ def profile_phase_contract(root: Path, profile_id: str) -> dict[str, Any]:
         declared = {}
 
     basis = warmup_basis if warmup_basis == cooldown_basis else "mixed"
+
+    def excluded(phase_basis, value):
+        """What the runner really excludes for this phase.
+
+        Each of GuideLLM 0.7.3's request-count boundaries excludes one request
+        more than the value it is given, which the shipped mappings compensate
+        for; the profile's declared counts are therefore the *actual* counts,
+        and these are what a reader should be shown.
+        """
+        if value is None:
+            return None
+        return value + 1 if phase_basis == "requests" else value
+
+    warmup_actual = excluded(warmup_basis, warmup_value)
+    cooldown_actual = excluded(cooldown_basis, cooldown_value)
     declares_request_phases = any(declared.get(key) for key in ("warmup_requests", "cooldown_requests"))
     return {
         "profile_id": profile_id,
@@ -1014,8 +1054,12 @@ def profile_phase_contract(root: Path, profile_id: str) -> dict[str, Any]:
         "enforced_max_requests": max_requests,
         "enforced_max_duration_seconds": max_duration,
         "phase_basis": basis,
-        "warmup": warmup_value,
-        "cooldown": cooldown_value,
+        # Seconds for a duration phase; requests actually excluded for a
+        # request phase. `*_configured` is the raw value on the command line.
+        "warmup": warmup_actual,
+        "cooldown": cooldown_actual,
+        "warmup_configured": warmup_value,
+        "cooldown_configured": cooldown_value,
         # What the profile's own YAML declares.
         "declared_measured_requests": declared.get("measured_requests"),
         "declared_warmup_requests": declared.get("warmup_requests"),
@@ -1026,8 +1070,13 @@ def profile_phase_contract(root: Path, profile_id: str) -> dict[str, Any]:
         # per-request latency.
         "declaration_matches_execution": not (declares_request_phases and basis == "duration"),
         "measured_window_seconds": (
-            None if basis != "duration" or max_duration is None or warmup_value is None
-            or cooldown_value is None else max_duration - warmup_value - cooldown_value
+            None if basis != "duration" or max_duration is None or warmup_actual is None
+            or cooldown_actual is None else max_duration - warmup_actual - cooldown_actual
+        ),
+        # For a request-count profile, the measured window of a complete run.
+        "measured_window_requests": (
+            None if basis != "requests" or max_requests is None or warmup_actual is None
+            or cooldown_actual is None else int(max_requests - warmup_actual - cooldown_actual)
         ),
     }
 

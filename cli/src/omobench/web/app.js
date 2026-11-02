@@ -114,8 +114,13 @@ async function refreshSetup() {
     dt.textContent = label; dd.textContent = value; $("machine").append(dt, dd);
   });
   const currentProfile = $("profile").value;
-  $("profile").replaceChildren(...Object.keys(setup.profiles).map((id) => option(id)));
-  if (currentProfile) $("profile").value = currentProfile;
+  // A profile whose declared phases its runner does not enforce is offered for
+  // reproducing earlier results, labelled, and never pre-selected.
+  const contracts = setup.profile_contracts || {};
+  const legacy = (id) => contracts[id] && contracts[id].declaration_matches_execution === false;
+  const ids = Object.keys(setup.profiles).sort((a, b) => Number(legacy(a)) - Number(legacy(b)));
+  $("profile").replaceChildren(...ids.map((id) => option(id, legacy(id) ? `${id} (legacy)` : id)));
+  $("profile").value = currentProfile || ids.find((id) => !legacy(id)) || ids[0];
   const framework = $("framework").value;
   $("framework").replaceChildren(...setup.frameworks.map((id) => option(id)));
   $("framework").value = framework || "llama.cpp";

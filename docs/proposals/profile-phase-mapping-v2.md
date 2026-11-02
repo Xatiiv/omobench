@@ -1,9 +1,10 @@
 # Proposal: profiles whose declared phases are the phases that run
 
-Status: **proposed, not active.** Nothing here changes an existing profile, an
-existing runner mapping, an acceptance threshold or any published result. The
-corrected definitions below are deliberately absent from `PROFILE_SPECS` and
-from `benchmarks/profiles/`, so no run can select them until this is reviewed.
+Status: **`chat-small-v2` is implemented and active. `chat-long-v2` and
+`throughput-v2` remain proposals.** No existing profile, runner mapping,
+acceptance threshold or published result is changed by any of it: v2 is a new
+id with its own file and its own `profile_sha256`, and `chat-small-v1` is
+byte-identical to what it always was.
 
 ## 1. The confirmed semantics
 
@@ -100,13 +101,16 @@ failure is visible in the profile's own declaration.
 This is consistent with the only real `chat-small-v1` evidence in this checkout:
 12 attempted, 12 succeeded, well below its 40-request floor.
 
-## 3. Proposed correction
+## 3. The correction
 
 Keep every existing profile byte-identical. Add new, separately identified
-versions whose runner mapping expresses the declaration they already make:
+versions whose runner mapping expresses the declaration they already make.
+
+### chat-small-v2: implemented
+
+Registered in `PROFILE_SPECS` and `benchmarks/profiles/chat-small-v2.yaml`:
 
 ```python
-# NOT YET REGISTERED IN PROFILE_SPECS -- proposal only.
 "chat-small-v2": {
     "input_tokens": 1024,
     "output_tokens": 256,
@@ -119,14 +123,50 @@ versions whose runner mapping expresses the declaration they already make:
 },
 ```
 
-`chat-long-v2` and `throughput-v2` follow the same shape: `warmup.value` and
-`cooldown.value` set to `declared - 1`, `max_requests` raised to
-`declared_warmup + declared_measured + declared_cooldown`, duration ceiling
-unchanged.
+**Verified end to end**, not by replay: `cli/tests/test_chat_small_v2.py`
+builds a local WordLevel tokenizer and an isolated streaming fixture server,
+runs the command `cli.build_guidellm_command()` produces through
+`cli.guidellm_runner_invocation()`, and asserts on the pinned runner's own
+report and on `cli.normalize_guidellm_report()`. Observed, with the fixture
+server's own arrival log naming the excluded requests:
 
-Each needs its own `benchmarks/profiles/<id>.yaml` with the same workload and
-the same acceptance thresholds, so the only change is that the declared phases
-become the executed phases.
+| Case | Requests served | Measured | Excluded |
+| --- | --- | --- | --- |
+| 0.02 s per request | 60 | 50 successful | first 5, last 5 |
+| 0.5 s per request | 60 | 50 successful | first 5, last 5 |
+| ceiling expires mid-measurement | 32 | 27 | first 5; no cooldown reached |
+| ceiling expires during cooldown | 59 | 50 | first 5, last 3 |
+| ceiling expires during warmup | 5 | 4 | warmup boundary never reached |
+| error on the last measured request | 56 | 49 successful + 1 errored = 50 | first 5 |
+| error on the first cooldown request | 57 | 50 successful | first 5, last 2 |
+| a request that hangs, ceiling expires | 20 | 14 | first 5 |
+
+The contract therefore is: **a complete successful run measures exactly 50
+requests, after 5 warmup and before 5 cooldown; a run that ends early reports
+what it actually measured and never the declared target.** An error inside the
+measured window stays inside it and counts against acceptance; an error in
+warmup or cooldown does not reach the measured figures.
+
+Against the same fixture, `chat-small-v1` at 0.02 s per request measures
+**zero** requests, because its whole run finishes inside the clock-based warmup
+window. That contrast is itself a test.
+
+### chat-long-v2 and throughput-v2: still proposals
+
+They follow the same shape: `warmup.value` and `cooldown.value` set to
+`declared - 1`, `max_requests` raised to
+`declared_warmup + declared_measured + declared_cooldown`, duration ceiling
+unchanged. Neither is registered.
+
+`throughput-v2` must not be activated on the strength of the evidence above.
+Every end-to-end case here is `kind=synchronous`, one request in flight.
+`throughput-v1` runs `kind=concurrent,streams=16,max_concurrency=16`, where
+several requests overlap each phase boundary, and GuideLLM's request-count
+boundary is evaluated against `state.processed_requests` — which, with
+concurrency, does not advance in the order requests were issued. Whether the
+`+1` compensation holds there, and whether the boundary is even deterministic
+under concurrency, needs its own verification at concurrency 16 before any
+`throughput-v2` is registered.
 
 ### Why a new version rather than an edit
 
@@ -139,23 +179,39 @@ populations distinguishable for ever: a result carries `profile_id` and
 "clock-windowed measurement, 9-18 s/request band" and `chat-small-v2` results as
 "request-counted measurement".
 
-### Migration
+### Migration, as implemented for the short profile
 
-1. Land the new profiles unreferenced, with this document.
-2. Point the guided recipes at `*-v2` once reviewed; leave `*-v1` selectable in
-   the advanced panel so historical runs can be reproduced.
-3. Do not migrate, re-package or re-validate any existing result. The comparison
-   site should group by `profile_id`, which it already does.
-4. Retire `*-v1` from the recipe list only after `*-v2` results exist.
+1. `chat-small-v2` is a new file and a new id; `chat-small-v1.yaml` is
+   untouched, so its `profile_sha256` and every result carrying it still mean
+   exactly what they meant.
+2. A new guided recipe, `qwen3-4b-cpu-v2`, points at it. The existing
+   `qwen3-4b-cpu-v1` recipe keeps its id and its model and runtime pins, and is
+   retitled "Qwen3 4B · CPU (legacy chat-small-v1)" so it stays available for
+   reproducing earlier runs.
+3. The guided page badges `qwen3-4b-cpu-v2` as **Recommended**, the extended
+   recipe as **Recommended for slower hardware**, and the legacy recipe as
+   **Legacy** with a line explaining why. The advanced panel sorts legacy
+   profiles last, suffixes them "(legacy)" and never preselects one.
+4. No existing result is migrated, re-packaged or re-validated. Results stay
+   separated by `profile_id` and `profile_sha256`, which the local report's
+   comparison context carries in its workload-definition group, so a v1 and a
+   v2 result are never merged into one workload.
+5. `chat-small-v1` stays selectable indefinitely; nothing retires it.
 
-### Open questions for review
+### Open questions that remain
 
-- Whether `throughput-v1`'s concurrency 16 interacts with request-count phases
-  differently from a synchronous profile; the off-by-one was verified only for
-  `kind=synchronous`, and this proposal should not assume it transfers.
-- Whether the duration ceiling should stay at 900 s for `chat-small-v2`, given
-  that 60 requests at the slow end of the current band (18 s) need 1080 s.
-- Whether `chat-small-extended-v1` makes `chat-small-v2` redundant for CPU hosts.
+- **Concurrency.** `throughput-v1`'s request-count behaviour at
+  `max_concurrency=16` is unverified; see above. This is the blocking item for
+  `throughput-v2`.
+- **The ceiling.** `chat-small-v2` keeps the 900 s ceiling, so a host slower
+  than about 15 s per request still cannot complete 60 requests inside it and
+  will report a partial measured window. That is now reported honestly rather
+  than silently, and `chat-small-extended-v1` exists for such hosts, but
+  whether the short profile's ceiling should rise is a separate decision that
+  would change what a `chat-small-v2` result means.
+- **Acceptance.** v2 keeps v1's thresholds (40 minimum successful requests, 1%
+  maximum error rate) unchanged. No incompatibility was found: a complete v2 run
+  measures 50, comfortably above 40.
 
 ## 4. What ships now, without waiting for this
 

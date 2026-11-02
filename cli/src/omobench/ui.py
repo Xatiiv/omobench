@@ -413,6 +413,10 @@ class Controller:
         preflight = cli.guidellm_runner_preflight()
         native_windows = sys.platform == "win32"
         return {"environment": report, "profiles": cli.PROFILE_SPECS,
+                # How each profile's phases really resolve, so a page can mark a
+                # profile whose declaration its runner does not enforce.
+                "profile_contracts": {profile_id: cli.profile_phase_contract(self.root, profile_id)
+                                      for profile_id in cli.PROFILE_SPECS},
                 "frameworks": cli.RUNTIME_FRAMEWORKS, "catalog": self.catalog_models(),
                 "can_execute": not native_windows and preflight.ok,
                 "runner_message": ("Start this panel from WSL2 or Linux to execute benchmarks." if native_windows else

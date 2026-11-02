@@ -201,8 +201,14 @@ class DeclaredVersusActualTests(unittest.TestCase):
                          "measured_window_seconds": 1440.0, "declaration_matches_execution": False},
         "throughput-v1": {"phase_basis": "duration", "warmup": 90.0, "cooldown": 90.0,
                           "measured_window_seconds": 720.0, "declaration_matches_execution": False},
-        "chat-small-extended-v1": {"phase_basis": "requests", "warmup": 4.0, "cooldown": 4.0,
-                                   "measured_window_seconds": None, "declaration_matches_execution": True},
+        # Request phases report what they actually exclude (the configured value
+        # plus GuideLLM 0.7.3's documented extra request), not what was asked for.
+        "chat-small-extended-v1": {"phase_basis": "requests", "warmup": 5.0, "cooldown": 5.0,
+                                   "measured_window_seconds": None, "measured_window_requests": 50,
+                                   "declaration_matches_execution": True},
+        "chat-small-v2": {"phase_basis": "requests", "warmup": 5.0, "cooldown": 5.0,
+                          "measured_window_seconds": None, "measured_window_requests": 50,
+                          "declaration_matches_execution": True},
     }
 
     def test_every_shipped_profile_is_accounted_for(self):

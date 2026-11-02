@@ -40,3 +40,5 @@
 #results-metrics{grid-template-columns:repeat(3,minmax(0,1fr))}#results-metrics .metric{padding:22px;border-radius:10px}#results-metrics .metric:nth-child(4){order:-1;grid-column:1/-1;background:radial-gradient(ellipse at 0 50%,#f7bd5514,transparent 65%),#0e1829;padding:28px}#results-metrics .metric:nth-child(4) dd{font-size:62px;letter-spacing:-2px;margin-top:10px}#results-metrics .metric:nth-child(4) dt{font-size:12px}#results-metrics .metric:nth-child(4) .metric-note{font-size:12px}
 @media(max-width:1050px){.workspace-link{display:none}.guided-layout main{padding:32px 24px}}
 @media(max-width:720px){.guided-layout main{padding:24px 16px}.workspace-heading h1{font-size:32px;letter-spacing:-1.1px}.desktop-break{display:none}.recipe-grid{grid-template-columns:1fr}#progress-panel{padding:18px}.stepper{grid-template-columns:repeat(2,1fr)}.step-tab{padding:12px 8px}#summary-facts{grid-template-columns:repeat(2,1fr)}#results-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.recipe-card .badge.legacy{border-color:#5d5346;background:#25211b;color:#d7c6a8}
+.legacy-note{margin-top:10px;color:#9db0cd}

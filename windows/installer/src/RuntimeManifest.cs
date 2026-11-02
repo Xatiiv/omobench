@@ -62,6 +62,7 @@ namespace OmoBench.Installer
             "cli/src/omobench/web/guided.js",
             "cli/src/omobench/web/guided.css",
             "benchmarks/profiles/chat-small-v1.yaml",
+            "benchmarks/profiles/chat-small-v2.yaml",
             "benchmarks/profiles/chat-long-v1.yaml",
             "benchmarks/profiles/throughput-v1.yaml",
             "catalog/models/seed-v1.yaml",

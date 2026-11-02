@@ -52,6 +52,18 @@ then **Prepare submission** to review its recorded metadata, validation and
 submission status. Reopening never starts inference, downloads a model,
 packages evidence or uploads it. Completed runs that fail acceptance remain
 rejected; the existing packaging and validation rules still apply.
+Three reviewed recipes are offered. **Qwen3 4B · CPU** runs `chat-small-v2`
+and is the recommended choice for a new run: its warmup and cooldown are counted
+in requests, so a complete run measures exactly 50 requests whatever the
+hardware's speed. **Qwen3 4B · CPU (extended duration)** runs
+`chat-small-extended-v1`, with the same request-counted phases and a 90-minute
+ceiling for slower machines. **Qwen3 4B · CPU (legacy chat-small-v1)** is kept
+so earlier `chat-small-v1` results can be reproduced; its measured window is a
+fixed slice of the clock rather than the request counts its profile declares,
+which `docs/proposals/profile-phase-mapping-v2.md` records in full. Results from
+the three are identified separately by `profile_id` and `profile_sha256` and are
+never merged into one workload.
+
 The live dashboard is the shared component described in
 [the advanced panel's documentation](browser-control.md#the-live-dashboard); the
 guided page adds the stages only a managed recipe has (downloading, verifying
