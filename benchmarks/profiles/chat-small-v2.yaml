@@ -24,9 +24,17 @@ execution:
   concurrency: 1
   # A complete run executes 5 + 50 + 5 = 60 requests and measures the middle 50.
   # These counts are what the runner enforces, verified end to end against the
-  # pinned GuideLLM release; see docs/proposals/profile-phase-mapping-v2.md.
-  # A run cut short by the duration ceiling below reports the requests it
-  # actually measured, never these targets.
+  # pinned GuideLLM release by request identity, not by totals; see
+  # docs/proposals/profile-phase-mapping-v2.md.
+  #
+  # A run cut short after measurement has begun reports the requests it
+  # actually measured, never these targets, and the five warmup requests stay
+  # excluded. A run cut short *before* the warmup boundary is reached has no
+  # measured window at all: GuideLLM 0.7.3 then falls back to treating the
+  # whole run as measured, which would present warmup requests as
+  # measurements. OmoBench refuses such a report rather than reporting a short
+  # measurement -- cli.measured_window_integrity() and
+  # cli/tests/test_measured_window_identity.py.
   measured_requests: 50
   warmup_requests: 5
   cooldown_requests: 5

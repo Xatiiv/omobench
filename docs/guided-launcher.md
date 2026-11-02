@@ -112,6 +112,18 @@ telling you to start WSL2 (`wsl.exe -d Ubuntu`) instead of silently failing or
 guessing your intent. See [Windows: enter WSL first](quickstart.md#windows-enter-wsl-first)
 if you have not done this before.
 
+The glibc version is not the whole prerequisite. The llama.cpp build links
+against other shared libraries too, and a minimal distribution often lacks at
+least one of them — `libgomp.so.1`, the OpenMP runtime, is the usual one. That
+cannot be detected from the Python side: OmoBench and GuideLLM importing
+cleanly says nothing about whether a separate native executable can load. So
+`omobench prepare` resolves the installed runtime's own libraries with `ldd`
+once the download finishes, and `omobench launch` checks again before starting
+anything. A library that is missing is named, together with the package that
+provides it and the exact `apt` command to install it. OmoBench never runs that
+command: installing a system package needs your password and is your decision.
+Nothing is re-downloaded afterwards.
+
 ## Storage folder: no assumed drive or path
 
 The model file alone is about 2.3 GiB. `--storage-dir`/the guided page's

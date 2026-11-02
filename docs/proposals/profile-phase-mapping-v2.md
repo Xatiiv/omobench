@@ -127,29 +127,68 @@ Registered in `PROFILE_SPECS` and `benchmarks/profiles/chat-small-v2.yaml`:
 builds a local WordLevel tokenizer and an isolated streaming fixture server,
 runs the command `cli.build_guidellm_command()` produces through
 `cli.guidellm_runner_invocation()`, and asserts on the pinned runner's own
-report and on `cli.normalize_guidellm_report()`. Observed, with the fixture
-server's own arrival log naming the excluded requests:
+report and on `cli.normalize_guidellm_report()`.
 
-| Case | Requests served | Measured | Excluded |
-| --- | --- | --- | --- |
-| 0.02 s per request | 60 | 50 successful | first 5, last 5 |
-| 0.5 s per request | 60 | 50 successful | first 5, last 5 |
-| ceiling expires mid-measurement | 32 | 27 | first 5; no cooldown reached |
-| ceiling expires during cooldown | 59 | 50 | first 5, last 3 |
-| ceiling expires during warmup | 5 | 4 | warmup boundary never reached |
-| error on the last measured request | 56 | 49 successful + 1 errored = 50 | first 5 |
-| error on the first cooldown request | 57 | 50 successful | first 5, last 2 |
-| a request that hangs, ceiling expires | 20 | 14 | first 5 |
+`cli/tests/test_measured_window_identity.py` goes further and names every
+request. The fixture stamps its arrival index into the response id, which
+GuideLLM carries through to `benchmark.requests.*[].response_id`, so each
+record in the report maps to one exact arrival at the server. Request numbers
+below are *benchmark* requests: the harness sends one readiness POST before
+timing anything, and it is subtracted everywhere.
 
-The contract therefore is: **a complete successful run measures exactly 50
-requests, after 5 warmup and before 5 cooldown; a run that ends early reports
-what it actually measured and never the declared target.** An error inside the
-measured window stays inside it and counts against acceptance; an error in
-warmup or cooldown does not reach the measured figures.
+| Case | Scheduled | Served | Warmup (excluded) | Measured | Cooldown | In flight | Never dispatched |
+| --- | ---: | ---: | --- | --- | --- | ---: | ---: |
+| complete run, 0.02 s/request | 60 | 60 | 1-5 | **6-55 (50)** | 56-60 | 0 | 0 |
+| ceiling expires after measurement began | 40 | 39 | 1-5 | 6-39 (34) | none reached | 0 | 1 |
+| ceiling expires during warmup | 7 | 5 | **none** | 1-4 (4) | none | 1 | 2 |
+| `chat-small-v1`, shipped configuration | 50 | 50 | 1-50 | **0** | none | 0 | 0 |
 
-Against the same fixture, `chat-small-v1` at 0.02 s per request measures
-**zero** requests, because its whole run finishes inside the clock-based warmup
-window. That contrast is itself a test.
+Two of those rows correct earlier reporting. The v1 contrast runs with v1's own
+50-request cap, not 60 — an earlier summary quoted 60, which was v2's budget.
+And several "served" figures previously included the readiness probe.
+
+### Early termination during warmup has no measured window
+
+The third row is not a small measurement. It is **not a measurement at all**,
+and it is the one case where GuideLLM 0.7.3 cannot express this profile's
+contract on its own.
+
+`measure_start` is set only when the warmup boundary is actually crossed, at
+`state.processed_requests == warmup.value + 1`. If the run stops before then,
+`measure_start` stays `None` and
+`GenerativeBenchmarkTimings.finalized_measure_start` falls back to
+`request_start` — the start of the run. The measured window becomes the whole
+run, every warmup request falls inside it, and `metrics.request_totals` reports
+**warmup requests as measured**. Observed by identity: zero requests before the
+window, requests 1-4 inside it, `request_totals.total == 4`.
+
+The marker is exact rather than approximate. `warmup_duration` is
+`measure_start_time - request_start_time`, so on the fallback path it is one
+value minus itself: exactly `0.0`. With a warmup configured it cannot be `0.0`
+any other way, because a crossed boundary is a request's own `started_at`,
+strictly after the run began.
+
+`cli.measured_window_integrity()` tests for that, and
+`normalize_guidellm_report()` refuses such a report with "this run ended before
+it finished warming up", in the same way it already refuses a report with no
+attempted requests. Nothing is relabelled and no count is adjusted: a run that
+never left warmup produces no result.
+
+So the contract is: **a complete successful run measures exactly 50 requests,
+after 5 warmup and before 5 cooldown. A run that ends after measurement began
+reports what it actually measured, with the 5 warmup requests still excluded. A
+run that ends before measurement began produces no result at all.** An error
+inside the measured window stays inside it and counts against acceptance; an
+error in warmup or cooldown does not reach the measured figures.
+
+Error and in-flight behaviour, from the same harness at the totals level
+(`cli/tests/test_chat_small_v2.py` and the phase matrix):
+
+| Case | Measured |
+| --- | --- |
+| error on the last measured request | 49 successful + 1 errored = 50 |
+| error on the first cooldown request | 50 successful |
+| a request that hangs until the ceiling | 14, first 5 excluded |
 
 ### chat-long-v2 and throughput-v2: still proposals
 

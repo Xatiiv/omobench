@@ -1346,6 +1346,56 @@ def report_count(report: dict[str, Any], *path: str) -> int:
     return int(value)
 
 
+def measured_window_integrity(benchmark: dict[str, Any]) -> dict[str, Any]:
+    """Did the run ever leave warmup, or is its "measured" window the fallback?
+
+    GuideLLM 0.7.3 only sets `measure_start` when the warmup boundary is
+    actually crossed: for a request-counted phase that is the moment
+    `state.processed_requests == warmup.value + 1`
+    (`TransientPhaseConfig.compute_transition_time`, period="start"). If the
+    run ends before then -- a duration ceiling expiring, a cancellation, a
+    server that stops answering -- `measure_start` stays None and
+    `GenerativeBenchmarkTimings.finalized_measure_start` falls back to
+    `request_start`, the start of the run
+    (`guidellm/benchmark/schemas/accumulator.py`).
+
+    The measured window is then the *whole run*, so every warmup request lands
+    inside it and `metrics.request_totals` reports warmup requests as measured.
+    That is the opposite of what a warmup phase is for, and it is silent: the
+    counts look like a short but ordinary measurement.
+
+    `warmup_duration` is `measure_start_time - request_start_time`
+    (`guidellm/benchmark/schemas/benchmark.py`), so on that fallback path it is
+    one value minus itself: exactly 0.0, not merely small. With a warmup
+    configured it cannot be 0.0 any other way, because a crossed boundary is a
+    request's own `started_at`, strictly after the run began. That makes this
+    an exact test rather than a threshold.
+
+    Observed end to end, by request identity, in
+    cli/tests/test_measured_window_identity.py.
+    """
+    configuration = benchmark.get("config")
+    warmup = configuration.get("warmup") if isinstance(configuration, dict) else None
+    warmup = warmup if isinstance(warmup, dict) else {}
+    percent, value = warmup.get("percent"), warmup.get("value")
+    configured = bool(
+        (isinstance(percent, int | float) and not isinstance(percent, bool) and percent > 0)
+        or (isinstance(value, int | float) and not isinstance(value, bool) and value > 0)
+    )
+    duration = benchmark.get("warmup_duration")
+    recorded = isinstance(duration, int | float) and not isinstance(duration, bool)
+    # Refused only on a positive observation: a configured warmup whose
+    # recorded duration really is 0.0. A report that does not carry the field
+    # is unverifiable, not broken, and must not be rejected on a guess.
+    crossed = not (configured and recorded and float(duration) == 0.0)
+    return {
+        "warmup_configured": configured,
+        "warmup_duration_seconds": float(duration) if recorded else None,
+        "warmup_boundary_crossed": crossed,
+        "measured_window_is_the_whole_run": configured and recorded and float(duration) == 0.0,
+    }
+
+
 def normalize_guidellm_report(raw_report: dict[str, Any]) -> dict[str, Any]:
     """Extract the stable MVP metrics from one pinned GuideLLM report."""
     report_version = report_value(raw_report, "metadata", "version")
@@ -1383,6 +1433,21 @@ def normalize_guidellm_report(raw_report: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("GuideLLM report contains no attempted requests.")
     if successful == 0:
         raise ValueError("GuideLLM report contains no successful requests.")
+
+    # A run that ended before it finished warming up has no measured window at
+    # all, only a fallback that spans the whole run. Its request_totals are
+    # warmup requests wearing a measured label, and every latency and
+    # throughput figure below is computed from that same window. Reporting
+    # them as a short measurement would be a fabricated result, so this is
+    # refused in the same way an empty report already is.
+    integrity = measured_window_integrity(benchmark)
+    if not integrity["warmup_boundary_crossed"]:
+        raise ValueError(
+            "This run ended before it finished warming up, so it has no measured window: "
+            f"the {attempted} request(s) it reports are warmup requests, which the profile "
+            "excludes from measurement. Nothing here is a measurement. Run the benchmark "
+            "again with enough time, or on a profile with a longer limit."
+        )
 
     started_at_seconds = report_number(benchmark, "scheduler_metrics", "measure_start_time")
     return {
@@ -2020,6 +2085,21 @@ def run_prepare_command(args: argparse.Namespace) -> int:
         print(f"Installed {args.recipe} under {managed_setup.managed_root(storage_dir)}")
         print(f"Model: {manifest['model']['path']}")
         print(f"Runtime executable: {manifest['runtime']['executable_path']}")
+        # Say now whether that executable can actually load. Finding out at
+        # launch instead means a contributor downloads several gigabytes, sees
+        # "installed", and only then learns the machine is missing a system
+        # library. Reported, never installed.
+        libraries = managed_setup.check_runtime_libraries(manifest["runtime"]["executable_path"])
+        if libraries.missing:
+            print(file=sys.stderr)
+            print(libraries.message, file=sys.stderr)
+            if libraries.detail:
+                print(libraries.detail, file=sys.stderr)
+            print("\nThe download is complete and verified; only this prerequisite is missing.",
+                  file=sys.stderr)
+            return 2
+        if libraries.checked:
+            print("Shared libraries: every library the runtime needs is present.")
         print("This is local, reviewed, verified evidence for setup only; it is not a benchmark result.")
         return 0
     except managed_setup.ManagedSetupError as error:

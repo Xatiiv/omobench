@@ -13,6 +13,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -84,7 +85,52 @@ def _stop_process(process: subprocess.Popen) -> None:
             process.wait(timeout=5)
 
 
-def wait_for_ready(endpoint: str, alias: str, process: subprocess.Popen, *, timeout: float = READY_TIMEOUT_SECONDS) -> None:
+def loader_failure(log_path: Path | None) -> str:
+    """The dynamic linker's own complaint, if the server left one behind.
+
+    The prerequisite check in `managed_server` catches a missing shared
+    library before anything is started, but it can only report what `ldd` can
+    resolve. A library that goes missing between the check and the launch, or
+    one the check could not verify at all, still ends the same way: the
+    process writes one line and exits. Quoting that line turns "exited early
+    with code 127" into something a contributor can act on.
+    """
+    if log_path is None:
+        return ""
+    try:
+        text = Path(log_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        if "error while loading shared libraries" in line:
+            # The loader names the library immediately after its own message,
+            # and the rest of the line is its explanation -- which also
+            # contains colons, so the library is matched rather than counted
+            # off the end.
+            found = re.search(r"error while loading shared libraries:\s*([^\s:]+)", line)
+            library = found.group(1) if found else ""
+            package = managed_setup.RUNTIME_LIBRARY_PACKAGES.get(library, "")
+            advice = (
+                f"\n\nInstall it from inside this Linux distribution:\n"
+                f"    sudo apt update && sudo apt install -y {package}\n"
+                "OmoBench does not install system packages for you. Nothing needs to be "
+                "downloaded again."
+                if package else
+                "\n\nInstall the package your distribution ships that library in. OmoBench "
+                "does not install system packages for you."
+            )
+            return "\n\nThe server reported: " + line.strip() + advice
+    return ""
+
+
+def wait_for_ready(
+    endpoint: str,
+    alias: str,
+    process: subprocess.Popen,
+    *,
+    timeout: float = READY_TIMEOUT_SECONDS,
+    log_path: Path | None = None,
+) -> None:
     """Poll /v1/models until the managed server reports the expected alias.
 
     Raises LauncherError (without performing any inference) if the server
@@ -94,7 +140,10 @@ def wait_for_ready(endpoint: str, alias: str, process: subprocess.Popen, *, time
     last_error: Exception | None = None
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            raise LauncherError(f"The managed model server exited early with code {process.returncode}.")
+            raise LauncherError(
+                f"The managed model server exited early with code {process.returncode}."
+                + loader_failure(log_path)
+            )
         try:
             with urlopen(Request(endpoint + "/v1/models"), timeout=5) as response:
                 payload = json.loads(response.read().decode("utf-8", errors="replace"))
@@ -121,6 +170,17 @@ def managed_server(root: Path, recipe_id: str, storage_dir: Path, *, log_path: P
         raise LauncherError(platform_status.message)
     recipe = managed_setup.get_recipe(root, recipe_id)
     installed = managed_setup.verify_installed(root, recipe, storage_dir)
+
+    # verify_installed proves the files are the reviewed ones. It does not
+    # prove the runtime binary can load: a missing shared library makes
+    # llama-server exit before it opens a socket, which this launcher could
+    # otherwise only report as "exited early with code 127". Checked here, by
+    # name, while there is still something useful to say about it.
+    libraries = managed_setup.check_runtime_libraries(installed["executable_path"])
+    if not libraries.ok:
+        raise LauncherError(
+            libraries.message + ("\n\n" + libraries.detail if libraries.detail else "")
+        )
 
     port = free_loopback_port()
     command = build_server_command(installed["executable_path"], installed["model_path"], recipe["model_id"], port)
@@ -150,7 +210,7 @@ def run_smoke(root: Path, recipe_id: str, storage_dir: Path, *, log_path: Path |
     Never performs inference and never reports a performance result.
     """
     with managed_server(root, recipe_id, storage_dir, log_path=log_path) as (process, endpoint, recipe):
-        wait_for_ready(endpoint, recipe["model_id"], process)
+        wait_for_ready(endpoint, recipe["model_id"], process, log_path=log_path)
         return {
             "status": "ready",
             "model_id": recipe["model_id"],
@@ -170,7 +230,7 @@ def run_execute(
 ) -> int:
     """Start the managed server, then run the existing, unchanged CLI benchmark against it."""
     with managed_server(root, recipe_id, storage_dir, log_path=log_path) as (process, endpoint, recipe):
-        wait_for_ready(endpoint, recipe["model_id"], process)
+        wait_for_ready(endpoint, recipe["model_id"], process, log_path=log_path)
         args = argparse.Namespace(
             endpoint=endpoint,
             model=recipe["model_id"],

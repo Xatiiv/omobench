@@ -318,6 +318,157 @@ def check_platform() -> PlatformStatus:
     return PlatformStatus(True, f"Linux x86_64 with glibc {glibc[0]}.{glibc[1]}: ready for the managed CPU recipe.")
 
 
+# Shared libraries a managed CPU runtime build links against, and the
+# Debian/Ubuntu package that provides each one. This table exists only so a
+# failure can name the package instead of a bare filename: nothing here is ever
+# installed, and the command below is printed for the contributor to run, never
+# executed. A library that is not in this table is still reported by name.
+RUNTIME_LIBRARY_PACKAGES = {
+    "libgomp.so.1": "libgomp1",
+    "libstdc++.so.6": "libstdc++6",
+    "libgcc_s.so.1": "libgcc-s1",
+    "libc.so.6": "libc6",
+    "libm.so.6": "libc6",
+    "libpthread.so.0": "libc6",
+    "libdl.so.2": "libc6",
+    "librt.so.1": "libc6",
+    "libcurl.so.4": "libcurl4",
+    "libgfortran.so.5": "libgfortran5",
+    "libopenblas.so.0": "libopenblas0-pthread",
+}
+
+_LDD_MISSING = re.compile(r"^\s*(?P<name>\S+)\s*=>\s*not found\s*$", re.MULTILINE)
+
+
+@dataclass
+class RuntimeLibraryStatus:
+    """Whether the managed runtime binary's shared libraries can be resolved."""
+
+    ok: bool
+    checked: bool
+    missing: list[str]
+    packages: list[str]
+    message: str
+    detail: str = ""
+
+
+def check_runtime_libraries(
+    executable_path: Path | str,
+    *,
+    runner: Callable[[list[str]], Any] | None = None,
+    timeout: float = 20.0,
+) -> RuntimeLibraryStatus:
+    """Can the managed model server's own binary actually load?
+
+    The Python runner health check establishes that OmoBench and GuideLLM
+    import. It says nothing about `llama-server`, which is a separate native
+    executable with its own shared-library dependencies -- and on a clean
+    distribution one of them is routinely absent. A machine that passed every
+    existing check still failed here with
+
+        llama-server: error while loading shared libraries:
+        libgomp.so.1: cannot open shared object file: No such file or directory
+
+    which the launcher could only report as "the managed model server exited
+    early with code 127", after the model had been downloaded and verified.
+
+    This resolves the binary's dependencies with `ldd`, which reads the ELF and
+    asks the loader; it does not execute the program. A library the loader
+    cannot find is reported by name, with the package that provides it and the
+    exact command to install it. OmoBench never installs a system package
+    itself, and nothing needs downloading again: the model and runtime are
+    already installed and verified.
+
+    If `ldd` is unavailable or cannot interpret the file, this reports
+    `checked=False` and `ok=True`: an unverifiable prerequisite is not
+    evidence of a broken one, and must not block a launch that would work.
+    """
+    path = Path(executable_path)
+    if not path.is_file():
+        return RuntimeLibraryStatus(
+            ok=False, checked=True, missing=[], packages=[],
+            message=f"The managed runtime executable is missing: {path}.",
+        )
+    if sys.platform == "win32":
+        return RuntimeLibraryStatus(
+            ok=True, checked=False, missing=[], packages=[],
+            message="Shared-library prerequisites are checked on Linux/WSL2, where the runtime runs.",
+        )
+
+    command = ["ldd", str(path)]
+    try:
+        completed = runner(command) if runner is not None else _run_ldd(command, timeout=timeout)
+    except FileNotFoundError:
+        return RuntimeLibraryStatus(
+            ok=True, checked=False, missing=[], packages=[],
+            message="ldd is not available here, so the runtime's shared libraries were not checked.",
+            detail="If the managed server exits immediately, its log will name the missing library.",
+        )
+    except Exception as error:  # noqa: BLE001 - a failed check is never a failed prerequisite
+        return RuntimeLibraryStatus(
+            ok=True, checked=False, missing=[], packages=[],
+            message="The runtime's shared libraries could not be checked.",
+            detail=str(error),
+        )
+
+    output = f"{getattr(completed, 'stdout', '') or ''}\n{getattr(completed, 'stderr', '') or ''}"
+    missing = []
+    for match in _LDD_MISSING.finditer(output):
+        name = match.group("name")
+        if name not in missing:
+            missing.append(name)
+
+    if not missing:
+        if getattr(completed, "returncode", 0) != 0:
+            return RuntimeLibraryStatus(
+                ok=True, checked=False, missing=[], packages=[],
+                message="The runtime's shared libraries could not be checked.",
+                detail=output.strip()[:500],
+            )
+        return RuntimeLibraryStatus(
+            ok=True, checked=True, missing=[], packages=[],
+            message="Every shared library the managed runtime needs is present.",
+        )
+
+    packages = []
+    for name in missing:
+        package = RUNTIME_LIBRARY_PACKAGES.get(name)
+        if package and package not in packages:
+            packages.append(package)
+
+    named = ", ".join(missing)
+    if packages:
+        install = "sudo apt update && sudo apt install -y " + " ".join(packages)
+        remedy = (
+            f"Install the package that provides it, from inside this Linux distribution:\n"
+            f"    {install}\n"
+            "That needs your Linux password, so OmoBench does not run it for you."
+        )
+    else:
+        remedy = (
+            "Install the package your distribution ships it in, from inside this Linux "
+            "distribution. OmoBench does not install system packages for you."
+        )
+    return RuntimeLibraryStatus(
+        ok=False, checked=True, missing=missing, packages=packages,
+        message=(
+            f"The managed model server cannot start: its runtime needs {named}, which this "
+            "system does not have."
+        ),
+        detail=(
+            f"{remedy}\n\nThe model and the runtime are already downloaded and verified; "
+            "nothing is downloaded again, and the benchmark is unaffected. Re-run the same "
+            "command once the package is installed."
+        ),
+    )
+
+
+def _run_ldd(command: list[str], timeout: float = 20.0) -> Any:
+    import subprocess
+
+    return subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
+
+
 def normalize_storage_dir(raw: str) -> Path:
     """Validate a contributor-supplied storage folder without converting it.
 
