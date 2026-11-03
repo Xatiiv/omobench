@@ -25,11 +25,18 @@ export const comparisonExamples: ComparisonEntry[] = scenarios.map((s, index) =>
     configurationFingerprint: `sha256:${String(index).repeat(64)}`,
     executionDevice: s.device as "cpu" | "gpu",
     hardware: { cpu: s.device === "cpu" ? s.name : "Example host CPU", display: s.name, ramGb: s.ram, os: "Example OS", driverVersion: null,
-      gpus: s.device === "gpu" ? [{ count: 1, memoryGb: 16, model: "Example GPU" }] : [] },
+      gpus: s.device === "gpu" ? [{ count: 1, memoryGb: 16, model: "Example GPU", vendor: "other" }] : [] },
     outputTokensPerSecond: s.output,
     ttftP50: s.ttft[0], ttftP95: s.ttft[1], itlP50: s.itl[0], itlP95: s.itl[1],
     requests: { attempted: 50, succeeded: 50, failed: 0 }, errorRatePercent: 0,
     requestsPerSecond: s.output / 256, totalTokensPerSecond: s.output * 5,
     runKind: "initial", startedAt: "2026-01-01T00:00:00Z", submitter: "Illustrative setup", sourceCommit: null, artifacts: [],
+    // These examples describe nothing real, so they describe no serving
+    // environment either: they are shaped like a schema 1.0 record, where none
+    // of this was collected, rather than inventing a machine.
+    schemaVersion: "1.0", catalogStatus: "catalogued", metadataDeclaredAfterExecution: false,
+    serving: null, servedModelId: null, tokenizer: null, weights: null,
+    transportRecorded: false,
+    transport: { bridgeVersion: null, kind: "direct", overheadIncluded: false, protocol: "Not recorded" },
   },
 }));

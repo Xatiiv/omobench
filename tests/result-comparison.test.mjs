@@ -10,7 +10,7 @@ async function loadModule(path) {
   return import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`);
 }
 const { readResultRecord } = await loadModule("../app/lib/result-record.ts");
-const { incompatibilities, metricDifference, rankRuns, eligibleLeaderboard, barPercent, comparisonHref, formatMetric } = await loadModule("../app/lib/comparison.ts");
+const { incompatibilities, metricDifference, rankRuns, eligibleLeaderboard, barPercent, comparisonHref, formatMetric, transportLabel, servingLabel, placementLabel, tokenizerLabel } = await loadModule("../app/lib/comparison.ts");
 
 function fixture() {
   const checksum = `sha256:${"a".repeat(64)}`;
@@ -137,4 +137,221 @@ test("legacy GPU execution and missing quantization retain their interpretation"
 test("compare links carry only an encoded public run ID", () => {
   assert.equal(comparisonHref("run-fixture-1234"), "/compare?run=run-fixture-1234");
   assert.equal(comparisonHref("a&token=secret"), "/compare?run=a%26token%3Dsecret");
+});
+
+
+// --- Schema 1.1: what served the result, beside what measured it -----------
+
+function fact(value, provenance = "contributor-declared") {
+  return { value, provenance: value === null ? "unknown" : provenance };
+}
+
+// A bridged AMD desktop. Entirely synthetic; no machine like this was measured.
+function bridgedFixture(overrides = {}) {
+  const base = fixture();
+  const checksum = `sha256:${"a".repeat(64)}`;
+  return {
+    ...base,
+    schema_version: "1.1",
+    execution_device: "gpu",
+    runtime: { ...base.runtime, framework: "lmstudio", version: "b10621" },
+    hardware: {
+      cpu: "AMD Ryzen 7 9800X3D", os: "Windows 11 Pro", ram_gb: 64, driver_version: null,
+      gpus: [{ vendor: "amd", model: "AMD Radeon RX 9070", memory_gb: 16, count: 1 }],
+    },
+    model: {
+      ...base.model,
+      served_model_id: "deepseek-r1-distill-qwen-14b",
+      catalog_status: "catalogued",
+      tokenizer: { source: "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B", kind: "huggingface",
+                   loaded: "loaded-before-run", matches_served_weights: "not-verifiable-here",
+                   identity: { class: "LlamaTokenizerFast", vocabulary_size: 152064 } },
+      weights: { kind: "repository", repository: "https://example.invalid/weights",
+                 repository_revision: "immutable-fixture-revision",
+                 identity: "repository-revision", content: null },
+    },
+    environment: {
+      metadata_version: "serving-environment-v1",
+      relationship: "windows-host-wsl-runner",
+      runner: { os: "Linux-6.6-WSL2", kind: "wsl2", python_version: "3.12.3", cpu: "x86_64", ram_gb: 31 },
+      serving: {
+        host: { os: fact("Windows 11 Pro"), cpu: fact("AMD Ryzen 7 9800X3D"), ram_gb: fact(64) },
+        accelerators: [{ vendor: "amd", model: "AMD Radeon RX 9070", memory_gb: 16, count: 1,
+                         role: "inference", provenance: "contributor-declared" }],
+        placement: { mode: "gpu-only", detail: null, provenance: "contributor-declared" },
+        runtime: { application: { name: "LM Studio", version: "0.3.31", provenance: "contributor-declared" },
+                   engine: { name: "llama.cpp", version: "b10621", provenance: "contributor-declared" },
+                   settings: [{ name: "context_length", value: "8192", provenance: "contributor-declared" }] },
+      },
+      transport: { kind: "windows-wsl-stdio-bridge", protocol: "HTTP/1.1",
+                   bridge_version: "windows-stdio-http1-v1", overhead: "included-not-measured" },
+    },
+    configuration_fingerprint: checksum,
+    ...overrides,
+  };
+}
+
+function bridged(overrides) { return readResultRecord("bridged fixture", bridgedFixture(overrides)); }
+
+test("a legacy 1.0 result still reads, and gains no facts it never recorded", () => {
+  const result = record();
+  assert.equal(result.schemaVersion, "1.0");
+  assert.equal(result.serving, null);
+  assert.equal(result.tokenizer, null);
+  assert.equal(result.weights, null);
+  assert.equal(result.servedModelId, null);
+  assert.equal(result.transportRecorded, false);
+  assert.equal(result.metadataDeclaredAfterExecution, false);
+});
+
+test("a 1.0 result cannot carry serving metadata in place", () => {
+  assert.throws(() => readResultRecord("mixed", { ...fixture(), environment: bridgedFixture().environment }), /schema 1.0/);
+});
+
+test("a bridged result reads its two environments separately", () => {
+  const result = bridged();
+  assert.equal(result.serving.relationship, "windows-host-wsl-runner");
+  assert.equal(result.serving.runner.kind, "wsl2");
+  assert.equal(result.hardware.cpu, "AMD Ryzen 7 9800X3D");
+  assert.notEqual(result.hardware.cpu, result.serving.runner.cpu);
+});
+
+test("bridge latency is reported as included, never as corrected for", () => {
+  const result = bridged();
+  assert.equal(result.transport.overheadIncluded, true);
+  assert.match(transportLabel(result), /inside every number/);
+});
+
+test("a legacy result says its transport was not separately recorded", () => {
+  assert.match(transportLabel(record()), /not separately recorded/);
+});
+
+test("a fact and its origin have to agree", () => {
+  for (const host of [
+    { os: { value: null, provenance: "detected" }, cpu: fact("x"), ram_gb: fact(1) },
+    { os: { value: "Windows", provenance: "unknown" }, cpu: fact("x"), ram_gb: fact(1) },
+  ]) {
+    const document = bridgedFixture();
+    document.environment.serving.host = host;
+    assert.throws(() => readResultRecord("bad fact", document));
+  }
+});
+
+test("a result cannot describe its serving hardware two different ways", () => {
+  const document = bridgedFixture();
+  document.hardware.gpus = [{ vendor: "nvidia", model: "NVIDIA RTX 4090", memory_gb: 24, count: 1 }];
+  assert.throws(() => readResultRecord("mismatched", document), /do not match/);
+});
+
+test("a card that was present but idle stays out of the result's hardware", () => {
+  const document = bridgedFixture();
+  document.environment.serving.accelerators.push({
+    vendor: "intel", model: "Intel Arc A770", memory_gb: 16, count: 1,
+    role: "present-not-used", provenance: "detected" });
+  const result = readResultRecord("idle card", document);
+  assert.equal(result.hardware.gpus.length, 1);
+  assert.equal(result.serving.accelerators.length, 2);
+});
+
+test("a split placement has to say how the weights were split", () => {
+  const document = bridgedFixture();
+  document.environment.serving.placement = { mode: "cpu-gpu-offload", detail: null, provenance: "contributor-declared" };
+  assert.throws(() => readResultRecord("split", document), /how the weights were split/);
+  document.environment.serving.placement.detail = "32 of 49 layers on GPU";
+  assert.match(placementLabel(readResultRecord("split", document)), /32 of 49 layers/);
+});
+
+test("a transport and a serving arrangement that describe different setups are refused", () => {
+  const document = bridgedFixture();
+  document.environment.relationship = "same-host";
+  document.environment.runner.kind = "native";
+  assert.throws(() => readResultRecord("mismatched setup", document), /different setups/);
+});
+
+test("a tokenizer that loaded is never read as a tokenizer that matches", () => {
+  const result = bridged();
+  assert.equal(result.tokenizer.loaded, "loaded-before-run");
+  assert.match(tokenizerLabel(result), /loaded before the run/);
+  const document = bridgedFixture();
+  document.model.tokenizer.matches_served_weights = "yes";
+  assert.throws(() => readResultRecord("claimed match", document), /nothing can establish/);
+});
+
+test("a served alias is kept apart from the canonical model", () => {
+  const result = bridged();
+  assert.equal(result.servedModelId, "deepseek-r1-distill-qwen-14b");
+  assert.equal(result.model, "Fixture/Model");
+});
+
+test("content-hashed weights report the files they were hashed from", () => {
+  const document = bridgedFixture();
+  document.model.weights = { kind: "local-files", repository: null, repository_revision: null,
+    identity: "content-hash",
+    content: { manifest_sha256: `sha256:${"c".repeat(64)}`,
+               files: [{ name: "a.gguf", bytes: 1, sha256: `sha256:${"d".repeat(64)}` },
+                       { name: "b.gguf", bytes: 2, sha256: `sha256:${"e".repeat(64)}` }] } };
+  const result = readResultRecord("hashed weights", document);
+  assert.equal(result.weights.identity, "content-hash");
+  assert.equal(result.weights.fileCount, 2);
+  assert.equal(result.weights.repositoryRevision, null);
+});
+
+test("a proposed model is readable and labelled, not silently catalogued", () => {
+  const document = bridgedFixture();
+  document.model.catalog_status = "proposed";
+  const result = readResultRecord("proposed", document);
+  assert.equal(result.catalogStatus, "proposed");
+  assert.throws(() => readResultRecord("proposed on 1.0", { ...fixture(), model: { ...fixture().model, catalog_status: "proposed" } }), /schema 1.1/);
+});
+
+test("metadata declared after the run is reported as such", () => {
+  const document = bridgedFixture();
+  document.submission = { ...document.submission, packaging: {
+    metadata_declared_after_execution: true, derived_from_run_id: "run-original-1234",
+    evidence_sha256: { "reproduce.md": `sha256:${"f".repeat(64)}` } } };
+  assert.equal(readResultRecord("derived", document).metadataDeclaredAfterExecution, true);
+});
+
+// --- Comparison -------------------------------------------------------------
+
+test("a bridged run is not mixed into a direct run's comparison", () => {
+  const direct = record();
+  const relayed = { ...direct, transport: bridged().transport, serving: bridged().serving,
+                    tokenizer: bridged().tokenizer };
+  assert.match(incompatibilities(direct, relayed).join(" "), /Different transport/);
+});
+
+test("two bridged runs stay comparable with each other", () => {
+  assert.deepEqual(incompatibilities(bridged(), bridged()), []);
+});
+
+test("a split placement is not compared against an undivided one", () => {
+  const document = bridgedFixture();
+  document.environment.serving.placement = { mode: "cpu-gpu-offload", detail: "32 of 49 layers on GPU", provenance: "contributor-declared" };
+  assert.match(incompatibilities(bridged(), readResultRecord("split", document)).join(" "), /weight placement/i);
+});
+
+test("different tokenizers are not compared as if they counted the same work", () => {
+  const document = bridgedFixture();
+  document.model.tokenizer.source = "Qwen/Qwen3-4B";
+  assert.match(incompatibilities(bridged(), readResultRecord("other tokenizer", document)).join(" "), /tokenizer/i);
+});
+
+test("a proposed model does not join a catalogued leaderboard", () => {
+  const document = bridgedFixture();
+  document.model.catalog_status = "proposed";
+  const proposed = readResultRecord("proposed", document);
+  assert.match(incompatibilities(bridged(), proposed).join(" "), /proposed/i);
+  assert.deepEqual(eligibleLeaderboard([{ key: "p", origin: "registry", result: proposed }], bridged(), "registry"), []);
+});
+
+test("legacy results stay comparable with each other", () => {
+  assert.deepEqual(incompatibilities(record(), record()), []);
+});
+
+test("serving labels say which arrangement produced the numbers", () => {
+  assert.match(servingLabel(bridged()), /Windows host served/);
+  assert.match(servingLabel(record()), /not recorded/i);
+  assert.match(placementLabel(record()), /Not recorded/);
+  assert.match(tokenizerLabel(record()), /Not recorded/);
 });

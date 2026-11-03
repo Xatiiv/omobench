@@ -4,12 +4,10 @@
 //
 // Run by cli/tests/test_provenance_form.py, which asserts on the JSON printed.
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import { createContext, runInContext } from "node:vm";
 import { makeDocument } from "./dom_stub.mjs";
 
 const appPath = process.argv[2];
-const webDirectory = dirname(appPath);
 
 const document = makeDocument();
 const get = (id) => document.getElementById(id);

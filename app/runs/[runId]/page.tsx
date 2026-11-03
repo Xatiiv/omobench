@@ -1,12 +1,24 @@
 import Link from "next/link";
 import { SiteHeader } from "@/components/product/site-header";
 import { Badge } from "@/components/ui/badge";
-import { comparisonHref } from "@/app/lib/comparison";
+import { comparisonHref, placementLabel, servingLabel, tokenizerLabel, transportLabel } from "@/app/lib/comparison";
 import { demoResults, type DemoResult } from "@/app/data/demo-results";
 import {
   getRegistryResult,
   type RegistryResult,
 } from "@/app/data/registry-results";
+
+function ProvenanceRow({ label, value, note }: Readonly<{ label: string; value: string; note?: string }>) {
+  return (
+    <div className="grid gap-2 border-b border-white/10 pb-3 last:border-0 last:pb-0 sm:grid-cols-[11rem_1fr]">
+      <dt className="text-slate-400">{label}</dt>
+      <dd className="break-words text-xs text-slate-200">
+        <span className="font-mono">{value}</span>
+        {note ? <span className="mt-1 block font-sans text-[0.7rem] leading-5 text-slate-500">{note}</span> : null}
+      </dd>
+    </div>
+  );
+}
 
 const expectedArtifacts = [
   ["result.json", "The normalized, schema-validated benchmark summary."],
@@ -84,12 +96,13 @@ function LocalRunDetails({ result }: Readonly<{ result: RegistryResult }>) {
 
       <Link className="product-button mt-6" href={comparisonHref(result.id)}>Compare this setup ↗</Link>
 
-      <section className="grid gap-4 py-10 sm:grid-cols-2 lg:grid-cols-5">
+      <section className="grid gap-4 py-10 sm:grid-cols-2 lg:grid-cols-6">
         {[
           ["Execution device", result.executionDevice.toUpperCase()],
           ["Profile", result.profile],
           ["Framework", `${result.framework} ${result.frameworkVersion}`],
           ["Quantization", result.quantization ?? "Unspecified"],
+          ["Transport", result.transport.kind === "windows-wsl-stdio-bridge" ? "Windows–WSL bridge" : "Direct"],
           ["Run started", formatStartedAt(result.startedAt)],
         ].map(([label, value]) => (
           <div className="rounded-xl border border-white/10 bg-white/[0.025] p-5" key={label}>
@@ -132,6 +145,114 @@ function LocalRunDetails({ result }: Readonly<{ result: RegistryResult }>) {
             ))}
           </dl>
         </div>
+      </section>
+
+      <section className="border-b border-white/10 py-10" id="provenance">
+        <p className="font-mono text-xs uppercase tracking-[0.18em] text-slate-500">What served this model</p>
+        <h2 className="mt-2 text-2xl font-semibold tracking-tight">Serving environment, weights and transport.</h2>
+        <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-400">
+          Where inference happened is not always where the benchmark ran. Each fact below says how it
+          was established: detected by a probe on the machine that owns it, reported by the server, or
+          declared by the contributor. A fact nobody established is shown as not recorded, never filled in.
+        </p>
+        <div className="mt-6 grid gap-4 lg:grid-cols-2">
+          <dl className="rounded-xl border border-white/10 bg-white/[0.025] p-6 text-sm">
+            <ProvenanceRow label="Serving arrangement" value={servingLabel(result)} />
+            <ProvenanceRow
+              label="Transport"
+              value={transportLabel(result)}
+              note={result.transport.overheadIncluded
+                ? "The bridge's own latency is inside every measurement here and has not been subtracted. Compare this run with other bridged runs."
+                : result.transportRecorded ? undefined
+                : "Published under schema 1.0, which could only carry a direct run; the result itself records no transport."}
+            />
+            <ProvenanceRow label="Weight placement" value={placementLabel(result)} />
+            <ProvenanceRow
+              label="Serving runtime"
+              value={result.serving ? `${result.serving.engine.name} ${result.serving.engine.version ?? "version not recorded"}` : `${result.framework} ${result.frameworkVersion}`}
+              note={result.serving?.application
+                ? `Hosted by ${result.serving.application.name} ${result.serving.application.version}, whose release version is a different thing from the engine build.`
+                : undefined}
+            />
+            <ProvenanceRow
+              label="Benchmark runner"
+              value={result.serving ? `${result.serving.runner.os} (${result.serving.runner.kind})` : "Same environment as the server"}
+            />
+          </dl>
+          <dl className="rounded-xl border border-white/10 bg-white/[0.025] p-6 text-sm">
+            <ProvenanceRow
+              label="Served identifier"
+              value={result.servedModelId ?? "Not recorded"}
+              note={result.servedModelId
+                ? "The string this run sent to the server's API. It is a serving alias, not a claim about which weights were loaded."
+                : undefined}
+            />
+            <ProvenanceRow
+              label="Weight identity"
+              value={result.weights
+                ? result.weights.identity === "content-hash"
+                  ? `${result.weights.fileCount} file(s), hashed · ${result.weights.manifestSha256}`
+                  : `${result.weights.repository} at ${result.weights.repositoryRevision}`
+                : "Recorded as the model revision only"}
+              note={result.weights?.identity === "content-hash"
+                ? "Identified by the bytes of the files themselves, because these weights have no public immutable revision."
+                : undefined}
+            />
+            <ProvenanceRow
+              label="Tokenizer"
+              value={tokenizerLabel(result)}
+              note="Token counts here are this tokenizer's counts. Whether it matches the weights the server loaded is not verifiable from the evidence."
+            />
+            <ProvenanceRow
+              label="Catalog status"
+              value={result.catalogStatus === "proposed" ? "Proposed — awaiting review" : "Catalogued model"}
+              note={result.catalogStatus === "proposed"
+                ? "This model is not in the OmoBench catalog. The bundle carries a proposal for review; nothing here makes it an eligible model."
+                : undefined}
+            />
+            <ProvenanceRow
+              label="Metadata"
+              value={result.metadataDeclaredAfterExecution ? "Declared after the run" : "Declared when packaged"}
+              note={result.metadataDeclaredAfterExecution
+                ? "This bundle was packaged later from saved evidence. The measurements are the original ones; the serving details were supplied afterwards and are not detections of the run."
+                : undefined}
+            />
+          </dl>
+        </div>
+        {result.serving && result.serving.accelerators.length > 0 ? (
+          <div className="mt-4 rounded-xl border border-white/10 bg-white/[0.025] p-6">
+            <p className="font-mono text-xs uppercase tracking-[0.16em] text-slate-500">Serving accelerators</p>
+            <ul className="mt-4 space-y-3 text-sm">
+              {result.serving.accelerators.map((device, index) => (
+                <li className="flex flex-wrap items-baseline gap-x-3 gap-y-1" key={`${device.model}-${index}`}>
+                  <span className="font-mono text-slate-100">{device.count} × {device.vendor} {device.model}</span>
+                  <span className="text-slate-400">{device.memoryGb === null ? "memory not recorded" : `${device.memoryGb} GB each`}</span>
+                  <span className="rounded border border-white/15 px-2 py-0.5 text-xs text-slate-300">
+                    {device.role === "inference" ? "performed inference" : device.role === "present-not-used" ? "present, did not serve" : "role unknown"}
+                  </span>
+                  <span className="text-xs text-slate-500">{device.provenance}</span>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-4 text-xs leading-5 text-slate-500">
+              Detecting a device establishes the device, not that inference touched it. A card listed as
+              present but not serving is deliberately excluded from this result&apos;s hardware.
+            </p>
+          </div>
+        ) : null}
+        {result.serving && result.serving.settings.length > 0 ? (
+          <div className="mt-4 rounded-xl border border-white/10 bg-white/[0.025] p-6">
+            <p className="font-mono text-xs uppercase tracking-[0.16em] text-slate-500">Serving settings</p>
+            <dl className="mt-4 grid gap-2 text-sm sm:grid-cols-2">
+              {result.serving.settings.map((setting) => (
+                <div className="flex justify-between gap-4 border-b border-white/10 pb-2" key={setting.name}>
+                  <dt className="text-slate-400">{setting.name}</dt>
+                  <dd className="font-mono text-xs text-slate-200">{setting.value}</dd>
+                </div>
+              ))}
+            </dl>
+          </div>
+        ) : null}
       </section>
 
       <section className="py-12" id="evidence">
