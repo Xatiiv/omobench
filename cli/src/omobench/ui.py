@@ -633,18 +633,7 @@ class Controller:
 
     def catalog_models(self) -> list[str]:
         """The catalogued model IDs, the registry's own source of truth."""
-        import yaml
-
-        catalog: list[str] = []
-        for path in sorted((self.root / "catalog" / "models").glob("*.yaml")):
-            try:
-                document = yaml.safe_load(path.read_text(encoding="utf-8"))
-                catalog.extend(entry["id"] for entry in document.get("models", [])
-                               if isinstance(entry, dict) and entry.get("modality") == "text-generation"
-                               and isinstance(entry.get("id"), str))
-            except (OSError, ValueError, AttributeError, yaml.YAMLError):
-                continue
-        return sorted(set(catalog))
+        return cli.catalog_model_ids(self.root)
 
     def local_report(self, job_id: str) -> dict:
         """A local record of what this machine measured.
@@ -896,8 +885,34 @@ class Controller:
                        or "Meets this profile's minimum successful requests and maximum error rate."),
         }]
         if job.get("transport"):
-            items.insert(0, {"field": None, "label": "Windows bridge: local reports only", "ok": False,
-                             "detail": "The public schema cannot represent separate Windows serving and WSL runner hosts. Export a local report."})
+            # Previously this was the end of the road. It is now a requirement
+            # like the others: the schema can describe a Windows server and a
+            # WSL runner, and what it needs is the serving machine's own facts,
+            # which nothing visible from WSL can supply.
+            serving = (values.get("serving") if isinstance(values.get("serving"), dict) else None)
+            declared = bool(serving and (serving.get("host") or {}).get("cpu"))
+            items.insert(0, {
+                "field": "serving",
+                "label": "Serving environment is described separately from the runner",
+                "ok": None if serving is None else declared,
+                "detail": (
+                    "This run's model server and its benchmark runner were different "
+                    "environments. Describe the machine that served the model -- its operating "
+                    "system, processor, memory, accelerator and serving runtime. What WSL can "
+                    "see of the Windows host is not evidence about what served the model, so "
+                    "none of it is filled in for you."
+                    if not declared else
+                    "Recorded, and marked as declared by you rather than detected here."),
+            })
+            items.insert(1, {
+                "field": None,
+                "label": "Bridge latency is inside the measurements",
+                "ok": True,
+                "detail": ("Every number this run reports includes the loopback bridge's own "
+                           "latency. It is recorded as included and is never subtracted, so a "
+                           "bridged result is comparable with other bridged results and is "
+                           "labelled wherever it is shown."),
+            })
         return {
             "model": model,
             "catalog": catalog,
@@ -921,8 +936,6 @@ class Controller:
     def _begin_action(self, job_id: str, status: str) -> dict:
         with self.lock:
             job = self._get(job_id)
-            if job.get("transport"):
-                raise UIError("Windows bridge measurements are local-only. Download the local report instead.")
             if self.closing or self.busy or job["status"] != "completed":
                 raise UIError("Wait for a successful run before preparing a submission.", 409)
             submission = job.get("submission") or {}
@@ -932,6 +945,44 @@ class Controller:
             job["status"] = status
             self._save(job)
             return job
+
+    def serving_declaration(self, job: dict, data: dict) -> dict | None:
+        """Build the provenance declaration the packager reads, from the form.
+
+        Returns None when there is nothing to declare and the run was a plain
+        single-host one, so the existing schema 1.0 output stays byte for byte
+        what it was. A bridged run has no such option: it is only describable
+        with this, and the packager says so if it is missing.
+        """
+        declaration: dict = {}
+        for name, checker in (("serving", dict), ("weights", dict), ("tokenizer", dict),
+                              ("proposal", dict)):
+            value = data.get(name)
+            if value is None:
+                continue
+            if not isinstance(value, checker):
+                raise UIError(f"{name} must be an object.")
+            declaration[name] = value
+        served = text_field(data, "served_model_id", optional=True)
+        if served:
+            declaration["served_model_id"] = served
+        status = data.get("catalog_status")
+        if status is not None:
+            if status not in {"catalogued", "proposed"}:
+                raise UIError("Catalog status must be 'catalogued' or 'proposed'.")
+            declaration["catalog_status"] = status
+        if not declaration and not job.get("transport"):
+            return None
+        if job.get("transport"):
+            declaration.setdefault("serving", {})
+            declaration["serving"].setdefault("relationship", "windows-host-wsl-runner")
+        else:
+            declaration.setdefault("serving", {})
+            declaration["serving"].setdefault("relationship", "same-host")
+        if job.get("tokenizer") and "tokenizer" not in declaration:
+            declaration["tokenizer"] = {
+                "source": job["tokenizer"], "kind": "huggingface", "loaded": "not-checked"}
+        return declaration
 
     def package(self, job_id: str, data: dict) -> dict:
         from .ui_submission import validate_bundle
@@ -966,6 +1017,15 @@ class Controller:
                 f"--profile={job['profile']}",
                 f"--execution-device={job['execution_device']}",
             ]
+            declaration = self.serving_declaration(job, data)
+            if declaration is not None:
+                # Kept beside the evidence so the same declaration can be read
+                # back, reviewed, and reused if this run is packaged again.
+                path = run / "provenance.json"
+                path.write_text(json.dumps(declaration, indent=2) + "\n", encoding="utf-8")
+                arguments.append(f"--provenance={path}")
+                optional = {key: value for key, value in optional.items() if key != "cpu"}
+                memory = None
             arguments.extend(f"--{key.replace('_', '-')}={value}" for key, value in {**values, **optional}.items() if value)
             arguments.extend(f"--runtime-arg={value}" for value in runtime_args)
             if memory is not None:

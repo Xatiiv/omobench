@@ -25,7 +25,7 @@ from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from . import __version__
+from . import __version__, model_identity, model_proposal, result_provenance
 
 
 GUIDELLM_VERSION = "0.7.3"
@@ -728,6 +728,27 @@ def doctor_report() -> dict[str, Any]:
         "github_cli": executable_version("gh"),
         "gpus": detect_gpus(),
     }
+
+
+def catalog_model_ids(root: Path) -> list[str]:
+    """The catalogued, text-generation model IDs: the registry's source of truth.
+
+    A model is eligible because it is here, never because a result named it. A
+    catalog file that cannot be read contributes nothing rather than being
+    guessed at, so a damaged file narrows eligibility instead of widening it.
+    """
+    import yaml
+
+    catalog: list[str] = []
+    for path in sorted((root / "catalog" / "models").glob("*.yaml")):
+        try:
+            document = yaml.safe_load(path.read_text(encoding="utf-8"))
+            catalog.extend(entry["id"] for entry in document.get("models", [])
+                           if isinstance(entry, dict) and entry.get("modality") == "text-generation"
+                           and isinstance(entry.get("id"), str))
+        except (OSError, ValueError, AttributeError, yaml.YAMLError):
+            continue
+    return sorted(set(catalog))
 
 
 def find_repository_root() -> Path | None:
@@ -1990,15 +2011,36 @@ def package_local_run(args: argparse.Namespace) -> int:
         )
         if not isinstance(environment, dict):
             raise ValueError("environment.json must contain an object at its root.")
-        if environment.get("transport") is not None:
-            raise ValueError("Bridged measurements are local-only: the public schema cannot represent both serving and runner hosts.")
-        hardware = hardware_from_environment(
-            environment,
-            args.cpu,
-            args.ram_gb,
-            getattr(args, "gpu_memory_gb", None),
-            execution_device=args.execution_device,
-        )
+        transport_provenance = environment.get("transport")
+        declaration = None
+        provenance_path = getattr(args, "provenance", None)
+        if provenance_path:
+            declaration = result_provenance.read_declaration(Path(provenance_path).expanduser())
+        elif transport_provenance is not None:
+            # The old refusal said only that this could not be published. It
+            # can: schema 1.1 records the Windows serving host and the WSL
+            # runner separately, and what it needs is the serving machine's own
+            # facts, which nothing in a WSL snapshot can supply.
+            raise ValueError(
+                "This run went through the Windows bridge, so its model server and its benchmark "
+                "runner were different environments. Package it with --provenance, declaring the "
+                "serving machine, its runtime and its hardware; what WSL can see about the "
+                "Windows host is not evidence about what served the model.")
+
+        if declaration is None:
+            hardware = hardware_from_environment(
+                environment,
+                args.cpu,
+                args.ram_gb,
+                getattr(args, "gpu_memory_gb", None),
+                execution_device=args.execution_device,
+            )
+        else:
+            if args.cpu or args.ram_gb is not None or getattr(args, "gpu_memory_gb", None) is not None:
+                raise ValueError(
+                    "--cpu, --ram-gb and --gpu-memory-gb describe the machine this snapshot came "
+                    "from. Under --provenance the serving machine is declared there instead, so "
+                    "there is one place a reader can look.")
         profile_path = root / "benchmarks" / "profiles" / f"{args.profile}.yaml"
         if not profile_path.is_file():
             raise ValueError(f"Missing profile definition: {profile_path}")
@@ -2034,6 +2076,32 @@ def package_local_run(args: argparse.Namespace) -> int:
             "runner": "guidellm",
             "runner_version": normalized["runner_version"],
         }
+        provenance = None
+        declared_after = bool(getattr(args, "_declared_after_execution", False))
+        if declaration is not None:
+            if declaration.get("result") is not None and not declared_after:
+                raise ValueError(
+                    "The declaration's \"result\" section is for `omobench repackage`, which "
+                    "rebuilds a finished run. When packaging directly, those values come from "
+                    "this command's own options.")
+            provenance = result_provenance.build(
+                declaration,
+                model_id=model["id"],
+                revision=model["revision"],
+                run_id=run_id,
+                submitter=required_text(args.submitter, "Submitter"),
+                runner_report=environment,
+                transport_provenance=transport_provenance,
+                catalog=catalog_model_ids(root),
+                execution_device=args.execution_device,
+                # Nothing declared after a run can be a detection of it. A
+                # probe taken today describes today's machine, not the machine
+                # as it was while the benchmark was running.
+                allow_probe=not declared_after,
+            )
+            hardware = provenance["hardware"]
+            model.update(provenance["model_fields"])
+
         # execution_device is deliberately excluded from this payload: a gpu run's
         # fingerprint must stay identical to what pre-execution_device code
         # computed for the same configuration, so an old GPU bundle and a newly
@@ -2058,11 +2126,12 @@ def package_local_run(args: argparse.Namespace) -> int:
             },
         }
         result = {
-            "schema_version": "1.0",
+            "schema_version": "1.0" if provenance is None else provenance["schema_version"],
             "run_id": run_id,
             "started_at": normalized["started_at"],
             "configuration_fingerprint": sha256_json(fingerprint_payload),
             "execution_device": args.execution_device,
+            **({"environment": provenance["environment"]} if provenance else {}),
             "model": model,
             "runtime": runtime,
             "hardware": hardware,
@@ -2077,6 +2146,10 @@ def package_local_run(args: argparse.Namespace) -> int:
                 "run_kind": args.run_kind,
                 "repeat_of_run_id": args.repeat_of_run_id,
                 "source_commit": current_git_commit(),
+                **({"packaging": {
+                    "metadata_declared_after_execution": True,
+                    **(getattr(args, "_derived_from", None) or {}),
+                }} if declared_after and provenance else {}),
             },
         }
     except ValueError as error:
@@ -2084,6 +2157,17 @@ def package_local_run(args: argparse.Namespace) -> int:
         return 2
 
     result_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    proposal_path = run_directory / model_proposal.FILENAME
+    if provenance and provenance["proposal"] is not None:
+        proposal_path.write_text(json.dumps(provenance["proposal"], indent=2) + "\n",
+                                 encoding="utf-8")
+        print(f"Wrote a model proposal for review at {proposal_path}")
+        print(f"{result['model']['id']} is not catalogued yet. This result is marked as proposed: "
+              "a reviewer decides whether the model is added, and nothing here makes it eligible.")
+    elif proposal_path.exists():
+        # A repackage that no longer proposes anything must not leave the old
+        # request behind, where the registry would read it as this bundle's.
+        proposal_path.unlink()
     print(f"Created normalized local result at {result_path}")
     print("This is still local evidence. Copy the complete run directory into results/ only when you are ready to submit it.")
     return 0
@@ -2361,7 +2445,63 @@ def build_parser() -> argparse.ArgumentParser:
             "memory for an already-detected GPU and does not invent a GPU model or vendor."
         ),
     )
+    package.add_argument(
+        "--provenance",
+        help=(
+            "path to a JSON declaration of the serving environment, weight identity, tokenizer "
+            "identity and -- for an uncatalogued model -- a proposal for review. Supplying it "
+            "packages the result under schema 1.1, which records the serving host and the "
+            "benchmark runner separately and is the only way to publish a bridged run. Omit it "
+            "to keep the existing schema 1.0 output byte for byte. See docs/provenance.md."
+        ),
+    )
     package.add_argument("--force", action="store_true", help="allow replacement of an existing local result.json")
+
+    repackage = subcommands.add_parser(
+        "repackage",
+        help="package a completed run again under schema 1.1, without touching its evidence",
+    )
+    repackage.add_argument("--run-dir", required=True, help="the completed staging run to repackage")
+    repackage.add_argument(
+        "--provenance",
+        required=True,
+        help="JSON declaration of the serving environment and model identity for that run",
+    )
+    repackage.add_argument("--output-dir", help="where to write the derived bundle; defaults to a sibling directory")
+    repackage.add_argument("--submitter", help="override the submitter recorded in the original result")
+    repackage.add_argument("--force", action="store_true", help="allow replacement of an existing derived bundle")
+
+    weights = subcommands.add_parser(
+        "weights", help="identify local weight files by hashing their bytes"
+    )
+    weights.add_argument("--directory", required=True, help="folder holding the weight files")
+    weights.add_argument(
+        "--file",
+        action="append",
+        default=[],
+        help=(
+            "one weight file inside --directory to include; repeat for a sharded model. Omit to "
+            "list the candidates without hashing anything."
+        ),
+    )
+    weights.add_argument("--output", help="write the manifest here instead of to standard output")
+
+    tokenizer = subcommands.add_parser(
+        "tokenizer", help="load a tokenizer source in the runner's own interpreter, before benchmarking"
+    )
+    tokenizer.add_argument("--source", required=True, help="Hugging Face repository id or local tokenizer folder")
+    tokenizer.add_argument("--model", help="the identifier your server answers to, when it differs")
+    tokenizer.add_argument(
+        "--network",
+        choices=["none", "metadata", "download"],
+        default="none",
+        help=(
+            "what this check may reach: 'none' uses the local cache only; 'metadata' may list the "
+            "repository and read its model card; 'download' may fetch tokenizer files. Model "
+            "weights are never downloaded at any level."
+        ),
+    )
+    tokenizer.add_argument("--timeout", type=float, default=180.0, help="seconds before the check is stopped")
 
     prepare = subcommands.add_parser(
         "prepare", help="review or install a reviewed managed CPU download recipe (does not benchmark)"
@@ -2400,6 +2540,210 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+REPACKAGE_RESULT_FIELDS = {
+    "model", "model_revision", "model_source", "quantization", "framework",
+    "framework_version", "server_description", "execution_device", "runtime_args",
+    "submitter", "run_kind", "repeat_of_run_id", "profile",
+}
+EVIDENCE_FILENAMES = ("guidellm-benchmarks.json.gz", "guidellm.stdout.log",
+                      "environment.json", "reproduce.md")
+
+
+def repackage_local_run(args: argparse.Namespace) -> int:
+    """Package a run that already happened, under the schema that can describe it.
+
+    A completed bridged run used to be unpublishable for a reason that had
+    nothing to do with the run: the panel refused to package it, because schema
+    1.0 had nowhere to say that the server was on Windows and the runner was in
+    WSL. The measurements were fine. Re-running a benchmark to work around a
+    packaging limitation would throw away hours and prove nothing, so this
+    reads the saved evidence instead.
+
+    The original directory is never written to. Its evidence files are copied
+    byte for byte into a new bundle, hashed on both sides, and the new result
+    records that its metadata was declared after the run rather than detected
+    while it happened.
+    """
+    root = find_repository_root()
+    if root is None:
+        print("Could not find an OmoBench checkout.", file=sys.stderr)
+        return 2
+
+    source = Path(args.run_dir).expanduser()
+    if not source.is_absolute():
+        source = Path.cwd() / source
+    source = source.resolve()
+    try:
+        source.relative_to(root.resolve())
+    except ValueError:
+        print("--run-dir must stay inside the OmoBench checkout.", file=sys.stderr)
+        return 2
+
+    missing = [name for name in EVIDENCE_FILENAMES if not (source / name).is_file()]
+    if missing:
+        print(
+            f"{source} cannot be repackaged: it is missing {', '.join(missing)}.\n"
+            "These files are the run itself -- its raw measurements, the runner's log, the "
+            "environment it ran in, and how to reproduce it. Nothing can reconstruct them after "
+            "the fact, so this run cannot become a public result.",
+            file=sys.stderr)
+        return 2
+
+    try:
+        declaration = result_provenance.read_declaration(Path(args.provenance).expanduser())
+    except result_provenance.ProvenanceError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    fields = declaration.get("result")
+    if not isinstance(fields, dict):
+        print(
+            "Repackaging needs the run's own identity as well as its serving environment. Add a "
+            "\"result\" section to the declaration with the model, its revision, the serving "
+            "framework and version, the execution device and the submitter.",
+            file=sys.stderr)
+        return 2
+    unexpected = set(fields) - REPACKAGE_RESULT_FIELDS
+    if unexpected:
+        print(f"Unsupported result field(s): {', '.join(sorted(unexpected))}.", file=sys.stderr)
+        return 2
+
+    original_result = None
+    if (source / "result.json").is_file():
+        with contextlib.suppress(OSError, ValueError):
+            original_result = json.loads((source / "result.json").read_text(encoding="utf-8"))
+
+    destination = Path(args.output_dir).expanduser() if args.output_dir else source.with_name(
+        source.name + "-repackaged")
+    if not destination.is_absolute():
+        destination = Path.cwd() / destination
+    destination = destination.resolve()
+    try:
+        destination.relative_to(root.resolve())
+    except ValueError:
+        print("--output-dir must stay inside the OmoBench checkout.", file=sys.stderr)
+        return 2
+    if destination == source:
+        print("Repackaging writes a new bundle; it never overwrites the original evidence.",
+              file=sys.stderr)
+        return 2
+    if destination.exists() and not args.force:
+        print(f"Refusing to replace {destination}. Use --force to rebuild it.", file=sys.stderr)
+        return 2
+
+    destination.mkdir(parents=True, exist_ok=True)
+    evidence_hashes = {}
+    for name in EVIDENCE_FILENAMES:
+        shutil.copyfile(source / name, destination / name)
+        evidence_hashes[name] = sha256_file(source / name)
+        if sha256_file(destination / name) != evidence_hashes[name]:
+            print(f"The copy of {name} does not match the original. Nothing was changed in "
+                  f"{source}.", file=sys.stderr)
+            return 2
+
+    run_id = (original_result or {}).get("run_id") or source.name
+    packaging = argparse.Namespace(
+        run_dir=str(destination),
+        run_id=run_id,
+        profile=fields.get("profile") or (original_result or {}).get("benchmark", {}).get("profile_id"),
+        model=fields.get("model"),
+        model_revision=fields.get("model_revision"),
+        model_source=fields.get("model_source"),
+        quantization=fields.get("quantization"),
+        framework=fields.get("framework"),
+        framework_version=fields.get("framework_version"),
+        server_description=fields.get("server_description"),
+        execution_device=fields.get("execution_device"),
+        runtime_arg=list(fields.get("runtime_args") or []),
+        submitter=args.submitter or fields.get("submitter"),
+        run_kind=fields.get("run_kind") or "initial",
+        repeat_of_run_id=fields.get("repeat_of_run_id"),
+        cpu=None, ram_gb=None, gpu_memory_gb=None,
+        provenance=str(Path(args.provenance).expanduser()),
+        force=True,
+        _declared_after_execution=True,
+        _derived_from={"derived_from_run_id": (original_result or {}).get("run_id"),
+                       "evidence_sha256": evidence_hashes},
+    )
+    for name in ("profile", "model", "model_revision", "framework", "framework_version",
+                 "execution_device", "submitter"):
+        if not getattr(packaging, name):
+            print(f"The declaration's result section is missing {name}.", file=sys.stderr)
+            return 2
+    if packaging.profile not in PROFILE_SPECS:
+        print(f"Unknown profile: {packaging.profile}", file=sys.stderr)
+        return 2
+
+    code = package_local_run(packaging)
+    if code == 0:
+        print(f"The original evidence in {source} was not modified.")
+        print("Its serving metadata was declared after the run, and is recorded as such: nothing "
+              "supplied now is presented as having been detected while the benchmark ran.")
+    return code
+
+
+def run_weights_command(args: argparse.Namespace) -> int:
+    """Identify local weight files by hashing the bytes the contributor selects.
+
+    Listing is separate from hashing on purpose. With no --file this only shows
+    what is there; files are read only once a person has named them, and the
+    identity that comes out is of those bytes, never of their names.
+    """
+    directory = Path(args.directory).expanduser()
+    try:
+        candidates = model_identity.weight_files_in(directory)
+    except model_identity.ModelIdentityError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    if not args.file:
+        if not candidates:
+            print(f"No weight files found in {directory}.")
+            return 1
+        print(f"Weight files in {directory}; nothing has been read yet:")
+        for path in candidates:
+            print(f"  {path.name}  ({path.stat().st_size:,} bytes)")
+        print("\nRe-run with --file for each file this model is made of. A sharded model needs "
+              "every shard, because the identity covers the whole set.")
+        return 0
+
+    selected = []
+    for name in args.file:
+        candidate = (directory / name).expanduser()
+        if not candidate.is_file():
+            print(f"{candidate} is not a file in {directory}.", file=sys.stderr)
+            return 2
+        selected.append(candidate)
+    try:
+        manifest = model_identity.weight_manifest(selected, root=directory)
+    except model_identity.ModelIdentityError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    document = json.dumps(manifest, indent=2) + "\n"
+    if args.output:
+        Path(args.output).expanduser().write_text(document, encoding="utf-8")
+        print(f"Wrote the weight manifest to {args.output}")
+    else:
+        print(document, end="")
+    print(f"Revision to record: {model_identity.manifest_revision(manifest)}", file=sys.stderr)
+    return 0
+
+
+def run_tokenizer_command(args: argparse.Namespace) -> int:
+    """Load a tokenizer the way the benchmark will, before the benchmark does."""
+    from . import tokenizer_preflight
+
+    report = tokenizer_preflight.preflight(
+        args.source, network=args.network, timeout=args.timeout)
+    print(report.message)
+    for check in report.checks:
+        print(f"  [{check['state']:>10}] {check['id']}: {check['detail']}")
+    if report.suggestion:
+        print(f"\nSuggested source: {report.suggestion['source']}")
+        print(f"  {report.suggestion['reason']}")
+    if report.detail:
+        print(f"\n{report.detail}", file=sys.stderr)
+    return 0 if report.ok else 1
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -2422,6 +2766,12 @@ def main() -> int:
         return write_local_run(args)
     if args.command == "package":
         return package_local_run(args)
+    if args.command == "repackage":
+        return repackage_local_run(args)
+    if args.command == "weights":
+        return run_weights_command(args)
+    if args.command == "tokenizer":
+        return run_tokenizer_command(args)
     if args.command == "prepare":
         return run_prepare_command(args)
     if args.command == "launch":

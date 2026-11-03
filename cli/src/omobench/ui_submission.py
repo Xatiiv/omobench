@@ -18,6 +18,10 @@ from .ui import UIError
 
 
 BUNDLE_FILES = ("result.json", "guidellm-benchmarks.json.gz", "guidellm.stdout.log", "environment.json", "reproduce.md")
+# A sixth file, present only when the result proposes a model for the catalog.
+# It is part of the same bundle and the same prefix: a submission still writes
+# to exactly one directory, and this never becomes a second write target.
+PROPOSAL_FILE = "model-proposal.json"
 ARTIFACT_FILES = {
     "raw_runner_output": "guidellm-benchmarks.json.gz",
     "runner_stdout_log": "guidellm.stdout.log",
@@ -26,12 +30,20 @@ ARTIFACT_FILES = {
 }
 
 
+def bundle_filenames(run: Path) -> tuple[str, ...]:
+    """The files this bundle is made of, including a proposal when it has one."""
+    proposal = run / PROPOSAL_FILE
+    if proposal.is_file() and not proposal.is_symlink():
+        return (*BUNDLE_FILES, PROPOSAL_FILE)
+    return BUNDLE_FILES
+
+
 def validate_bundle(root: Path, run: Path) -> list[str]:
     """Call the repository's actual validator, including registry duplicate checks."""
     root, run = root.resolve(), run.resolve()
     if not run.is_relative_to(root / ".omobench-runs"):
         raise UIError("Only local staging evidence can be submitted from this panel.")
-    for name in BUNDLE_FILES:
+    for name in bundle_filenames(run):
         path = run / name
         if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(run):
             return [f"Missing or unsafe bundle file: {name}"]
@@ -44,11 +56,15 @@ def validate_bundle(root: Path, run: Path) -> list[str]:
         catalog = module.load_model_catalog(module.CATALOG_PATH)
         schema = json.loads(module.SCHEMA_PATH.read_text(encoding="utf-8"))
         validator = module.Draft202012Validator(schema, format_checker=module.FormatChecker())
-        run_ids, duplicate_keys = set(), set()
+        proposals = module.Draft202012Validator(module.load_proposal_schema(),
+                                                format_checker=module.FormatChecker())
+        run_ids, duplicate_keys, proposed = set(), set(), {}
         errors = []
         for result_path in sorted(module.RESULTS_PATH.rglob("result.json")):
-            errors.extend(module.validate_result(result_path, validator, catalog, run_ids, duplicate_keys))
-        errors.extend(module.validate_result(run / "result.json", validator, catalog, run_ids, duplicate_keys))
+            errors.extend(module.validate_result(result_path, validator, catalog, run_ids,
+                                                 duplicate_keys, proposals, proposed))
+        errors.extend(module.validate_result(run / "result.json", validator, catalog, run_ids,
+                                             duplicate_keys, proposals, proposed))
         result = json.loads((run / "result.json").read_text(encoding="utf-8"))
         if not errors and any(result["artifacts"][key]["path"] != name for key, name in ARTIFACT_FILES.items()):
             errors.append("The panel submits only the standard CLI-generated artifact filenames.")
@@ -68,7 +84,7 @@ def bundle_snapshot(root: Path, run: Path) -> tuple[dict, dict[str, bytes], str]
     errors = validate_bundle(root, run)
     if errors:
         raise UIError("Bundle validation failed:\n" + "\n".join(errors))
-    contents = {name: (run / name).read_bytes() for name in BUNDLE_FILES}
+    contents = {name: (run / name).read_bytes() for name in bundle_filenames(run)}
     result = json.loads(contents["result.json"])
     # Verify the bytes that will actually be uploaded, not just the earlier file reads.
     for key, name in ARTIFACT_FILES.items():
@@ -89,15 +105,48 @@ def description(result: dict, prefix: str) -> tuple[str, str]:
     metrics = result["results"]
     # Absent only on a result predating execution-device tracking; those are GPU runs.
     device_label = "CPU" if result.get("execution_device") == "cpu" else "GPU"
+    environment = result.get("environment") or {}
+    serving = environment.get("serving") or {}
+    transport = environment.get("transport") or {}
+    extra = ""
+    if environment:
+        engine = (serving.get("runtime") or {}).get("engine") or {}
+        application = (serving.get("runtime") or {}).get("application")
+        placement = (serving.get("placement") or {}).get("mode", "unknown")
+        extra = (
+            f"- Serving environment: {environment.get('relationship')}\n"
+            f"- Serving engine: {engine.get('name')} {engine.get('version') or 'version unknown'}"
+            + (f" inside {application['name']} {application['version']}" if application else "")
+            + "\n"
+            f"- Weight placement: {placement}\n"
+            f"- Transport: {transport.get('kind')}"
+            + (" — its latency is inside every measured number here and has not been subtracted"
+               if transport.get("overhead") == "included-not-measured" else "")
+            + "\n")
+        if result["model"].get("served_model_id"):
+            extra += (f"- Served identifier: `{result['model']['served_model_id']}` "
+                      "(a serving alias, confirmed against the catalog by the contributor)\n")
+        if (result["submission"].get("packaging") or {}).get("metadata_declared_after_execution"):
+            extra += ("- Serving metadata was declared after the run, from its saved evidence; "
+                      "nothing here is recorded as detected at run time\n")
+    proposal_note = ""
+    if result["model"].get("catalog_status") == "proposed":
+        proposal_note = (
+            f"\n**This bundle proposes `{result['model']['id']}` for the model catalog.** It is not "
+            "a catalogued model yet, and merging this result does not make it one: the proposal in "
+            "`model-proposal.json` is a request for review, and adding the catalog entry is a "
+            "separate decision.\n")
     body = (
         f"Adds the complete evidence bundle at `{prefix}`.\n\n"
         f"- Model: {result['model']['id']} at `{result['model']['revision']}`\n"
         f"- Runtime: {result['runtime']['framework']} {result['runtime']['version']}\n"
         f"- Profile: `{result['benchmark']['profile_id']}`\n"
         f"- Execution device: {device_label}\n"
+        + extra +
         f"- Successful requests: {metrics['requests']['succeeded']} / {metrics['requests']['attempted']}\n"
-        f"- Output tokens/s: {metrics['output_tokens_per_second']:.2f}\n\n"
-        f"The contributor confirms {device_label} execution and has reviewed the bundle for secrets. "
+        f"- Output tokens/s: {metrics['output_tokens_per_second']:.2f}\n"
+        + proposal_note +
+        f"\nThe contributor confirms {device_label} execution and has reviewed the bundle for secrets. "
         "The local schema, catalog, artifact-hash, and duplicate checks passed. "
         "CI and maintainer review are still required before this becomes a registry result.\n"
     )
