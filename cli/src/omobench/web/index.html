@@ -38,6 +38,8 @@
             <label>Benchmark profile<select id="profile" name="profile"></select></label>
             <label>Server execution device<select id="execution-device" name="execution_device"><option value="cpu">CPU</option><option value="gpu">GPU (any vendor)</option></select><span class="hint">Where <em>your server</em> ran inference. GPU covers any vendor's accelerator; the result records vendor-neutral GPU details from this machine.</span></label>
           </div>
+          <label class="check"><input id="windows-bridge" type="checkbox"><span>My model server runs on Windows, this panel runs in WSL. Use the experimental Windows bridge.</span></label>
+          <p class="hint">Enter the Windows server's IPv4 loopback address, for example http://127.0.0.1:1234. Requires the updated companion. Bridged measurements include transport overhead and support local reports only, not public submission. No LAN listener or firewall change is needed.</p>
           <label>Tokenizer source <span class="muted small">optional</span><input id="tokenizer" name="tokenizer" placeholder="Hugging Face repository or local tokenizer folder" spellcheck="false">
             <span class="hint">Leave blank to use the server model identifier above. Set it when that identifier is a serving alias rather than a Hugging Face repository — an LM Studio alias such as <code>qwen/qwen3-vl-4b:3</code>, for example. The workload's prompts are built and counted with this tokenizer; it never changes which model your server serves, and it is not a claim about which weights are loaded.</span></label>
           <p id="profile-detail" class="profile-detail"></p>
@@ -53,6 +55,7 @@
       <section id="run-panel" class="panel" hidden>
         <div class="section-head"><div><span class="step">02</span><h2 id="run-title">Benchmark</h2></div><span id="run-status" class="pill"></span></div>
         <p id="run-meta" class="muted"></p>
+        <p id="run-transport" class="notice" hidden></p>
         <!-- The same dashboard component the guided recipes mount, with the
              stages OmoBench actually observes against a server you run. -->
         <div id="dashboard-mount"></div>

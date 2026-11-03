@@ -383,9 +383,12 @@ namespace OmoBench.Companion
                 return;
             }
 
+            List<string> program = BuildPanelProgram(configuration, port, statusFileWslPath);
+            string helperPath;
+            if (CommandLine.TryToWslPath(System.Reflection.Assembly.GetExecutingAssembly().Location, out helperPath))
+                program.InsertRange(0, new string[] { "/usr/bin/env", "OMOBENCH_BRIDGE_HELPER=" + helperPath });
             string arguments = Wsl.BuildRunArguments(
-                configuration.Distribution, configuration.CheckoutWslPath,
-                BuildPanelProgram(configuration, port, statusFileWslPath));
+                configuration.Distribution, configuration.CheckoutWslPath, program);
 
             Update(PanelState.Starting, "Starting the OmoBench panel in " + configuration.Distribution + "…",
                 "Port " + port.ToString(CultureInfo.InvariantCulture));

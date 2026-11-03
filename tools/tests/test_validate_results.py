@@ -198,6 +198,23 @@ class ValidateResultsTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertIn("schema_version", stderr)
 
+    def test_hash_correct_bridged_environment_is_not_publishable(self) -> None:
+        write_bundle(self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+                     artifact_contents={"environment_snapshot": b'{"transport":{"kind":"windows-stdio-http1-v1"}}'})
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("bridged measurements are local-only", stderr)
+        self.assertNotIn("hash mismatch", stderr)
+
+    def test_unreadable_transport_provenance_fails_closed(self) -> None:
+        for contents in (b'not json', b'[]', b'{"transport":null}' + b' ' * (1024 * 1024)):
+            with self.subTest(contents_length=len(contents)):
+                write_bundle(self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+                             artifact_contents={"environment_snapshot": contents})
+                exit_code, _, stderr = self.run_main()
+                self.assertEqual(exit_code, 1)
+                self.assertIn("cannot establish transport provenance", stderr)
+
     def test_missing_artifact_file_is_reported(self) -> None:
         write_bundle(
             self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",

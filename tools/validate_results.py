@@ -255,6 +255,21 @@ def validate_result(
             errors.append(
                 f"{result_path.relative_to(ROOT)}: hash mismatch for {artifact_name}"
             )
+        if artifact_name == "environment_snapshot":
+            try:
+                # The schema has one hardware host. A recorded bridged run
+                # cannot be promoted as if the WSL runner were its server.
+                with artifact_path.open("rb") as source:
+                    contents = source.read(1024 * 1024 + 1)
+                if len(contents) > 1024 * 1024:
+                    raise ValueError("Snapshot too large")
+                snapshot = json.loads(contents)
+                if not isinstance(snapshot, dict):
+                    raise ValueError("Snapshot must be an object")
+                if snapshot.get("transport") is not None:
+                    errors.append(f"{result_path.relative_to(ROOT)}: transport: bridged measurements are local-only; serving and runner hosts need separate provenance")
+            except (ValueError, OSError):
+                errors.append(f"{result_path.relative_to(ROOT)}: environment_snapshot: cannot establish transport provenance from a readable JSON object under 1 MiB")
 
     # Publication acceptance: distinct from the checks above. A schema-valid,
     # hash-correct bundle with intact evidence still may not meet its own

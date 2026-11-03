@@ -103,6 +103,8 @@ def endpoint_origin(endpoint: str) -> str:
 
 
 def run_config(data: dict) -> dict:
+    if type(data.get("windows_bridge", False)) is not bool:
+        raise UIError("Windows bridge selection must be a boolean.")
     endpoint = endpoint_origin(text_field(data, "endpoint"))
     model = text_field(data, "model")
     if "," in model:
@@ -126,7 +128,7 @@ def run_config(data: dict) -> dict:
         except ValueError as error:
             raise UIError(str(error)) from error
     return {"endpoint": endpoint, "model": model, "profile": profile,
-            "execution_device": device, "tokenizer": tokenizer or None}
+            "execution_device": device, "tokenizer": tokenizer or None, "windows_bridge": data.get("windows_bridge", False)}
 
 
 def safe_log(value: str) -> str:
@@ -142,7 +144,7 @@ class NoRedirect(HTTPRedirectHandler):
         raise UIError("The model server redirected the request. Enter its direct localhost address.")
 
 
-def streaming_probe(endpoint: str, model: str) -> tuple[str, str]:
+def streaming_probe(endpoint: str, model: str, *, _headers=None) -> tuple[str, str]:
     """One small streaming request, reported rather than raised.
 
     This is the check that matters: OmoBench's workload is streaming
@@ -150,7 +152,7 @@ def streaming_probe(endpoint: str, model: str) -> tuple[str, str]:
     stream chat completions cannot run a benchmark.
     """
     try:
-        probe_connection({"endpoint": endpoint, "model": model})
+        probe_connection({"endpoint": endpoint, "model": model}, **({"_headers": _headers} if _headers else {}))
     except UIError as error:
         message = str(error)
         if "redirected" in message or "streaming" in message or "chunk" in message:
@@ -162,13 +164,13 @@ def streaming_probe(endpoint: str, model: str) -> tuple[str, str]:
                   "and streams responses. The test request is not benchmark evidence.")
 
 
-def probe_connection(data: dict) -> dict:
+def probe_connection(data: dict, *, _headers=None) -> dict:
     endpoint = endpoint_origin(text_field(data, "endpoint"))
     model = text_field(data, "model")
     payload = {"model": model, "messages": [{"role": "user", "content": "Reply OK."}],
                "max_tokens": 1, "temperature": 0, "stream": True}
     request = Request(endpoint + "/v1/chat/completions", data=json.dumps(payload).encode(),
-                      headers={"Content-Type": "application/json", "Accept": "text/event-stream"})
+                      headers={"Content-Type": "application/json", "Accept": "text/event-stream", **(_headers or {})})
     try:
         # Ignore ambient HTTP proxies: this operation must stay on loopback.
         with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=15) as response:
@@ -193,14 +195,14 @@ def probe_connection(data: dict) -> dict:
         raise UIError("Could not read a streaming response. Check that the model is loaded and the server is running.") from error
 
 
-def served_models(endpoint: str, *, timeout: float = 8.0) -> dict:
+def served_models(endpoint: str, *, timeout: float = 8.0, _headers=None) -> dict:
     """Ask the server which models it serves, if it implements that endpoint.
 
     Only the endpoint the contributor entered is contacted, and only on
     loopback; nothing is discovered, scanned or guessed. A server that does not
     implement /v1/models is normal, not a failure.
     """
-    request = Request(endpoint + "/v1/models", headers={"Accept": "application/json"})
+    request = Request(endpoint + "/v1/models", headers={"Accept": "application/json", **(_headers or {})})
     try:
         with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=timeout) as response:
             document = json.loads(response.read(1024 * 1024))
@@ -231,7 +233,7 @@ def served_models(endpoint: str, *, timeout: float = 8.0) -> dict:
 
 
 def server_check(data: dict, *, can_execute: bool = True, runner_message: str = "",
-                 runner_health: Any = None) -> dict:
+                 runner_health: Any = None, _headers=None) -> dict:
     """What can actually be established about a contributor's own server.
 
     Deliberately staged rather than a single pass/fail: "the server answered"
@@ -280,7 +282,7 @@ def server_check(data: dict, *, can_execute: bool = True, runner_message: str = 
                                   else "This environment cannot run the benchmark."))
               + " This checked installed metadata only, not whether the runner imports.")
 
-    listing = served_models(endpoint)
+    listing = served_models(endpoint, **({"_headers": _headers} if _headers else {}))
     identifiers, listing_detail = listing["models"], listing["detail"]
     if not listing["reachable"]:
         stage("reachable", "Server reachable", "failed",
@@ -306,7 +308,7 @@ def server_check(data: dict, *, can_execute: bool = True, runner_message: str = 
                   "Use the identifier exactly as the server reports it, including any suffix.",
                   options=identifiers)
         if model:
-            state, detail = streaming_probe(endpoint, model)
+            state, detail = streaming_probe(endpoint, model, **({"_headers": _headers} if _headers else {}))
             stage("streaming", "Streaming chat completions", state, detail)
         else:
             stage("streaming", "Streaming chat completions", "skipped",
@@ -426,19 +428,51 @@ class Controller:
     def _cli_command(self, arguments: list[str]) -> list[str]:
         return [sys.executable, "-u", "-m", "omobench.cli", *arguments]
 
+    @contextmanager
+    def _bridge_request(self, data):
+        if type(data.get("windows_bridge", False)) is not bool:
+            raise UIError("Windows bridge selection must be a boolean.")
+        if not data.get("windows_bridge"):
+            yield data, {}
+            return
+        from .bridge import BridgeSession
+        port = self._bridge_port(data)
+        try:
+            with BridgeSession(port) as session:
+                yield {**data, "endpoint": session.endpoint}, {"X-OmoBench-Bridge-Token": session.credentials["token"]}
+        except (ValueError, OSError) as error:
+            raise UIError("Windows bridge unavailable. Open the updated companion and check that the Windows server is running.") from error
+
+    def _bridge_port(self, data):
+        from .bridge import helper_path
+        from .bridge_http import Destination
+        try:
+            target = Destination.parse(endpoint_origin(text_field(data, "endpoint")))
+            if target.host != "127.0.0.1":
+                raise ValueError("IPv4 required")
+            helper_path()
+            return target.port
+        except (ValueError, OSError) as error:
+            raise UIError("Windows bridge needs an explicit IPv4 loopback port and an updated companion-managed WSL panel.") from error
+
     def connection(self, data: dict) -> dict:
         with self.lock:
             if self.busy or self.closing:
                 raise UIError("Wait for the active operation before testing the connection.", 409)
             self.busy = True
         try:
-            return probe_connection(data)
+            with self._bridge_request(data) as (checked, headers):
+                return probe_connection(checked, **({"_headers": headers} if headers else {}))
         finally:
             with self.lock:
                 self.busy = False
 
     def start(self, data: dict) -> dict:
         config = run_config(data)
+        transport = None
+        if config["windows_bridge"]:
+            from .bridge import provenance
+            transport = provenance(self._bridge_port(data))
         if sys.platform == "win32":
             raise UIError("The current GuideLLM runner needs WSL2, Linux, or macOS. Start omobench ui there.")
         preflight = cli.guidellm_runner_preflight()
@@ -455,12 +489,16 @@ class Controller:
                    "model": config["model"], "profile": config["profile"], "execution_device": config["execution_device"],
                    "tokenizer": config.get("tokenizer"),
                    "summary": None, "error": None, "validation": None, "submission": None}
+            if transport:
+                job["transport"] = transport
             self.jobs[job_id] = job
             self._save(job)
             telemetry_dir = directory.relative_to(self.root).as_posix() + "/telemetry"
             arguments = ["run", f"--endpoint={config['endpoint']}", f"--model={config['model']}",
                          f"--profile={config['profile']}", f"--output-dir={directory.relative_to(self.root).as_posix()}",
                          f"--telemetry-dir={telemetry_dir}", "--execute"]
+            if config["windows_bridge"]:
+                arguments.append("--windows-bridge")
             if config.get("tokenizer"):
                 arguments.append(f"--tokenizer={config['tokenizer']}")
             self.worker = threading.Thread(target=self._execute, args=(job, arguments), daemon=True)
@@ -684,6 +722,7 @@ class Controller:
             # comparisons, so they are an execution dimension rather than a
             # reason two results cannot be compared; the workload definition is
             # what has to match for a comparison to be controlled.
+            "transport": job.get("transport") or {"kind": "direct-loopback"},
             "comparability": self.comparison_context(job, tokenizer),
             "publication": self.publication_requirements(job_id),
         }
@@ -740,6 +779,10 @@ class Controller:
             "runtime_arguments": job.get("runtime_args") or [],
             "runner_host": "this machine; see the environment snapshot in the evidence bundle",
         }
+        if job.get("transport"):
+            execution.update(transport=job["transport"]["kind"], runner_host="WSL2",
+                             serving_host="Windows loopback", serving_hardware="unknown",
+                             transport_overhead="included, not independently calibrated")
         unknowns = sorted(
             key for group in (model, execution)
             for key, value in group.items() if value == "unknown"
@@ -852,6 +895,9 @@ class Controller:
                        " ".join(message for message in job["validation"].get("errors", []) if "acceptance:" in message)
                        or "Meets this profile's minimum successful requests and maximum error rate."),
         }]
+        if job.get("transport"):
+            items.insert(0, {"field": None, "label": "Windows bridge: local reports only", "ok": False,
+                             "detail": "The public schema cannot represent separate Windows serving and WSL runner hosts. Export a local report."})
         return {
             "model": model,
             "catalog": catalog,
@@ -875,6 +921,8 @@ class Controller:
     def _begin_action(self, job_id: str, status: str) -> dict:
         with self.lock:
             job = self._get(job_id)
+            if job.get("transport"):
+                raise UIError("Windows bridge measurements are local-only. Download the local report instead.")
             if self.closing or self.busy or job["status"] != "completed":
                 raise UIError("Wait for a successful run before preparing a submission.", 409)
             submission = job.get("submission") or {}
@@ -950,17 +998,19 @@ class Controller:
         try:
             setup = cli.guidellm_runner_preflight()
             native_windows = sys.platform == "win32"
-            return server_check(
-                data,
-                can_execute=not native_windows and setup.ok,
-                runner_message=("Start this panel from WSL2, Linux or macOS to execute benchmarks. "
-                                "The panel itself works here for setup and review."
-                                if native_windows else setup.message),
-                # Only worth importing when metadata already agrees, and never
-                # on a platform that cannot run a benchmark at all.
-                runner_health=(cli.runner_health_check(timeout=120, cancel=lambda: self.closing)
-                               if setup.ok and not native_windows else None),
-            )
+            with self._bridge_request(data) as (checked, headers):
+                return server_check(
+                    checked,
+                    can_execute=not native_windows and setup.ok,
+                    runner_message=("Start this panel from WSL2, Linux or macOS to execute benchmarks. "
+                                    "The panel itself works here for setup and review."
+                                    if native_windows else setup.message),
+                    # Only worth importing when metadata already agrees, and never
+                    # on a platform that cannot run a benchmark at all.
+                    **({"_headers": headers} if headers else {}),
+                    runner_health=(cli.runner_health_check(timeout=120, cancel=lambda: self.closing)
+                                   if setup.ok and not native_windows else None),
+                )
         finally:
             with self.lock:
                 self.busy = False

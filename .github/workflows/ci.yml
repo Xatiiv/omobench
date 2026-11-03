@@ -68,7 +68,7 @@ jobs:
           TRANSFORMERS_OFFLINE: "1"
           PYTHONPATH: cli/tests
         run: |
-          python -m unittest -v test_chat_small_v2 test_measured_window_identity test_measured_window_semantics test_redirect_destination test_request_timeout test_bridge_http
+          python -m unittest -v test_chat_small_v2 test_measured_window_identity test_measured_window_semantics test_redirect_destination test_request_timeout test_bridge_http test_bridge_integration test_bridge_runner
 
   website:
     runs-on: ubuntu-latest

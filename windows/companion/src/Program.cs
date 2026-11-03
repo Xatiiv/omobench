@@ -27,6 +27,13 @@ namespace OmoBench.Companion
         [STAThread]
         private static int Main(string[] argv)
         {
+            // Explicit local stdio worker, never reachable from a URI and
+            // deliberately outside the GUI singleton/configuration lifecycle.
+            if (argv.Length == 2 && argv[0] == "--bridge-stdio-v1")
+            {
+                int port;
+                return int.TryParse(argv[1], out port) ? BridgeWorker.Run(port) : 2;
+            }
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 

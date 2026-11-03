@@ -149,6 +149,8 @@ function renderRun(job, telemetry = null) {
   if (job.id !== selected) return;
   $("run-panel").hidden = false;
   $("run-title").textContent = job.model;
+  $("run-transport").hidden = !job.transport;
+  $("run-transport").textContent = job.transport ? "Windows bridge, local reports only. Measurements include bridge overhead. The model runs on Windows; the benchmark runner runs in WSL." : "";
   $("run-status").textContent = `${job.execution_device.toUpperCase()} · ${job.status}`;
   const duration = Math.max(0, Math.floor((new Date(job.finished_at || Date.now()) - new Date(job.created_at)) / 1000));
   $("run-meta").textContent = `${job.profile} · ${Math.floor(duration / 60)}m ${duration % 60}s · ${new Date(job.created_at).toLocaleString()}`
@@ -303,11 +305,13 @@ $("test-connection").addEventListener("click", () => action(async () => {
   $("connection-result").textContent = "Checking the address, this environment, the server, its model list and one streaming request…";
   renderServerCheck(await api("/api/server-check", {
     endpoint: $("endpoint").value, model: $("model").value, tokenizer: $("tokenizer").value,
+    windows_bridge: $("windows-bridge").checked,
   }));
 }));
 $("run-form").addEventListener("submit", (event) => {
   event.preventDefault(); action(async () => {
     const data = Object.fromEntries(new FormData(event.target)); data.device_confirmed = $("device-confirmed").checked;
+    data.windows_bridge = $("windows-bridge").checked;
     const job = await api("/api/runs", data); jobs = await api("/api/runs");
     await selectRun(job.id); $("run-panel").scrollIntoView({behavior: "smooth"});
   });

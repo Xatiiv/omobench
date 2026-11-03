@@ -1,4 +1,4 @@
-"""Experimental HTTP frontend, not connected to the panel or benchmark runner.
+"""HTTP frontend for the explicitly selected experimental Windows bridge.
 
 One authenticated request per connection. The injected transport opens only the
 destination selected by the owner; HTTP input cannot select a transport target.
@@ -89,7 +89,7 @@ def _headers(headers):
 class BridgeFrontend:
     """Owner-scoped listener. open_stream() must use a frozen upstream target.
 
-    No CLI, diagnostic logging, persistence, or benchmark wiring. Token access
+    No diagnostic logging or persistence; lifecycle belongs to BridgeSession. Token access
     is deliberately explicit; repr does not expose it. close() owns only these
     streams, never an upstream model server process.
     """

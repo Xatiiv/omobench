@@ -1,9 +1,25 @@
 # Experimental bridge HTTP frontend
 
-This is a tested component, **not an available Windows–WSL bridge**. Nothing in
-the panel, companion, installer preparation, CLI execution or runner imports or
-starts it. No endpoint restriction has been relaxed. Install `cli[bridge]` only
-to develop/test this component; CI installs that extra for its unit suite.
+The experimental bridge is now connected to the advanced panel and both runner
+execution paths. It is explicit and off by default. It is not a published
+installer update, and native helper tests do not establish real Windows–WSL
+interop or overhead. Public submission remains blocked for bridged measurements.
+
+## Use in an updated installation
+
+Start the panel through the newly built Windows companion. In **Connect & run**,
+select **My model server runs on Windows**, enter the exact Windows IPv4 loopback
+address and port (for example `http://127.0.0.1:1234`), and use **Check this server**.
+The companion supplies its own executable path to WSL; the browser cannot select
+an executable. Keep LM Studio listening on loopback. No firewall or LAN binding
+change is required. A missing/old companion or disabled WSL interop is an error,
+never a fallback to the WSL server on the same port.
+
+The checkbox is a deliberate experimental opt-in. Windows IPv6, HTTPS, and servers
+requiring an additional API-key configuration are not exposed by this first UI.
+A separately configured same-port Linux server is never selected by discovery.
+Mirrored networking does not change the explicitly chosen Windows destination;
+there is no heuristic that switches it to a possibly unrelated Linux listener.
 
 ## Protocol decision
 
@@ -25,7 +41,7 @@ destination is an explicit HTTP port on Windows `127.0.0.1` or `::1` (literal
 `localhost` is deterministically mapped to IPv4 loopback). An injected, trusted
 `open_stream()` implementation supplies each upstream stream; it receives no
 request-derived address. That callback must be constructed for the same frozen
-destination and be cancellation-safe. Tests use Linux TCP, not Windows stdio.
+destination and be cancellation-safe. Production uses the Windows helper over WSL executable interop stdio. Linux tests use a synthetic peer; native Windows CI selects the compiled companion executable.
 
 Unsupported: HTTPS, HTTP/2, CONNECT, WebSocket/Upgrade, absolute-form targets,
 Expect/100-continue, request trailers, keepalive, pipelining and half-closed
@@ -63,22 +79,54 @@ The shutdown test exposed a real Python 3.12 ordering issue: waiting for the
 server to close before cancelling clients waited for upstream timeout. Clients
 are now cancelled and closed before awaiting server shutdown.
 
-These tests establish frontend behaviour only. They do not establish the framed
-Windows stdio transport, NAT/mirrored networking behaviour, Windows lifecycle,
-runner header injection, token redaction in evidence, overhead, installation or
-community eligibility.
+## Transport and runner integration
 
-## Remaining integration gates
+`bridge_transport.py` multiplexes up to 32 streams over one private pipe pair.
+The companion's `--bridge-stdio-v1 <port>` mode never opens a listener or reads
+configuration. It connects only to literal Windows IPv4 loopback at the selected
+port. The mode is not reachable through an `omobench://` URI. Protocol version 1
+starts with `OMB1`, then 9-byte network-order frames (kind, stream id, length),
+maximum 16 KiB payload, and 64 KiB credit per stream in each direction. IDs are
+monotonic and never reused. Invalid framing/credit closes the owned transport.
+The Windows inbound queue is a fixed 64 KiB byte ring per stream.
 
-1. Implement the bounded, multiplexed Windows/WSL transport and cancellation.
-2. Integrate token delivery with both runner execution paths without putting it
-   in argv, environment snapshots, diagnostics or evidence. GuideLLM's ordinary
-   API-key setting is **not** this dedicated header and must not be repurposed.
-3. Record transport version, HTTP restrictions and distinct serving/runner host
-   provenance in local reports. Keep bridged runs out of public submission until
-   its schema and validation represent those facts.
-4. Measure overhead with concurrency 1 and 16 on real Windows, test disconnects,
-   NAT and mirrored networking, then expose the explicit panel action.
+One session belongs to one explicit server check or run. A run creates its own
+session, so restarting or changing port cannot reuse an earlier secret. EOF
+closes the helper's connections; explicit cleanup waits five seconds before
+terminating only that owned helper if it has not exited. No model-server process
+is signalled. All helper errors are static, not raw exception text.
 
-No model inference, benchmark profile change, evidence rewrite or system package
-installation is part of this component's verification.
+Both CLI execution routes use the same pinned GuideLLM backend subclass. It
+adds the bridge header only for the exact frontend origin, disables ambient
+proxies, HTTP/2, keepalive and redirects. The ordinary backend arguments and
+serialized info contain no secret. Telemetry keeps credentials in private
+runtime state; the plain subprocess receives them through stdin. Worker
+serialization transfers private state to the owned workers. No token is put in
+argv, environment variables, persistent files, reports or reproduction commands.
+
+`environment.json`, the saved job and local report record the transport version,
+Windows destination port, runner host (WSL2), serving host (Windows, hardware
+unverified), protocol and included overhead. The dashboard labels these runs.
+The panel, CLI packager and registry validator refuse their public submission.
+This does not change any profile, measured window or acceptance threshold.
+
+## Tests and remaining platform checks
+
+- Frontend tests exercise authenticated HTTP framing and bounded streams.
+- Transport integration tests exercise actual subprocess stdio, 16 simultaneous
+  streams, helper failure, port refusal and cleanup. On Linux the peer is a
+  clearly synthetic Python fixture. On Windows CI it is the compiled production
+  companion executable. Neither test opens a WSL distribution.
+- Runner fixtures use the real pinned runner, generated tokenizer and local SSE
+  server through both plain and telemetry routes, retaining the production v2
+  profile and asserting 60 requests / 50 measured. They scan every generated
+  artifact and captured log for the bridge token. No model is downloaded or run.
+- Publication tests retain local export and refuse packaging/submission.
+
+Before claiming general Windows support, test the new companion with real WSL
+interop under NAT and mirrored modes, test panel/companion termination, and
+measure added latency and throughput at concurrency 1 and 16 on Windows–WSL.
+The bridge does not subtract its overhead or claim timing equivalence to a direct
+connection. Those observations cannot be supplied by Linux or Windows-only CI.
+A clean-machine installer test and a genuine community submission remain separate
+work, not outcomes of this bridge implementation.

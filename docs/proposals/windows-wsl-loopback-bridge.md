@@ -1,11 +1,13 @@
 # Proposal: reaching a Windows-local model server from the WSL runner
 
-Status: **integration design only.** An isolated, disabled
-[HTTP frontend](../bridge-frontend-status.md) now implements parsing and token
-stripping. The Windows transport, runner integration and panel action below
-remain unimplemented. No usable bridge is
-installed, and the panel's loopback rule is unchanged. This document exists so
-the remaining integration can be reviewed before it is enabled.
+Status: **original design and verification plan**. See the
+[implementation status](../bridge-frontend-status.md) for the implemented,
+explicit experimental integration and its remaining platform checks. The current
+implementation uses WSL executable interop stdio with an HTTP-aware frontend,
+creates a session per check/run, and never automatically switches a selected
+Windows destination to a same-port WSL listener. Those decisions supersede the
+original lifecycle/mirrored-mode suggestions below. Public submission remains
+blocked, and nothing here claims real Windows–WSL verification.
 
 One thing this document previously asserted has since been *measured*, and the
 measurement contradicted it; §4 records what was actually observed and what was
