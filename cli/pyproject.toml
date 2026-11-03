@@ -14,6 +14,8 @@ dependencies = ["PyYAML>=6.0"]
 [project.optional-dependencies]
 runner = ["guidellm[recommended]==0.7.3"]
 ui = ["jsonschema==4.25.1"]
+# Disabled experimental bridge frontend; no runtime activation or CLI entry.
+bridge = ["h11==0.16.0"]
 
 [project.scripts]
 omobench = "omobench.cli:main"

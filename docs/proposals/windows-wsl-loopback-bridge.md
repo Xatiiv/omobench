@@ -1,8 +1,11 @@
 # Proposal: reaching a Windows-local model server from the WSL runner
 
-Status: **design only.** No code in this change implements a bridge, nothing is
+Status: **integration design only.** An isolated, disabled
+[HTTP frontend](../bridge-frontend-status.md) now implements parsing and token
+stripping. The Windows transport, runner integration and panel action below
+remain unimplemented. No usable bridge is
 installed, and the panel's loopback rule is unchanged. This document exists so
-the follow-up can be reviewed before anything is built.
+the remaining integration can be reviewed before it is enabled.
 
 One thing this document previously asserted has since been *measured*, and the
 measurement contradicted it; §4 records what was actually observed and what was
@@ -88,8 +91,9 @@ latency, and §6 treats that as a measurement problem rather than an assumption.
 
 ### Authentication and transport ownership
 
-- The Linux listener accepts a connection only when it presents a one-time
-  token minted by the companion for that bridge instance. It is passed to the
+- The Linux listener accepts a request only when it presents a per-instance
+  token. The current frontend mints it locally; the final owner-to-runner
+  handoff is an integration gate, not implemented. It must be passed to the
   panel the way the panel's own token already is: never written to the
   checkout, never logged, never placed in a URL the runner records, never
   stored in the companion configuration file.

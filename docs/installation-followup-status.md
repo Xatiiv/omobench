@@ -18,7 +18,10 @@ The current proposal combines opaque byte forwarding with stripping an HTTP
 header containing a bridge token. Those are different protocol layers. A raw
 TCP relay cannot safely remove per-request headers on a persistent connection
 without parsing HTTP framing; HTTP/2 makes that distinction more important.
-This must be resolved before a bridge is enabled in a downloadable installer.
+The experimental [HTTP frontend](bridge-frontend-status.md) resolves that layer
+choice with parsed HTTP/1.1, one authenticated request per connection. It is not
+wired into the product; the Windows transport and runner integration remain
+unimplemented. A bridge must not be enabled in a downloadable installer yet.
 
 The implementation must choose and test either an authenticated transport below
 HTTP with explicit runner integration, or a limited HTTP-aware frontend with
