@@ -469,7 +469,8 @@ class WarmupExpiryTests(RunMixin, unittest.TestCase):
         self.assertTrue(integrity["measured_window_is_the_whole_run"])
         with self.assertRaises(ValueError) as caught:
             cli.normalize_guidellm_report(ledger.report)
-        self.assertIn("before it finished warming up", str(caught.exception))
+        self.assertIn("never left its warmup phase", str(caught.exception))
+        self.assertIn("no measured window", str(caught.exception))
 
     def test_a_complete_run_is_not_refused_by_the_same_check(self):
         ledger = self.run_profile("chat-small-v2", seconds_per_request=0.02)

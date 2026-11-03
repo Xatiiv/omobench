@@ -176,7 +176,8 @@ def managed_server(root: Path, recipe_id: str, storage_dir: Path, *, log_path: P
     # llama-server exit before it opens a socket, which this launcher could
     # otherwise only report as "exited early with code 127". Checked here, by
     # name, while there is still something useful to say about it.
-    libraries = managed_setup.check_runtime_libraries(installed["executable_path"])
+    libraries = managed_setup.check_runtime_libraries(
+        installed["executable_path"], expected_sha256=installed["executable_sha256"])
     if not libraries.ok:
         raise LauncherError(
             libraries.message + ("\n\n" + libraries.detail if libraries.detail else "")

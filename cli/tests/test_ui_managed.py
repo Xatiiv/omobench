@@ -20,6 +20,15 @@ from test_cli import GUIDELLM_REPORT_V2, install_guidellm_module_stub, patch_par
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def _sha256(path) -> str:
+    """The checksum a real installation would have recorded for this file."""
+    import hashlib
+    from pathlib import Path as _Path
+
+    return hashlib.sha256(_Path(path).read_bytes()).hexdigest()
+
+
+
 def make_root(root: Path) -> None:
     for relative in ("benchmarks", "catalog", "schema", "tools"):
         shutil.copytree(ROOT / relative, root / relative, ignore=shutil.ignore_patterns("__pycache__"))
@@ -204,7 +213,8 @@ class GuidedServiceTests(unittest.TestCase):
             release.wait(5)
             if cancel_event is not None and cancel_event.is_set():
                 raise ms.ManagedSetupError("cancelled for test")
-            return {"model": {"path": "x"}, "runtime": {"executable_path": "y"}}
+            return {"model": {"path": "x"},
+                    "runtime": {"executable_path": "y", "executable_sha256": "0" * 64}}
 
         with patch("omobench.managed_setup.download_and_install", side_effect=fake_download_and_install):
             with tempfile.TemporaryDirectory() as storage:
@@ -248,7 +258,8 @@ class GuidedServiceTests(unittest.TestCase):
 
         def fake_download_and_install(root, recipe_id, storage_dir, *, progress=None, cancel_event=None):
             Path(storage_dir).mkdir(parents=True, exist_ok=True)  # the real installer creates it too
-            return {"model": {"path": "x"}, "runtime": {"executable_path": "y"}}
+            return {"model": {"path": "x"},
+                    "runtime": {"executable_path": "y", "executable_sha256": "0" * 64}}
 
         with patch("omobench.managed_setup.download_and_install", side_effect=fake_download_and_install):
             with tempfile.TemporaryDirectory() as storage:
@@ -280,7 +291,8 @@ class GuidedServiceTests(unittest.TestCase):
 
         def fake_download_and_install(root, recipe_id, storage_dir, *, progress=None, cancel_event=None):
             Path(storage_dir).mkdir(parents=True, exist_ok=True)
-            return {"model": {"path": "x"}, "runtime": {"executable_path": "y"}}
+            return {"model": {"path": "x"},
+                    "runtime": {"executable_path": "y", "executable_sha256": "0" * 64}}
 
         missing = ms.RuntimeLibraryStatus(
             ok=False, checked=True, missing=["libgomp.so.1"], packages=["libgomp1"],
@@ -312,7 +324,8 @@ class GuidedServiceTests(unittest.TestCase):
 
         def fake_download_and_install(root, recipe_id, storage_dir, *, progress=None, cancel_event=None):
             Path(storage_dir).mkdir(parents=True, exist_ok=True)
-            return {"model": {"path": "x"}, "runtime": {"executable_path": "y"}}
+            return {"model": {"path": "x"},
+                    "runtime": {"executable_path": "y", "executable_sha256": "0" * 64}}
 
         unchecked = ms.RuntimeLibraryStatus(
             ok=True, checked=False, missing=[], packages=[],
@@ -453,6 +466,7 @@ class GuidedRunLifecycleTests(unittest.TestCase):
             return_value={
                 "model_path": self.model_path,
                 "executable_path": self.llama_server,
+                "executable_sha256": _sha256(self.llama_server),
                 "model_id": "Fixture/Alias",
                 "benchmark_profile": "chat-small-v1",
             },

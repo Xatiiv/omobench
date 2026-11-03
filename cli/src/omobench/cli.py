@@ -1346,53 +1346,129 @@ def report_count(report: dict[str, Any], *path: str) -> int:
     return int(value)
 
 
+def finite_number(value: Any) -> float | None:
+    """`value` as a float when it is one, and finite. Otherwise None.
+
+    NaN and the infinities are rejected rather than compared: `nan == 0.0` is
+    False, so a corrupt timestamp would otherwise read as healthy evidence
+    instead of as evidence that could not be read.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
 def measured_window_integrity(benchmark: dict[str, Any]) -> dict[str, Any]:
-    """Did the run ever leave warmup, or is its "measured" window the fallback?
+    """Did this run ever establish a measured window, or is it the fallback?
 
-    GuideLLM 0.7.3 only sets `measure_start` when the warmup boundary is
-    actually crossed: for a request-counted phase that is the moment
-    `state.processed_requests == warmup.value + 1`
-    (`TransientPhaseConfig.compute_transition_time`, period="start"). If the
-    run ends before then -- a duration ceiling expiring, a cancellation, a
-    server that stops answering -- `measure_start` stays None and
+    GuideLLM 0.7.3 sets `measure_start` only on the single scheduler event
+    where the warmup boundary is recognised. For a request-counted phase that
+    event must satisfy *both* halves of
+    `TransientPhaseConfig.compute_transition_time(period="start")`:
+    `state.processed_requests == warmup.value + 1` **and** that request's own
+    `info.started_at is not None`. The equality is exact and is evaluated per
+    event, so the boundary is not merely "reached once enough requests have
+    run" -- the counter can go past it unset. When a duration ceiling expires
+    the scheduler abandons everything still queued, and a request cancelled
+    before it ever reached `in_progress` has no `started_at`; a burst of those
+    carries the counter beyond `value + 1` with no event left that could set
+    the boundary. Observed for real: a run with `warmup.value=4` finishing at
+    `processed_requests=9` and no boundary at all. (A single such cancellation
+    is not enough -- anything that starts while the counter still equals
+    `value + 1` sets it, one request late. Both are pinned in
+    cli/tests/test_measured_window_semantics.py.)
+
+    When `measure_start` stays None,
     `GenerativeBenchmarkTimings.finalized_measure_start` falls back to
-    `request_start`, the start of the run
-    (`guidellm/benchmark/schemas/accumulator.py`).
+    `finalized_request_start` -- the start of the run. The measured window
+    becomes the *whole run*, every warmup request lands inside it, and
+    `metrics.request_totals` reports warmup requests as measured. It is silent:
+    the counts look like a short but ordinary measurement.
 
-    The measured window is then the *whole run*, so every warmup request lands
-    inside it and `metrics.request_totals` reports warmup requests as measured.
-    That is the opposite of what a warmup phase is for, and it is silent: the
-    counts look like a short but ordinary measurement.
+    The fallback is detected on the two fields it is made of rather than on a
+    derived one: `scheduler_metrics.measure_start_time` and
+    `request_start_time` are `finalized_measure_start` and
+    `finalized_request_start`, so on the fallback path they are *the same
+    value*. `warmup_duration` (their difference) is used only when those
+    fields are absent.
 
-    `warmup_duration` is `measure_start_time - request_start_time`
-    (`guidellm/benchmark/schemas/benchmark.py`), so on that fallback path it is
-    one value minus itself: exactly 0.0, not merely small. With a warmup
-    configured it cannot be 0.0 any other way, because a crossed boundary is a
-    request's own `started_at`, strictly after the run began. That makes this
-    an exact test rather than a threshold.
+    Equality has exactly two possible causes: the fallback, or a genuine
+    boundary landing within one float ULP (~2.4e-7 s at a 2026 timestamp) of
+    the run's first request start -- which would require the warmup requests to
+    complete in under a quarter of a microsecond. Across every fixture run
+    recorded here the smallest genuine warmup was 0.0865 s, some 360,000x that
+    resolution. The remaining doubt is stated, not hidden: `basis` says which
+    evidence was used and `checked` says whether any was conclusive.
 
-    Observed end to end, by request identity, in
-    cli/tests/test_measured_window_identity.py.
+    `scheduler_state.start_requests_time` and the per-request records, when the
+    report carries them, are reported as corroboration. They are never required:
+    a report that omits them is unverifiable, not broken.
+
+    Established against the pinned runner's own accumulator in
+    cli/tests/test_measured_window_semantics.py and end to end by request
+    identity in cli/tests/test_measured_window_identity.py.
     """
     configuration = benchmark.get("config")
     warmup = configuration.get("warmup") if isinstance(configuration, dict) else None
     warmup = warmup if isinstance(warmup, dict) else {}
-    percent, value = warmup.get("percent"), warmup.get("value")
-    configured = bool(
-        (isinstance(percent, int | float) and not isinstance(percent, bool) and percent > 0)
-        or (isinstance(value, int | float) and not isinstance(value, bool) and value > 0)
-    )
-    duration = benchmark.get("warmup_duration")
-    recorded = isinstance(duration, int | float) and not isinstance(duration, bool)
-    # Refused only on a positive observation: a configured warmup whose
-    # recorded duration really is 0.0. A report that does not carry the field
-    # is unverifiable, not broken, and must not be rejected on a guess.
-    crossed = not (configured and recorded and float(duration) == 0.0)
+    percent, value = finite_number(warmup.get("percent")), finite_number(warmup.get("value"))
+    configured = bool((percent is not None and percent > 0) or (value is not None and value > 0))
+
+    metrics = benchmark.get("scheduler_metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
+    measure_start = finite_number(metrics.get("measure_start_time"))
+    request_start = finite_number(metrics.get("request_start_time"))
+    recorded_duration = finite_number(benchmark.get("warmup_duration"))
+
+    if not configured:
+        basis, checked, fallback = "no warmup phase is configured", True, False
+    elif measure_start is not None and request_start is not None:
+        basis = "scheduler_metrics.measure_start_time == request_start_time"
+        checked, fallback = True, measure_start == request_start
+    elif recorded_duration is not None:
+        basis = "warmup_duration == 0 (measure/request start times absent)"
+        checked, fallback = True, recorded_duration == 0.0
+    else:
+        basis, checked, fallback = "no usable timing fields in this report", False, False
+
+    state = benchmark.get("scheduler_state")
+    state = state if isinstance(state, dict) else {}
+    start_requests_time = finite_number(state.get("start_requests_time"))
+    corroboration: dict[str, Any] = {
+        "measure_start_equals_start_requests_time":
+            None if (measure_start is None or start_requests_time is None)
+            else measure_start == start_requests_time,
+        "requests_recorded_before_the_window": None,
+    }
+    records = benchmark.get("requests")
+    if isinstance(records, dict) and measure_start is not None:
+        before = 0
+        seen = False
+        for bucket in ("successful", "errored", "incomplete"):
+            for record in records.get(bucket) or []:
+                started = finite_number((record or {}).get("request_start_time"))
+                if started is None:
+                    continue
+                seen = True
+                if started < measure_start:
+                    before += 1
+        if seen:
+            corroboration["requests_recorded_before_the_window"] = before
+
     return {
         "warmup_configured": configured,
-        "warmup_duration_seconds": float(duration) if recorded else None,
-        "warmup_boundary_crossed": crossed,
-        "measured_window_is_the_whole_run": configured and recorded and float(duration) == 0.0,
+        "warmup_mode": warmup.get("mode") if configured else None,
+        "warmup_value": value if configured else None,
+        "warmup_percent": percent if configured else None,
+        "warmup_duration_seconds": recorded_duration,
+        "measure_start_time": measure_start,
+        "request_start_time": request_start,
+        "basis": basis,
+        "checked": checked,
+        "warmup_boundary_crossed": not fallback,
+        "measured_window_is_the_whole_run": fallback,
+        "corroboration": corroboration,
     }
 
 
@@ -1434,8 +1510,8 @@ def normalize_guidellm_report(raw_report: dict[str, Any]) -> dict[str, Any]:
     if successful == 0:
         raise ValueError("GuideLLM report contains no successful requests.")
 
-    # A run that ended before it finished warming up has no measured window at
-    # all, only a fallback that spans the whole run. Its request_totals are
+    # A run whose warmup boundary was never established has no measured window
+    # at all, only a fallback spanning the whole run. Its request_totals are
     # warmup requests wearing a measured label, and every latency and
     # throughput figure below is computed from that same window. Reporting
     # them as a short measurement would be a fabricated result, so this is
@@ -1443,10 +1519,12 @@ def normalize_guidellm_report(raw_report: dict[str, Any]) -> dict[str, Any]:
     integrity = measured_window_integrity(benchmark)
     if not integrity["warmup_boundary_crossed"]:
         raise ValueError(
-            "This run ended before it finished warming up, so it has no measured window: "
-            f"the {attempted} request(s) it reports are warmup requests, which the profile "
-            "excludes from measurement. Nothing here is a measurement. Run the benchmark "
-            "again with enough time, or on a profile with a longer limit."
+            "This run never left its warmup phase, so it has no measured window: the "
+            "runner's measurement start fell back to the start of the run, which means the "
+            f"{attempted} request(s) it reports are warmup requests the profile excludes "
+            "from measurement. Nothing here is a measurement. This normally means the run "
+            "ended -- or was cancelled -- before its warmup finished; give it more time, or "
+            "use a profile with a longer limit."
         )
 
     started_at_seconds = report_number(benchmark, "scheduler_metrics", "measure_start_time")
@@ -2089,7 +2167,9 @@ def run_prepare_command(args: argparse.Namespace) -> int:
         # launch instead means a contributor downloads several gigabytes, sees
         # "installed", and only then learns the machine is missing a system
         # library. Reported, never installed.
-        libraries = managed_setup.check_runtime_libraries(manifest["runtime"]["executable_path"])
+        libraries = managed_setup.check_runtime_libraries(
+            manifest["runtime"]["executable_path"],
+            expected_sha256=manifest["runtime"]["executable_sha256"])
         if libraries.missing:
             print(file=sys.stderr)
             print(libraries.message, file=sys.stderr)

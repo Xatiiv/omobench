@@ -136,49 +136,97 @@ class ExecutableScriptTests(unittest.TestCase):
 class LineEndingTests(unittest.TestCase):
     """A profile's bytes are its identity, so they must not depend on the OS.
 
-    Every result records `benchmark.profile_sha256`: the SHA-256 of the
-    profile file in the checkout that produced the run. Git's autocrlf rewrites
-    these files to CRLF on a Windows checkout and still reports the tree as
-    clean, because it compares normalized content -- so the same profile hashed
+    Every result records `benchmark.profile_sha256`: the SHA-256 of the profile
+    file in the checkout that produced the run, and the validator reconciles a
+    bundle against that file by re-hashing it. Git's autocrlf rewrites these
+    files to CRLF on a Windows checkout and still reports the tree as clean,
+    because it compares normalized content -- so the same profile hashed
     differently on Windows than on Linux. `chat-small-extended-v1.yaml` was
-    genuinely in that state: 7029edaf... on Linux, eedf8378... here.
+    genuinely in that state: 7029edaf... on Linux, eedf8378... on Windows, and
+    one local bundle recorded the CRLF value.
 
-    .gitattributes pins these paths to LF. This checks the working tree, which
-    is what actually gets hashed.
+    The scope here is taken from `git check-attr`, not from a list repeated in
+    this file: what is tested is exactly what .gitattributes claims, so the two
+    cannot drift apart.
     """
 
-    HASHED_INTO_EVIDENCE = ("benchmarks/profiles/*.yaml",)
-    MUST_BE_LF = (
-        "benchmarks/profiles/*.yaml",
-        "catalog/*.json",
-        "catalog/**/*.json",
-        "schema/*.json",
-        "scripts/*.sh",
-    )
+    def pinned_to_lf(self) -> list[str]:
+        """Every tracked path the repository's own rules pin to LF."""
+        import subprocess
 
-    def test_gitattributes_pins_the_profiles_to_lf(self):
+        listed = subprocess.run(["git", "ls-files"], cwd=ROOT,
+                                capture_output=True, text=True, check=False)
+        if listed.returncode != 0:
+            raise unittest.SkipTest("git is not available to read the index")
+        paths = [line for line in listed.stdout.splitlines() if line]
+        checked = subprocess.run(["git", "check-attr", "--stdin", "eol"], cwd=ROOT,
+                                 input="\n".join(paths), capture_output=True, text=True,
+                                 check=False)
+        if checked.returncode != 0:
+            raise unittest.SkipTest("git check-attr is unavailable")
+        pinned = []
+        for line in checked.stdout.splitlines():
+            path, _, verdict = line.rpartition(": eol: ")
+            if verdict.strip() == "lf" and path:
+                pinned.append(path)
+        return pinned
+
+    def test_gitattributes_exists_and_pins_the_profiles(self):
         attributes = ROOT / ".gitattributes"
-        self.assertTrue(attributes.is_file(), "no .gitattributes: profile hashes vary by platform")
-        text = attributes.read_text(encoding="utf-8")
-        self.assertIn("benchmarks/profiles/*.yaml", text)
-        self.assertIn("eol=lf", text)
+        self.assertTrue(attributes.is_file(),
+                        "no .gitattributes: profile hashes would vary by platform")
+        pinned = self.pinned_to_lf()
+        for profile in sorted((ROOT / "benchmarks" / "profiles").glob("*.yaml")):
+            relative = profile.relative_to(ROOT).as_posix()
+            with self.subTest(path=relative):
+                self.assertIn(relative, pinned)
 
-    def test_no_file_hashed_into_a_result_carries_crlf(self):
-        checked = 0
-        for pattern in self.HASHED_INTO_EVIDENCE:
-            for path in sorted(ROOT.glob(pattern)):
-                checked += 1
-                with self.subTest(path=path.name):
-                    self.assertNotIn(
-                        b"\r\n", path.read_bytes(),
-                        f"{path.name} has CRLF in the working tree, so its profile_sha256 "
-                        "differs from the same file on Linux")
-        self.assertGreater(checked, 0, "no profiles were checked")
+    def test_the_rules_stay_narrow(self):
+        """They cover source whose bytes matter, and nothing generated."""
+        pinned = self.pinned_to_lf()
+        self.assertTrue(pinned, "the rules match nothing at all")
+        for path in pinned:
+            with self.subTest(path=path):
+                self.assertTrue(
+                    path.startswith(("benchmarks/", "catalog/", "schema/", "scripts/")),
+                    f"{path} is pinned but is outside the reviewed-source directories")
+                self.assertTrue(path.endswith((".yaml", ".json", ".sh")), path)
 
-    def test_the_other_pinned_paths_are_lf_too(self):
-        for pattern in self.MUST_BE_LF:
-            for path in sorted(ROOT.glob(pattern)):
-                if not path.is_file():
-                    continue
-                with self.subTest(path=str(path.relative_to(ROOT))):
-                    self.assertNotIn(b"\r\n", path.read_bytes())
+    def test_every_pinned_path_really_is_lf_here(self):
+        for path in self.pinned_to_lf():
+            with self.subTest(path=path):
+                self.assertNotIn(
+                    b"\r\n", (ROOT / path).read_bytes(),
+                    f"{path} is pinned to LF but has CRLF in this working tree, so anything "
+                    "hashing it here disagrees with every other checkout")
+
+    def test_an_unmodified_profile_is_byte_identical_to_its_committed_blob(self):
+        """The hash a run records must be the hash of what was committed.
+
+        Only profiles git reports as unmodified are compared: a profile being
+        edited right now is legitimately different, and this is a check on
+        checkout fidelity, not on whether the tree is clean. The failure it
+        exists to catch is the silent one -- git calling a file unmodified
+        while the bytes on disk, and therefore the hash a run would record,
+        differ from the committed ones.
+        """
+        import subprocess
+
+        for profile in sorted((ROOT / "benchmarks" / "profiles").glob("*.yaml")):
+            relative = profile.relative_to(ROOT).as_posix()
+            status = subprocess.run(["git", "status", "--porcelain", "--", relative],
+                                    cwd=ROOT, capture_output=True, text=True, check=False)
+            if status.returncode != 0:
+                raise unittest.SkipTest("git is not available to read the working tree")
+            if status.stdout.strip():
+                continue  # being edited; its bytes are not meant to match HEAD
+            with self.subTest(path=relative):
+                blob = subprocess.run(["git", "show", f"HEAD:{relative}"], cwd=ROOT,
+                                      capture_output=True, check=False)
+                if blob.returncode != 0:
+                    continue  # not committed yet
+                self.assertEqual(
+                    profile.read_bytes(), blob.stdout,
+                    f"git reports {relative} unmodified, but the bytes on disk differ from "
+                    "the committed ones, so this checkout would record a different "
+                    "profile_sha256 than any other")

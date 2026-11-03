@@ -147,30 +147,60 @@ Two of those rows correct earlier reporting. The v1 contrast runs with v1's own
 50-request cap, not 60 — an earlier summary quoted 60, which was v2's budget.
 And several "served" figures previously included the readiness probe.
 
-### Early termination during warmup has no measured window
+### A run that never establishes its boundary has no measured window
 
 The third row is not a small measurement. It is **not a measurement at all**,
 and it is the one case where GuideLLM 0.7.3 cannot express this profile's
 contract on its own.
 
-`measure_start` is set only when the warmup boundary is actually crossed, at
-`state.processed_requests == warmup.value + 1`. If the run stops before then,
-`measure_start` stays `None` and
-`GenerativeBenchmarkTimings.finalized_measure_start` falls back to
-`request_start` — the start of the run. The measured window becomes the whole
-run, every warmup request falls inside it, and `metrics.request_totals` reports
-**warmup requests as measured**. Observed by identity: zero requests before the
-window, requests 1-4 inside it, `request_totals.total == 4`.
+`measure_start` is set on the single scheduler event where the warmup boundary
+is recognised, and that event must satisfy *both* halves of
+`TransientPhaseConfig.compute_transition_time(period="start")`:
+`state.processed_requests == warmup.value + 1` **and** that request's own
+`info.started_at is not None`. The equality is exact and evaluated per event,
+so the counter can go past it unset. When a duration ceiling expires the
+scheduler abandons everything still queued, and a request cancelled before it
+reached `in_progress` has no `started_at`; a burst of those carries the counter
+beyond `value + 1` with nothing left that could set the boundary. The observed
+run finished at `processed_requests = 9` against a `warmup.value = 4` — well
+past five — with no boundary at all.
 
-The marker is exact rather than approximate. `warmup_duration` is
-`measure_start_time - request_start_time`, so on the fallback path it is one
-value minus itself: exactly `0.0`. With a warmup configured it cannot be `0.0`
-any other way, because a crossed boundary is a request's own `started_at`,
-strictly after the run began.
+A single such cancellation is not enough: anything that starts while the
+counter still equals `value + 1` sets the boundary, one request late. Only a
+burst with nothing left to start loses it. Both are pinned against the runner's
+own accumulator in `cli/tests/test_measured_window_semantics.py`.
+
+With `measure_start` unset,
+`GenerativeBenchmarkTimings.finalized_measure_start` falls back to
+`finalized_request_start` — the start of the run. The measured window becomes
+the whole run, every warmup request falls inside it, and
+`metrics.request_totals` reports **warmup requests as measured**. Observed by
+identity: zero requests before the window, requests 1-4 inside it,
+`request_totals.total == 4`.
+
+#### How that is detected, and what the detection cannot rule out
+
+`scheduler_metrics.measure_start_time` and `request_start_time` are those two
+finalized values, so on the fallback path they are literally **the same
+number**. The guard compares them directly rather than trusting the derived
+`warmup_duration`, which it uses only when the primary fields are absent.
+Non-finite values are rejected rather than compared, because `nan == 0.0` is
+false and a corrupt field would otherwise read as healthy.
+
+Equality has exactly two possible causes: the fallback, or a genuine boundary
+landing within one float ULP of the run's first request start. At a 2026
+timestamp that resolution is ~2.4 × 10⁻⁷ s, and the smallest genuine warmup
+measured across every fixture run here is 0.0865 s — about 360,000 ULPs, and
+it spans five HTTP round trips. The false positive is therefore not reachable
+in practice, but it is a real limit of this evidence and is reported rather
+than hidden: the result carries `basis` (which evidence was used) and `checked`
+(whether any was conclusive). `scheduler_state.start_requests_time` and the
+per-request records are reported as corroboration when the report carries them,
+and never required.
 
 `cli.measured_window_integrity()` tests for that, and
-`normalize_guidellm_report()` refuses such a report with "this run ended before
-it finished warming up", in the same way it already refuses a report with no
+`normalize_guidellm_report()` refuses such a report with "this run never left
+its warmup phase", in the same way it already refuses a report with no
 attempted requests. Nothing is relabelled and no count is adjusted: a run that
 never left warmup produces no result.
 

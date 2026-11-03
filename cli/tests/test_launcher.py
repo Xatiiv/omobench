@@ -12,6 +12,14 @@ from unittest.mock import patch
 from omobench import launcher, managed_setup as ms
 
 
+
+def _sha256(path) -> str:
+    """The checksum a real installation would have recorded for this file."""
+    import hashlib
+    from pathlib import Path as _Path
+
+    return hashlib.sha256(_Path(path).read_bytes()).hexdigest()
+
 FIXTURE_RECIPE = {
     "id": "fixture-recipe",
     "model_id": "Fixture/Alias",
@@ -80,6 +88,9 @@ class ManagedServerLifecycleTests(unittest.TestCase):
             return_value={
                 "model_path": self.model_path,
                 "executable_path": self.executable,
+                # The check bounds itself to bytes just established, so a
+                # fixture must carry a real checksum like a real install.
+                "executable_sha256": _sha256(self.executable),
                 "model_id": "Fixture/Alias",
                 "benchmark_profile": "chat-small-v1",
             },
@@ -207,6 +218,7 @@ class ManagedServerLifecycleTests(unittest.TestCase):
             return_value={
                 "model_path": self.model_path,
                 "executable_path": loader_failure,
+                "executable_sha256": _sha256(loader_failure),
                 "model_id": "Fixture/Alias",
                 "benchmark_profile": "chat-small-v1",
             },
@@ -225,6 +237,7 @@ class ManagedServerLifecycleTests(unittest.TestCase):
             return_value={
                 "model_path": self.model_path,
                 "executable_path": never_ready,
+                "executable_sha256": _sha256(never_ready),
                 "model_id": "Fixture/Alias",
                 "benchmark_profile": "chat-small-v1",
             },
@@ -244,6 +257,7 @@ class ManagedServerLifecycleTests(unittest.TestCase):
             return_value={
                 "model_path": self.model_path,
                 "executable_path": exits_immediately,
+                "executable_sha256": _sha256(exits_immediately),
                 "model_id": "Fixture/Alias",
                 "benchmark_profile": "chat-small-v1",
             },

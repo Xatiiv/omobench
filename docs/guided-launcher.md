@@ -119,10 +119,22 @@ cannot be detected from the Python side: OmoBench and GuideLLM importing
 cleanly says nothing about whether a separate native executable can load. So
 `omobench prepare` resolves the installed runtime's own libraries with `ldd`
 once the download finishes, and `omobench launch` checks again before starting
-anything. A library that is missing is named, together with the package that
-provides it and the exact `apt` command to install it. OmoBench never runs that
+anything. A library that is missing is named; on Debian and Ubuntu the package
+that provides it and the exact `apt` command are given too, and on other
+distributions you are told the library and left to find your own package name,
+because an `apt` command there would be wrong. OmoBench never runs that
 command: installing a system package needs your password and is your decision.
 Nothing is re-downloaded afterwards.
+
+`ldd` is not a passive reader — on glibc it may resolve a binary's
+dependencies by running it under the loader, which is why its own manual page
+warns against pointing it at something untrusted. OmoBench therefore re-hashes
+the runtime executable immediately before each probe and compares it against
+the checksum recorded when that exact file was installed. A mismatch stops the
+probe rather than running it, and nothing without an established checksum is
+inspected at all. A check that cannot be completed — no `ldd`, a timeout, an
+unreadable file — is reported as *unchecked* and never blocks a launch that
+would otherwise work.
 
 ## Storage folder: no assumed drive or path
 

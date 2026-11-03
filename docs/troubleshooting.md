@@ -110,19 +110,21 @@ such as `libgomp.so.1`, the download succeeded and the files are verified: the
 distribution is simply missing a system package the `llama.cpp` build links
 against. A fresh, minimal Ubuntu often is.
 
-Install it once, from inside the distribution, using the exact command OmoBench
-prints — for `libgomp.so.1` that is:
+Install it once, from inside the distribution, using the exact command
+OmoBench prints. On Debian and Ubuntu, `libgomp.so.1` comes from `libgomp1`:
 
 ```bash
-# WSL/Linux shell
+# WSL/Linux shell, Debian/Ubuntu only
 sudo apt update && sudo apt install -y libgomp1
 ```
 
-OmoBench never installs system packages for you: that needs your Linux
-password, and changing a machine's packages is not something a benchmark tool
-should do uninvited. Nothing is downloaded again afterwards — the model and
-runtime stay installed and verified — so re-running the same command picks up
-where it left off.
+On Fedora, Arch, openSUSE and others the package is named differently, so
+OmoBench names the library and leaves the package to you rather than printing
+an `apt` command that would not work. It never installs a system package
+either way: that needs your Linux password, and changing a machine's packages
+is not something a benchmark tool should do uninvited. Nothing is downloaded
+again afterwards — the model and runtime stay installed and verified — so
+re-running the same command picks up where it left off.
 
 This is checked after preparation and again before launch, so it is reported
 by name rather than as "the managed model server exited early with code 127".
@@ -130,14 +132,16 @@ The Python runner health check does not cover it: that establishes OmoBench and
 GuideLLM import, while `llama-server` is a separate native executable with its
 own library dependencies.
 
-## A run ended before it finished warming up
+## A run never left its warmup phase
 
-A run stopped by its duration ceiling *during* warmup produces no measurement
-at all, and OmoBench refuses to report one. The pinned runner only begins its
-measured window once the warmup boundary is crossed; if the run ends first, the
-runner falls back to treating the whole run as measured, which would present
-warmup requests as results. OmoBench detects that and says so rather than
-reporting a short measurement.
+A run that never established its warmup boundary produces no measurement at
+all, and OmoBench refuses to report one. The pinned runner starts its measured
+window on the single event where the warmup boundary is recognised; if that
+event never happens -- the run is stopped during warmup, or cancelled so that
+the requests still outstanding are abandoned before they start -- the runner
+falls back to treating the whole run as measured. That would present warmup
+requests, and every latency figure derived from them, as results. OmoBench
+detects it and says so rather than reporting a short measurement.
 
 Give the run more time, or use `chat-small-extended-v1`, whose ceiling is 90
 minutes. A run that ends *after* measurement began is fine: it reports the

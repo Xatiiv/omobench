@@ -383,10 +383,11 @@ class ManagedController:
         from . import managed_setup
 
         try:
-            executable = manifest["runtime"]["executable_path"]
+            runtime = manifest["runtime"]
+            executable, checksum = runtime["executable_path"], runtime["executable_sha256"]
         except (TypeError, KeyError):
             return None
-        status = managed_setup.check_runtime_libraries(executable)
+        status = managed_setup.check_runtime_libraries(executable, expected_sha256=checksum)
         if not status.missing:
             return None
         return status.message + ("\n\n" + status.detail if status.detail else "")
