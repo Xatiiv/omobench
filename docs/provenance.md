@@ -178,6 +178,23 @@ read as a match.
 Omit the whole section and the result records that the runner used the served
 identifier as a default — as exactly that, not as a verified tokenizer source.
 
+Check it before the benchmark rather than after, in the panel ("Load tokenizer
+now") or from the CLI:
+
+```bash
+omobench tokenizer --source deepseek-ai/DeepSeek-R1-Distill-Qwen-14B
+omobench tokenizer --model deepseek-r1-distill-qwen-14b   # what the runner falls back to
+omobench tokenizer --source unsloth/DeepSeek-R1-Distill-Qwen-14B-GGUF --network metadata
+```
+
+It loads the tokenizer in the runner's own interpreter, through the same
+`AutoTokenizer.from_pretrained` call GuideLLM makes, with repository code
+execution refused. `--network` says what it may reach: `none` uses the local
+cache only, `metadata` may list the repository and read its model card, and
+`download` may fetch tokenizer files. Model weights are never downloaded at any
+level. A GGUF-only repository is named as such, with the publisher's declared
+base model offered where the card names one.
+
 ### `catalog_status` and `proposal`
 
 `catalogued` requires `model.id` to be in `catalog/models/`. `proposed` means
