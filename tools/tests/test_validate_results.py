@@ -90,10 +90,93 @@ DEFAULT_PROFILE_SHA256 = sha256_of(DEFAULT_PROFILE_YAML.encode())
 VALID_RESULT_TEMPLATE["benchmark"]["profile_sha256"] = DEFAULT_PROFILE_SHA256
 
 
+BRIDGED_SNAPSHOT = (b'{"operating_system": "Linux-6.6-WSL2", '
+                    b'"transport": {"kind": "windows-stdio-http1-v1", '
+                    b'"protocol": "HTTP/1.1, one request per connection", '
+                    b'"publication": "local-only"}}')
+
+
+def fact(value, provenance="contributor-declared"):
+    return {"value": value, "provenance": "unknown" if value is None else provenance}
+
+
+def serving_environment(**overrides):
+    """A complete schema 1.1 environment for a bridged AMD desktop run."""
+    environment = {
+        "metadata_version": "serving-environment-v1",
+        "relationship": "windows-host-wsl-runner",
+        "runner": {"os": "Linux-6.6-WSL2", "kind": "wsl2", "python_version": "3.12.3",
+                   "cpu": "x86_64", "ram_gb": 31.0},
+        "serving": {
+            "host": {"os": fact("Windows-11-10.0.26200"), "cpu": fact("AMD Ryzen 7 9800X3D"),
+                     "ram_gb": fact(64.0)},
+            "accelerators": [{"vendor": "amd", "model": "AMD Radeon RX 9070", "memory_gb": 16.0,
+                              "count": 1, "role": "inference", "provenance": "detected"}],
+            "placement": {"mode": "gpu-only", "detail": None, "provenance": "contributor-declared"},
+            "runtime": {
+                "application": {"name": "LM Studio", "version": "0.3.31",
+                                "provenance": "contributor-declared"},
+                "engine": {"name": "llama.cpp", "version": "b10621",
+                           "provenance": "contributor-declared"},
+                "settings": [{"name": "context_length", "value": "8192",
+                              "provenance": "contributor-declared"}],
+            },
+        },
+        "transport": {"kind": "windows-wsl-stdio-bridge",
+                      "protocol": "HTTP/1.1, one request per connection",
+                      "bridge_version": "windows-stdio-http1-v1",
+                      "overhead": "included-not-measured"},
+    }
+    environment.update(overrides)
+    return environment
+
+
+def bridged_template(**model_overrides):
+    """VALID_RESULT_TEMPLATE, repackaged as the bridged 1.1 result it would be."""
+    result = copy.deepcopy(VALID_RESULT_TEMPLATE)
+    result["schema_version"] = "1.1"
+    result["execution_device"] = "gpu"
+    result["environment"] = serving_environment()
+    result["runtime"] = {"framework": "lmstudio", "version": "b10621", "arguments": [],
+                         "endpoint_type": "openai-compatible"}
+    result["hardware"] = {
+        "os": "Windows-11-10.0.26200", "cpu": "AMD Ryzen 7 9800X3D", "ram_gb": 64.0,
+        "gpus": [{"vendor": "amd", "model": "AMD Radeon RX 9070", "memory_gb": 16.0, "count": 1}],
+        "driver_version": None,
+        "detection": {"hardware": "user-confirmed", "model": "manual", "runtime": "manual"},
+    }
+    result["model"] = {"id": "Qwen/Qwen3-4B", "revision": "abc123", "quantization": "Q4_K_M",
+                       "served_model_id": "qwen3-4b", "catalog_status": "catalogued",
+                       **model_overrides}
+    return result
+
+
+def proposal_document(**overrides):
+    document = {
+        "schema_version": "model-proposal-1.0",
+        "status": "proposed",
+        "proposed_id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+        "family": "DeepSeek",
+        "parameter_class": "14B",
+        "modality": "text-generation",
+        "source": "https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+        "licence": "MIT",
+        "licence_url": None,
+        "weights_publicly_downloadable": True,
+        "proposed_by": "local-tester",
+        "proposed_at": "2026-11-03T09:00:00Z",
+        "for_run_id": "run-fixture-1234",
+        "rationale": "Widely used distilled reasoning model; results have no catalog entry yet.",
+        "initial_runtimes": ["lmstudio"],
+    }
+    document.update(overrides)
+    return document
+
+
 def write_profile(profiles_dir: Path, profile_id: str, contents: str) -> str:
     """Write a fixture profile YAML and return its sha256 (matching benchmark.profile_sha256)."""
     profiles_dir.mkdir(parents=True, exist_ok=True)
-    (profiles_dir / f"{profile_id}.yaml").write_text(contents, encoding="utf-8")
+    (profiles_dir / f"{profile_id}.yaml").write_bytes(contents.encode())
     return sha256_of(contents.encode())
 
 
@@ -118,7 +201,7 @@ models:
 
 def write_catalog(catalog_dir: Path, contents: str = DEFAULT_CATALOG, filename: str = "seed-v1.yaml") -> None:
     catalog_dir.mkdir(parents=True, exist_ok=True)
-    (catalog_dir / filename).write_text(contents, encoding="utf-8")
+    (catalog_dir / filename).write_bytes(contents.encode())
 
 
 def write_bundle(
@@ -127,13 +210,15 @@ def write_bundle(
     result_overrides: dict | None = None,
     artifact_contents: dict[str, bytes] | None = None,
     write_artifacts: set[str] | None = None,
+    proposal: dict | bytes | None = None,
+    template: dict | None = None,
 ) -> None:
     """Write a result.json plus its evidence files into bundle_dir."""
     bundle_dir.mkdir(parents=True, exist_ok=True)
     contents = {**ARTIFACT_CONTENTS, **(artifact_contents or {})}
     names_to_write = write_artifacts if write_artifacts is not None else set(contents)
 
-    result = copy.deepcopy(VALID_RESULT_TEMPLATE)
+    result = copy.deepcopy(template or VALID_RESULT_TEMPLATE)
     for name, artifact in result["artifacts"].items():
         artifact["sha256"] = sha256_of(contents[name])
     if result_overrides:
@@ -143,9 +228,14 @@ def write_bundle(
     for name, artifact in VALID_RESULT_TEMPLATE["artifacts"].items():
         if name in names_to_write:
             (bundle_dir / artifact["path"]).write_bytes(contents[name])
+    if proposal is not None:
+        (bundle_dir / "model-proposal.json").write_bytes(
+            proposal if isinstance(proposal, bytes) else json.dumps(proposal).encode())
 
 
-class ValidateResultsTests(unittest.TestCase):
+class RegistryFixture(unittest.TestCase):
+    """An isolated registry: its own results, catalog and profiles directories."""
+
     def setUp(self) -> None:
         self._temp_directory = tempfile.TemporaryDirectory()
         self.root = Path(self._temp_directory.name)
@@ -178,6 +268,8 @@ class ValidateResultsTests(unittest.TestCase):
             exit_code = validate_results.main()
         return exit_code, stdout.getvalue(), stderr.getvalue()
 
+
+class ValidateResultsTests(RegistryFixture):
     def test_empty_registry_succeeds(self) -> None:
         exit_code, stdout, _ = self.run_main()
         self.assertEqual(exit_code, 0)
@@ -198,12 +290,13 @@ class ValidateResultsTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertIn("schema_version", stderr)
 
-    def test_hash_correct_bridged_environment_is_not_publishable(self) -> None:
+    def test_a_bridged_run_cannot_be_published_under_schema_1_0(self) -> None:
+        """1.0 has one hardware host, so it cannot say where the server was."""
         write_bundle(self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
-                     artifact_contents={"environment_snapshot": b'{"transport":{"kind":"windows-stdio-http1-v1"}}'})
+                     artifact_contents={"environment_snapshot": BRIDGED_SNAPSHOT})
         exit_code, _, stderr = self.run_main()
         self.assertEqual(exit_code, 1)
-        self.assertIn("bridged measurements are local-only", stderr)
+        self.assertIn("schema 1.0 cannot represent", stderr)
         self.assertNotIn("hash mismatch", stderr)
 
     def test_unreadable_transport_provenance_fails_closed(self) -> None:
@@ -921,6 +1014,406 @@ class RealChatSmallExtendedProfileTests(unittest.TestCase):
             classic["execution"]["maximum_duration_seconds"], extended["execution"]["maximum_duration_seconds"]
         )
         self.assertEqual(extended["execution"]["maximum_duration_seconds"], 5400)
+
+
+class BridgedSubmissionTests(RegistryFixture):
+    """A bridged run is publishable exactly when it says what it really was."""
+
+    def bundle(self, **kwargs):
+        write_bundle(self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+                     artifact_contents={"environment_snapshot": BRIDGED_SNAPSHOT},
+                     template=bridged_template(), **kwargs)
+
+    def test_a_complete_bridged_bundle_is_accepted(self) -> None:
+        self.bundle()
+        exit_code, stdout, stderr = self.run_main()
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("Validated 1 OmoBench result bundle(s).", stdout)
+
+    def test_declaring_a_bridge_without_evidence_of_one_is_rejected(self) -> None:
+        write_bundle(self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+                     template=bridged_template())
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("declares the Windows bridge, but the environment snapshot", stderr)
+
+    def test_evidence_of_a_bridge_cannot_be_packaged_as_a_direct_run(self) -> None:
+        template = bridged_template()
+        template["environment"]["relationship"] = "same-host"
+        template["environment"]["runner"]["kind"] = "native"
+        template["environment"]["transport"] = {"kind": "direct", "protocol": "HTTP/1.1",
+                                                "bridge_version": None, "overhead": "none-direct"}
+        write_bundle(self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+                     artifact_contents={"environment_snapshot": BRIDGED_SNAPSHOT},
+                     template=template)
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("shows a bridged run, but the result declares transport 'direct'", stderr)
+
+    def test_a_bridge_version_the_run_did_not_use_is_rejected(self) -> None:
+        template = bridged_template()
+        template["environment"]["transport"]["bridge_version"] = "windows-stdio-http1-v2"
+        write_bundle(self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+                     artifact_contents={"environment_snapshot": BRIDGED_SNAPSHOT},
+                     template=template)
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("is not the one the run recorded", stderr)
+
+    def test_a_bridged_run_cannot_claim_the_two_hosts_are_one(self) -> None:
+        template = bridged_template()
+        template["environment"]["relationship"] = "same-host"
+        write_bundle(self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+                     artifact_contents={"environment_snapshot": BRIDGED_SNAPSHOT},
+                     template=template)
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("relationship", stderr)
+
+    def test_transport_overhead_cannot_be_declared_away(self) -> None:
+        template = bridged_template()
+        template["environment"]["transport"]["overhead"] = "none-direct"
+        write_bundle(self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+                     artifact_contents={"environment_snapshot": BRIDGED_SNAPSHOT},
+                     template=template)
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("overhead", stderr)
+
+    def test_a_direct_run_stays_valid_under_schema_1_0(self) -> None:
+        """The route that already worked is not disturbed by any of this."""
+        write_bundle(self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234")
+        exit_code, stdout, stderr = self.run_main()
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("Validated 1", stdout)
+
+
+class ServingMetadataValidationTests(RegistryFixture):
+    def write(self, template):
+        write_bundle(self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+                     artifact_contents={"environment_snapshot": BRIDGED_SNAPSHOT},
+                     template=template)
+
+    def test_serving_accelerators_must_agree_with_hardware_gpus(self) -> None:
+        template = bridged_template()
+        template["hardware"]["gpus"] = [{"vendor": "amd", "model": "AMD Radeon RX 7900 XTX",
+                                         "memory_gb": 24.0, "count": 1}]
+        self.write(template)
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("do not match hardware.gpus", stderr)
+
+    def test_a_present_but_unused_gpu_is_not_promoted_into_hardware(self) -> None:
+        """Detecting a second card is not evidence that it served anything."""
+        template = bridged_template()
+        template["environment"]["serving"]["accelerators"].append(
+            {"vendor": "amd", "model": "AMD Radeon 780M", "memory_gb": 2.0, "count": 1,
+             "role": "present-not-used", "provenance": "detected"})
+        self.write(template)
+        exit_code, stdout, stderr = self.run_main()
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("Validated 1", stdout)
+
+    def test_two_identical_cards_become_one_entry_with_a_count(self) -> None:
+        template = bridged_template()
+        template["environment"]["serving"]["accelerators"] = [
+            {"vendor": "nvidia", "model": "NVIDIA RTX 4090", "memory_gb": 24.0, "count": 1,
+             "role": "inference", "provenance": "detected"},
+            {"vendor": "nvidia", "model": "NVIDIA RTX 4090", "memory_gb": 24.0, "count": 1,
+             "role": "inference", "provenance": "detected"},
+        ]
+        template["hardware"]["gpus"] = [{"vendor": "nvidia", "model": "NVIDIA RTX 4090",
+                                         "memory_gb": 24.0, "count": 2}]
+        self.write(template)
+        exit_code, stdout, stderr = self.run_main()
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("Validated 1", stdout)
+
+    def test_mixed_cpu_gpu_offload_is_representable_and_needs_its_split(self) -> None:
+        template = bridged_template()
+        template["environment"]["serving"]["placement"] = {
+            "mode": "cpu-gpu-offload", "detail": "32 of 49 layers on GPU",
+            "provenance": "contributor-declared"}
+        self.write(template)
+        exit_code, stdout, stderr = self.run_main()
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("Validated 1", stdout)
+
+    def test_a_cpu_only_bridged_run_records_no_inference_accelerator(self) -> None:
+        template = bridged_template()
+        template["execution_device"] = "cpu"
+        template["hardware"]["gpus"] = []
+        template["hardware"]["driver_version"] = None
+        template["environment"]["serving"]["placement"] = {
+            "mode": "cpu-only", "detail": None, "provenance": "contributor-declared"}
+        template["environment"]["serving"]["accelerators"] = [
+            {"vendor": "amd", "model": "AMD Radeon RX 9070", "memory_gb": 16.0, "count": 1,
+             "role": "present-not-used", "provenance": "detected"}]
+        self.write(template)
+        exit_code, stdout, stderr = self.run_main()
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("Validated 1", stdout)
+
+    def test_an_application_version_cannot_stand_in_for_the_engine_build(self) -> None:
+        template = bridged_template()
+        template["runtime"]["version"] = "0.3.31"  # the LM Studio release
+        self.write(template)
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("runtime.version is the inference engine's build", stderr)
+
+    def test_an_unknown_fact_may_not_carry_a_value(self) -> None:
+        template = bridged_template()
+        template["environment"]["serving"]["host"]["cpu"] = {"value": "AMD Ryzen",
+                                                             "provenance": "unknown"}
+        self.write(template)
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("provenance", stderr)
+
+    def test_a_known_fact_may_not_claim_unknown_provenance_by_omission(self) -> None:
+        template = bridged_template()
+        template["environment"]["serving"]["host"]["cpu"] = {"value": None,
+                                                             "provenance": "detected"}
+        self.write(template)
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("provenance", stderr)
+
+    def test_schema_1_0_cannot_carry_serving_metadata(self) -> None:
+        template = bridged_template()
+        template["schema_version"] = "1.0"
+        self.write(template)
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("environment", stderr)
+
+
+class WeightIdentityTests(RegistryFixture):
+    def write(self, model):
+        template = copy.deepcopy(VALID_RESULT_TEMPLATE)
+        template["schema_version"] = "1.1"
+        template["environment"] = {
+            "metadata_version": "serving-environment-v1", "relationship": "same-host",
+            "runner": {"os": "Test Linux", "kind": "native", "python_version": "3.12.3",
+                       "cpu": "Test CPU", "ram_gb": 64.0},
+            "serving": {
+                "host": {"os": fact("Test Linux", "detected"), "cpu": fact("Test CPU", "detected"),
+                         "ram_gb": fact(64.0, "detected")},
+                "accelerators": [{"vendor": "nvidia", "model": "NVIDIA Test GPU", "memory_gb": 24.0,
+                                  "count": 1, "role": "inference", "provenance": "detected"}],
+                "placement": {"mode": "gpu-only", "detail": None, "provenance": "contributor-declared"},
+                "runtime": {"application": None,
+                            "engine": {"name": "vllm", "version": "0.11.0",
+                                       "provenance": "contributor-declared"},
+                            "settings": []},
+            },
+            "transport": {"kind": "direct", "protocol": "HTTP/1.1", "bridge_version": None,
+                          "overhead": "none-direct"},
+        }
+        template["hardware"]["gpus"] = [{"vendor": "nvidia", "model": "NVIDIA Test GPU",
+                                         "memory_gb": 24.0, "count": 1}]
+        template["model"] = {"id": "Qwen/Qwen3-4B", "quantization": "Q4_K_M",
+                             "catalog_status": "catalogued", **model}
+        write_bundle(self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+                     template=template)
+
+    @staticmethod
+    def manifest(files):
+        document = {"manifest_version": "weight-manifest-1", "files": files}
+        return "sha256:" + hashlib.sha256(
+            json.dumps(document, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    def test_a_quantization_repository_is_recorded_as_the_weights_source(self) -> None:
+        self.write({"revision": "f" * 40, "weights": {
+            "kind": "repository", "repository": "https://huggingface.co/unsloth/Qwen3-4B-GGUF",
+            "repository_revision": "f" * 40, "identity": "repository-revision", "content": None}})
+        exit_code, stdout, stderr = self.run_main()
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("Validated 1", stdout)
+
+    def test_a_repository_revision_and_the_model_revision_must_be_the_same_commit(self) -> None:
+        self.write({"revision": "a" * 40, "weights": {
+            "kind": "repository", "repository": "https://huggingface.co/unsloth/Qwen3-4B-GGUF",
+            "repository_revision": "f" * 40, "identity": "repository-revision", "content": None}})
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("one weight set has one revision", stderr)
+
+    def test_a_file_checksum_is_not_a_repository_commit(self) -> None:
+        self.write({"revision": "sha256-manifest:" + "0" * 64, "weights": {
+            "kind": "repository", "repository": "https://huggingface.co/unsloth/Qwen3-4B-GGUF",
+            "repository_revision": "sha256-manifest:" + "0" * 64,
+            "identity": "repository-revision", "content": None}})
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("a manifest hash is not a repository commit", stderr)
+
+    def test_local_weights_are_identified_by_the_bytes_of_their_files(self) -> None:
+        files = [{"name": "model.gguf", "bytes": 1234, "sha256": "sha256:" + "1" * 64}]
+        digest = self.manifest(files)
+        self.write({"revision": "sha256-manifest:" + digest.split(":")[1], "weights": {
+            "kind": "local-files", "repository": None, "repository_revision": None,
+            "identity": "content-hash", "content": {"manifest_sha256": digest, "files": files}}})
+        exit_code, stdout, stderr = self.run_main()
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("Validated 1", stdout)
+
+    def test_a_sharded_weight_set_is_one_identity_over_every_shard(self) -> None:
+        files = [{"name": f"model-0000{index}-of-00003.safetensors", "bytes": 1000 + index,
+                  "sha256": "sha256:" + str(index) * 64} for index in (1, 2, 3)]
+        digest = self.manifest(files)
+        self.write({"revision": "sha256-manifest:" + digest.split(":")[1], "weights": {
+            "kind": "local-files", "repository": None, "repository_revision": None,
+            "identity": "content-hash", "content": {"manifest_sha256": digest, "files": files}}})
+        exit_code, stdout, stderr = self.run_main()
+        self.assertEqual(exit_code, 0, stderr)
+
+    def test_one_changed_shard_changes_the_identity(self) -> None:
+        files = [{"name": f"model-0000{index}-of-00003.safetensors", "bytes": 1000 + index,
+                  "sha256": "sha256:" + str(index) * 64} for index in (1, 2, 3)]
+        digest = self.manifest(files)
+        files[1] = {**files[1], "sha256": "sha256:" + "9" * 64}
+        self.write({"revision": "sha256-manifest:" + digest.split(":")[1], "weights": {
+            "kind": "local-files", "repository": None, "repository_revision": None,
+            "identity": "content-hash", "content": {"manifest_sha256": digest, "files": files}}})
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("does not hash the file list", stderr)
+
+    def test_a_manifest_revision_without_a_manifest_is_rejected(self) -> None:
+        self.write({"revision": "sha256-manifest:" + "0" * 64})
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("has to be backed by model.weights", stderr)
+
+    def test_local_weights_cannot_claim_a_repository_revision_identity(self) -> None:
+        self.write({"revision": "f" * 40, "weights": {
+            "kind": "local-files", "repository": None, "repository_revision": "f" * 40,
+            "identity": "repository-revision", "content": None}})
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("identity", stderr)
+
+    def test_a_mutable_weights_revision_is_rejected(self) -> None:
+        self.write({"revision": "abc123", "weights": {
+            "kind": "repository", "repository": "https://huggingface.co/unsloth/Qwen3-4B-GGUF",
+            "repository_revision": "main", "identity": "repository-revision", "content": None}})
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("mutable label", stderr)
+
+
+class ModelProposalTests(RegistryFixture):
+    def write(self, *, model_overrides=None, proposal=None, directory="2026-08-30-run-fixture-1234"):
+        template = bridged_template()
+        template["model"].update({"id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+                                  "served_model_id": "deepseek-r1-distill-qwen-14b",
+                                  "catalog_status": "proposed"})
+        template["model"].update(model_overrides or {})
+        write_bundle(self.results_path / "deepseek" / directory,
+                     artifact_contents={"environment_snapshot": BRIDGED_SNAPSHOT},
+                     template=template, proposal=proposal)
+
+    def test_a_new_model_reaches_review_with_its_result(self) -> None:
+        self.write(proposal=proposal_document())
+        exit_code, stdout, stderr = self.run_main()
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("Validated 1", stdout)
+
+    def test_an_uncatalogued_model_without_a_proposal_is_still_refused(self) -> None:
+        template = bridged_template()
+        template["model"]["id"] = "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
+        write_bundle(self.results_path / "deepseek" / "2026-08-30-run-fixture-1234",
+                     artifact_contents={"environment_snapshot": BRIDGED_SNAPSHOT},
+                     template=template)
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("not present in the model catalog", stderr)
+        self.assertIn("model proposal", stderr)
+
+    def test_claiming_proposed_without_the_proposal_file_is_rejected(self) -> None:
+        self.write()
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("has no model-proposal.json", stderr)
+
+    def test_a_proposal_cannot_declare_itself_accepted(self) -> None:
+        self.write(proposal=proposal_document(status="accepted"))
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("status", stderr)
+
+    def test_a_proposal_for_a_catalogued_model_is_rejected(self) -> None:
+        template = bridged_template()
+        template["model"]["catalog_status"] = "proposed"
+        write_bundle(self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+                     artifact_contents={"environment_snapshot": BRIDGED_SNAPSHOT},
+                     template=template,
+                     proposal=proposal_document(proposed_id="Qwen/Qwen3-4B"))
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("already in the catalog", stderr)
+
+    def test_a_proposal_for_a_different_model_than_the_one_measured_is_rejected(self) -> None:
+        self.write(proposal=proposal_document(proposed_id="meta-llama/Llama-3.1-8B-Instruct"))
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("but the result measured", stderr)
+
+    def test_a_proposal_bound_to_another_run_is_rejected(self) -> None:
+        self.write(proposal=proposal_document(for_run_id="run-somebody-else"))
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("not this result's", stderr)
+
+    def test_a_proposal_from_another_account_is_rejected(self) -> None:
+        self.write(proposal=proposal_document(proposed_by="someone-else"))
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("is not this bundle's submitter", stderr)
+
+    def test_a_proposal_file_in_a_bundle_that_does_not_claim_one_is_rejected(self) -> None:
+        template = bridged_template()
+        write_bundle(self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234",
+                     artifact_contents={"environment_snapshot": BRIDGED_SNAPSHOT},
+                     template=template, proposal=proposal_document())
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("a bundle carrying a proposal must say so", stderr)
+
+    def test_a_second_proposal_for_the_same_model_is_reported_as_a_duplicate(self) -> None:
+        self.write(proposal=proposal_document())
+        second = bridged_template()
+        second["run_id"] = "run-fixture-5678"
+        second["model"].update({"id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+                                "catalog_status": "proposed"})
+        write_bundle(self.results_path / "deepseek" / "2026-08-31-run-fixture-5678",
+                     artifact_contents={"environment_snapshot": BRIDGED_SNAPSHOT},
+                     template=second, proposal=proposal_document(for_run_id="run-fixture-5678"))
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("is already proposed by", stderr)
+
+    def test_an_unreviewed_proposal_does_not_become_a_catalog_entry(self) -> None:
+        """The catalog is loaded from catalog/models only; a bundle cannot add to it."""
+        self.write(proposal=proposal_document())
+        self.run_main()
+        catalog = validate_results.load_model_catalog(self.catalog_path)
+        self.assertNotIn("deepseek-ai/DeepSeek-R1-Distill-Qwen-14B", catalog)
+        self.assertEqual(set(catalog), {"Qwen/Qwen3-4B"})
+
+    def test_a_proposal_for_a_non_text_modality_is_out_of_scope(self) -> None:
+        self.write(proposal=proposal_document(modality="text-to-image"))
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("modality", stderr)
+
+    def test_a_proposal_that_is_not_readable_json_is_rejected(self) -> None:
+        self.write(proposal=b"{not json")
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("not readable JSON", stderr)
 
 
 if __name__ == "__main__":
