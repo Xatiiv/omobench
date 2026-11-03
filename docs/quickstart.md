@@ -189,7 +189,7 @@ Preview the runner command without contacting the model:
 omobench run \
   --endpoint http://127.0.0.1:8092 \
   --model Qwen/Qwen3-0.6B \
-  --profile chat-small-v1
+  --profile chat-small-v2
 ```
 
 Then execute it:
@@ -198,7 +198,7 @@ Then execute it:
 omobench run \
   --endpoint http://127.0.0.1:8092 \
   --model Qwen/Qwen3-0.6B \
-  --profile chat-small-v1 \
+  --profile chat-small-v2 \
   --execute
 ```
 

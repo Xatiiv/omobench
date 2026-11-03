@@ -89,7 +89,7 @@ Enter:
 | --- | --- |
 | Server address | `http://127.0.0.1:8092` |
 | Server model identifier | `Qwen/Qwen3-0.6B` |
-| Benchmark profile | `chat-small-v1` |
+| Benchmark profile | `chat-small-v2` |
 | Server execution device | CPU · local measurements |
 
 Click **Test connection**. After it confirms streaming works, tick the device

@@ -6,62 +6,17 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createContext, runInContext } from "node:vm";
+import { makeDocument, makeElement } from "./dom_stub.mjs";
 
 const guidedPath = process.argv[2];
 const source = readFileSync(guidedPath, "utf8");
 
-function makeElement(id) {
-  const classes = new Set();
-  const attributes = id === "chart-svg" ? { hidden: "" } : {};
-  const listeners = {};
-  return {
-    id,
-    textContent: "",
-    hidden: false,
-    disabled: false,
-    checked: false,
-    value: "",
-    children: [],
-    dataset: {},
-    style: {},
-    scrollTop: 0,
-    scrollHeight: 0,
-    clientHeight: 0,
-    classList: {
-      add: (name) => classes.add(name),
-      remove: (name) => classes.delete(name),
-      toggle: (name, force) => (force === undefined ? (classes.has(name) ? classes.delete(name) : classes.add(name)) : force ? classes.add(name) : classes.delete(name)),
-      contains: (name) => classes.has(name),
-    },
-    setAttribute: (name, v) => { attributes[name] = String(v); },
-    getAttribute: (name) => (name in attributes ? attributes[name] : null),
-    removeAttribute: (name) => { delete attributes[name]; },
-    addEventListener: (name, handler) => { listeners[name] = handler; },
-    trigger: (name) => listeners[name]?.(),
-    append(...items) { this.children.push(...items); },
-    replaceChildren(...items) { this.children = items; },
-    scrollIntoView: () => {},
-    focus: () => {},
-    querySelectorAll: () => [],
-    attributes,
-  };
-}
-
-const elements = new Map();
 const stepTabs = ["choose", "run", "results", "share"].map((screen) => {
   const tab = makeElement(`step-${screen}`);
   tab.dataset.screen = screen;
   return tab;
 });
-const document = {
-  getElementById: (id) => {
-    if (!elements.has(id)) elements.set(id, makeElement(id));
-    return elements.get(id);
-  },
-  createElement: (tag) => makeElement(`created:${tag}`),
-  querySelectorAll: (selector) => selector === ".step-tab" ? stepTabs : [],
-  addEventListener: () => {},
-};
+const document = makeDocument({ selectors: { ".step-tab": stepTabs } });
 
 const context = createContext({
   document,
@@ -92,9 +47,16 @@ const context = createContext({
   fetch: () => Promise.reject(new Error("no network in this harness")),
 });
 
+// The shared dashboard component the page mounts, loaded exactly as the
+// browser loads it (dashboard.js, then community.js, then the page script).
+runInContext(readFileSync(join(dirname(guidedPath), "dashboard.js"), "utf8"), context);
 runInContext(readFileSync(join(dirname(guidedPath), "community.js"), "utf8"), context);
 document.getElementById("submission-mode").value = "community";
 runInContext(source, context, { filename: guidedPath });
+
+// The page mounts one dashboard; this is that same component, so asserting on
+// its primitives asserts on what the page renders.
+const component = new context.BenchmarkDashboard(null, { stages: context.BenchmarkDashboard.MANAGED_STAGES });
 
 function barState() {
   const fill = document.getElementById("progress-bar-fill");
@@ -140,15 +102,15 @@ results.overrunning = barState();
 // 4. Failure during finalization: freeze at what was really reached (99),
 //    never at a finished-looking 100.
 renderProgressWith({ available: true, stage: "saving", elapsed_seconds: 120, remaining_fraction: 0 });
-context.renderProgressBarFrozen();
+component.renderProgressBarFrozen();
 results.failedDuringFinalization = barState();
 
 // 5. Genuine success: execution and evidence finalization both completed.
-context.renderProgressBar(100, { complete: true });
+component.renderProgressBar(100, { complete: true });
 results.completed = barState();
 
 // 6. The primitive itself must never reach 100 without the explicit flag.
-context.renderProgressBar(99.999);
+component.renderProgressBar(99.999);
 results.primitiveNearComplete = barState();
 
 // Observed telemetry display: zero is a real observation, missing is not.
@@ -167,7 +129,7 @@ function chartState() {
     accessibleReadout: get("chart-scrub").getAttribute("aria-valuetext"),
   };
 }
-context.renderChart(null);
+component.renderChart(null);
 results.missingMetrics = chartState();
 const observed = {
   available: true,
@@ -183,17 +145,17 @@ const observed = {
   ],
 };
 const historyBefore = JSON.stringify(observed.chart_history);
-context.renderChart(observed);
+component.renderChart(observed);
 results.observedMetrics = chartState();
 results.historyPreserved = JSON.stringify(observed.chart_history) === historyBefore;
 document.getElementById("chart-scrub").value = "0";
 document.getElementById("chart-scrub").trigger("input");
 results.inspectedSample = chartState();
-context.renderChart({ ...observed, chart_history: [...observed.chart_history, { elapsed_seconds: 25, output_tokens_per_second: 9 }] });
+component.renderChart({ ...observed, chart_history: [...observed.chart_history, { elapsed_seconds: 25, output_tokens_per_second: 9 }] });
 results.retainedSelection = chartState();
-context.renderChart({ available: true, latest_metrics: { output_tokens_per_second: 0 }, chart_history: [{ elapsed_seconds: 0, output_tokens_per_second: 0 }] });
+component.renderChart({ available: true, latest_metrics: { output_tokens_per_second: 0 }, chart_history: [{ elapsed_seconds: 0, output_tokens_per_second: 0 }] });
 results.zeroMetrics = chartState();
-context.renderChart({ ...observed, available: false });
+component.renderChart({ ...observed, available: false });
 results.unavailableMetrics = chartState();
 
 // Export exactly the reviewed normalized result, without a network request or
@@ -232,6 +194,24 @@ let savedDetail = {
   ...saved, id: saved.benchmark_job_id, summary: savedSummary, framework: "vllm", framework_version: "fixture",
   validation: { valid: false, errors: ["acceptance: not enough successful requests"] },
 };
+// What the panel would be told about publication eligibility. Clearly
+// synthetic: an uncatalogued model with no recorded revision.
+const requirementsFixture = {
+  model: "Fixture/Model", catalog: ["Qwen/Qwen3-4B"], catalogued: false, ready: false,
+  local_export_available: true,
+  items: [
+    { field: null, label: "Benchmark completed with measurements", ok: true, detail: "This run produced measurements." },
+    { field: "model", label: "Canonical model ID is in the OmoBench catalog", ok: false, detail: "Fixture/Model is not currently eligible for the community registry." },
+    { field: "model_revision", label: "Immutable revision of the actual weights source", ok: false, detail: "A commit SHA or other immutable revision." },
+  ],
+};
+// The local report the panel would export: measurements only, no publication
+// metadata and no credential.
+const localReportFixture = {
+  kind: "omobench-local-report", format_version: 1,
+  server: { model_identifier: "Fixture/Model", execution_device: "cpu" },
+  measurements: savedSummary.results,
+};
 const historyRequests = [];
 context.fetch = async (path, options) => {
   historyRequests.push({ path, method: options?.method || "GET" });
@@ -241,6 +221,8 @@ context.fetch = async (path, options) => {
   else if (path === `/api/managed/runs/${saved.id}`) data = saved;
   else if (path.endsWith("/telemetry")) data = { available: false };
   else if (path === `/api/runs/${saved.benchmark_job_id}`) data = savedDetail;
+  else if (path.endsWith("/requirements")) data = requirementsFixture;
+  else if (path.endsWith("/local-report")) data = localReportFixture;
   else throw new Error(`unexpected request: ${path}`);
   return { ok: true, json: async () => data };
 };
@@ -266,6 +248,17 @@ get("prepare-review-button").hidden = false;
 savedDetail = { ...savedDetail, validation: null };
 await context.enterShareScreen();
 results.historyUncheckedReviewHidden = get("prepare-review-button").hidden;
+results.publicationChecklist = {
+  items: get("publication-checklist").children.map((item) => `${item.className.replace("status-item ", "")}:${item.children[0].textContent}`),
+  summary: get("publication-summary").textContent,
+};
+const exportBefore = historyRequests.length;
+await get("download-summary-button").trigger("click");
+results.localExport = {
+  requests: historyRequests.slice(exportBefore).map((entry) => `${entry.method} ${entry.path}`),
+  name: downloads[downloads.length - 1]?.name,
+  kind: JSON.parse(await downloads[downloads.length - 1].blob.text()).kind,
+};
 savedDetail = { ...savedDetail, execution_device: "cpu", framework: "llama.cpp" };
 await context.enterShareScreen();
 results.historyCpuPackageEnabled = !get("package-button").disabled;

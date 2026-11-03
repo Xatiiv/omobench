@@ -1,0 +1,121 @@
+/* The shared benchmark dashboard: one stylesheet for the component both the
+   guided recipes and the advanced "connect your own server" panel mount.
+   Loaded after style.css and before any page-specific sheet. */
+
+/* Heading */
+.dashboard-head{align-items:flex-start}
+.dashboard-head>div{display:block}
+#progress-heading{font-size:24px;letter-spacing:-.6px}
+#dashboard-subtitle{font-size:12px;margin:6px 0;color:#a8bad5}
+
+/* Progress bar */
+.progress-bar-wrap{margin:22px 0 4px}
+.progress-bar-track{height:10px;border-radius:6px;background:#0c1525;border:1px solid var(--line);overflow:hidden}
+.progress-bar-fill{display:block;height:100%;width:0%;background:linear-gradient(90deg,#d6912f,var(--accent));transition:width .6s ease-out}
+.progress-bar-fill.indeterminate{width:35%!important;animation:omobench-indeterminate 1.6s ease-in-out infinite}
+.progress-bar-label{display:block;margin-top:9px;font:13px/1.4 ui-monospace,SFMono-Regular,monospace;color:#d1def1}
+@keyframes omobench-indeterminate{0%{margin-left:0%}50%{margin-left:60%}100%{margin-left:0%}}
+
+/* Live score and chart */
+.performance-console{display:grid;grid-template-columns:minmax(200px,.8fr) minmax(0,1.8fr);border:1px solid var(--line);border-radius:12px;overflow:hidden;background:#0c1627;margin:22px 0}
+.throughput-score{padding:28px 24px;border-right:1px solid var(--line);background:radial-gradient(ellipse at 0% 0%,#f7bd5512,transparent 80%)}
+.throughput-score .eyebrow{font-size:10px;color:#b5c5df;margin:0 0 17px}
+.score-value{font-size:clamp(40px,4.8vw,68px);font-weight:600;line-height:1.05;letter-spacing:-3px;color:var(--accent);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.score-unit{font-size:13px;color:#d0dcef;margin:10px 0}
+.score-note{font-size:11px;line-height:1.7;color:#8fa6c6;margin:18px 0}
+.score-divider{height:1px;background:var(--line);margin:24px 0}
+.latency-pair{display:grid;gap:16px;margin:0}
+.latency-pair dt{margin:0;font-size:10px}
+.latency-pair dd{font:18px ui-monospace,monospace;color:#a6c7ff;margin-top:5px;font-variant-numeric:tabular-nums}
+.chart-wrap{margin:0;padding:24px;background:transparent;min-width:0}
+.chart-head{align-items:center;margin:0}
+.chart-head>div{display:block}
+.chart-head h3{font-size:17px;font-weight:550;letter-spacing:-.3px;margin:7px 0}
+.chart-head .eyebrow{font-size:9px;color:#8fa6c6;margin:0}
+.chart-key{display:inline-flex;gap:6px;align-items:center;font:10px ui-monospace,monospace;color:#c7d6ec}
+.chart-key i{width:6px;height:6px;border-radius:50%;background:var(--accent)}
+#chart-label{font-size:10px;margin:0 0 16px}
+#chart-svg{width:100%;height:225px;display:block;overflow:visible}
+#chart-svg text{font:11px ui-monospace,monospace;fill:#8da4c5}
+.chart-grid{fill:none;stroke:#30425e;stroke-width:1;stroke-dasharray:3 5}
+#chart-line{fill:none;stroke:var(--accent);stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke;transition:points .8s ease-out}
+#chart-cursor{stroke:#f7bd5550;stroke-dasharray:3 4;vector-effect:non-scaling-stroke}
+#chart-point{fill:var(--accent);stroke:#0c1627;stroke-width:2;vector-effect:non-scaling-stroke}
+.chart-empty{min-height:265px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;text-align:center;color:#8fa6c6;font-size:12px;border:1px dashed #2a3a53;border-radius:8px;padding:20px}
+.chart-empty strong{font-size:13px;font-weight:500;color:#c4d2e9}
+.waiting-mark{font-size:26px;color:#f7bd5580}
+.chart-inspector{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;align-items:center;margin-top:10px}
+.chart-inspector label{font-size:10px;color:#8fa6c6;margin:0}
+#chart-scrub{padding:0;margin:0;height:18px;border:0;width:100%;accent-color:var(--accent);background:transparent;cursor:pointer}
+#chart-readout{grid-column:1/-1;text-align:right;font:11px ui-monospace,monospace;color:#c4d2e9;min-height:17px}
+
+/* Fact grid and request counts */
+.dashboard-facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0 6px}
+.dashboard-facts>div{padding:17px 16px;border:1px solid var(--line);border-radius:10px;background:#101a2b}
+.dashboard-facts dt{font-size:10px;color:var(--muted);margin:0;letter-spacing:.02em}
+.dashboard-facts dd{margin:9px 0 0;font:15px/1.5 ui-monospace,SFMono-Regular,monospace;color:var(--text);overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+.request-health{display:flex;gap:22px;flex-wrap:wrap;padding:13px 3px;font-size:11px;color:#9fb2ce}
+.request-health>span:first-child{font-size:10px;letter-spacing:.08em;text-transform:uppercase}
+.request-health strong{margin-left:5px;color:#e5ecf8;font-family:ui-monospace,monospace;font-weight:500}
+
+/* Stages */
+.stage-heading{display:flex;justify-content:space-between;align-items:center;border-top:1px solid var(--line);padding-top:20px;margin-top:20px}
+.stage-heading h3{font-size:12px;letter-spacing:.02em;margin:0}
+.stage-list{list-style:none;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;padding:0;margin:12px 0}
+.stage-item{position:relative;padding:11px 9px 11px 28px;border-radius:7px;border:1px solid var(--line);background:#0e1829;font-size:11px;line-height:1.4;color:var(--muted)}
+.stage-item::before{content:"";position:absolute;left:10px;top:50%;transform:translateY(-50%);width:7px;height:7px;border-radius:50%;border:1px solid #40516e;background:transparent}
+.stage-item.done{color:#a6b9d5;border-color:#344963}
+.stage-item.done::before{background:#7da9f7;border-color:#7da9f7}
+.stage-item.active{color:var(--text);border-color:#c99b4a;background:#f7bd5510;font-weight:600}
+.stage-item.active::before{background:var(--accent);border-color:var(--accent);box-shadow:0 0 0 3px #f7bd5528}
+.stage-item.cancelling{color:var(--error);border-color:#825549}
+.stage-item.cancelling::before{background:var(--error);border-color:var(--error)}
+
+/* Managed download progress (guided recipes only; absent on an external server) */
+.progress-row{margin:10px 0;font-size:12px}
+.progress-bar{height:8px;border-radius:4px;background:#1b2c46;border:1px solid var(--line);overflow:hidden;margin-top:6px}
+.progress-bar>span{display:block;height:100%;background:var(--accent)}
+
+/* Logs */
+#live-log-details{border-top:1px solid var(--line);padding-top:18px;margin-top:25px}
+#live-log-details summary{font-size:13px;font-weight:550}
+.log-toolbar{display:flex;justify-content:flex-end;margin:2px 0}
+#benchmark-log{min-height:100px;max-height:270px;border-radius:9px}
+
+/* Result cards and the checklists both pages render */
+.metric{display:flex;flex-direction:column}
+.metric-note{grid-column:1/-1;font:11px/1.5 Inter,system-ui,sans-serif;color:var(--muted);margin:8px 0 0;font-weight:400}
+.status-checklist{list-style:none;padding:0;margin:16px 0}
+.status-item{display:flex;flex-direction:column;gap:2px;padding:12px 14px;border-radius:7px;border:1px solid var(--line);margin:8px 0;font-size:12px}
+.status-item strong{font-size:13px}
+.status-item span{color:var(--muted)}
+.status-item.ok{border-color:#435773}
+.status-item.ok strong{color:var(--accent)}
+.status-item.fail{border-color:#825549}
+.status-item.fail strong{color:var(--error)}
+.status-item.pending strong{color:var(--muted)}
+
+@media(prefers-reduced-motion:reduce){
+  .progress-bar-fill,#chart-line{transition:none}
+  .progress-bar-fill.indeterminate{animation:none;width:50%!important}
+}
+@media(max-width:1050px){.throughput-score{padding:24px 18px}.chart-wrap{padding:20px}.dashboard-facts{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:720px){
+  .performance-console{grid-template-columns:1fr}
+  .throughput-score{border-right:0;border-bottom:1px solid var(--line);padding:23px}
+  .score-value{font-size:54px;letter-spacing:-2px}
+  .score-divider{margin:18px 0}
+  .latency-pair{grid-template-columns:1fr 1fr}
+  .score-note br{display:none}
+  .chart-wrap{padding:20px 15px}
+  #chart-svg{height:190px}
+  .stage-list{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .stage-heading .hint{display:none}
+  .dashboard-facts{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  .dashboard-facts dd{font-size:13px}
+  .dashboard-facts>div{padding:13px}
+  .request-health{gap:10px 16px}
+}
+
+/* Sub-checks under a staged check: one claim per line, each stating its own state. */
+.status-item .sub-check{display:block;color:var(--muted);font-size:11px;margin-top:6px;padding-left:12px;border-left:1px solid var(--line)}

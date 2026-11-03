@@ -14,8 +14,10 @@ import platform
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -124,6 +126,31 @@ PROFILE_SPECS: dict[str, dict[str, Any]] = {
     # requests with six warmup requests excluded instead of the declared five.
     # See ChatSmallExtendedBoundaryTests in cli/tests/test_cli.py and
     # docs/proposals/chat-small-extended-v1.md.
+    # The corrected short profile. Same workload as chat-small-v1, but its
+    # phases are counted in requests instead of being taken as a fraction of the
+    # duration ceiling -- which is what chat-small-v1's `warmup=0.1` actually
+    # does, because GuideLLM 0.7.3 resolves a fraction against duration whenever
+    # a duration budget exists (TransientPhaseConfig.compute_limits, mode
+    # `prefer_duration`). That made chat-small-v1's measured window a fixed
+    # 720-second slice of the clock: a host answering in a second measured
+    # nothing at all, and the profile could only satisfy its own acceptance
+    # floor at roughly 9-18 seconds per request.
+    #
+    # warmup.value=4/cooldown.value=4, not 5: each of GuideLLM 0.7.3's
+    # request-count phase boundaries excludes one more request than it is given.
+    # The same compensation chat-small-extended-v1 ships, and verified here the
+    # same way plus end to end -- the real scheduler, accumulator and report
+    # against a streaming fixture server, with the server's own request log
+    # naming which requests were excluded: requests 1-5 warmup, 6-55 measured,
+    # 56-60 cooldown, identical at 0.02 s and 0.5 s per request. See
+    # cli/tests/test_chat_small_v2.py and docs/proposals/profile-phase-mapping-v2.md.
+    "chat-small-v2": {
+        "input_tokens": 1024,
+        "output_tokens": 256,
+        "profile": "kind=synchronous,warmup.value=4,warmup.mode=requests,cooldown.value=4,cooldown.mode=requests",
+        "max_requests": 60,
+        "max_duration_seconds": 900,
+    },
     "chat-small-extended-v1": {
         "input_tokens": 1024,
         "output_tokens": 256,
@@ -237,6 +264,201 @@ def guidellm_runner_preflight() -> RunnerPreflight:
             ),
         )
     return RunnerPreflight(ok=True, kind="ok", version=version, message=f"GuideLLM {GUIDELLM_VERSION} ready.")
+
+
+def sanitize_diagnostics(text: str, *, limit: int = 2000) -> str:
+    """Keep a diagnostic useful without carrying a secret or a wall of output."""
+    cleaned = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text or "")
+    cleaned = re.sub(r"(?i)(api[_-]?key|token|authorization|secret|password)(\s*[:=]\s*)\S+",
+                     r"\1\2<REDACTED>", cleaned)
+    cleaned = re.sub(r"https?://[^\s\"\'<>]+", "<URL>", cleaned)
+    cleaned = cleaned.strip()
+    if len(cleaned) > limit:
+        # The end of a traceback is the part that names the failure.
+        cleaned = "…\n" + cleaned[-limit:]
+    return cleaned
+
+
+# What the runner must be able to import before it can start at all: its own
+# entry point, the OpenAI-compatible backend OmoBench uses, and the tokenizer
+# implementation that builds the workload. Nothing here downloads a model or a
+# tokenizer, performs inference, or executes code from a model repository --
+# these are library imports only.
+RUNNER_HEALTH_PROBE = (
+    "import json, sys;"
+    "import guidellm;"
+    "import guidellm.__main__;"
+    "import guidellm.backends.openai.http;"
+    "import guidellm.data.tokenizers.huggingface;"
+    "import importlib.metadata as md;"
+    "print('OMOBENCH_RUNNER_HEALTH ' + json.dumps({"
+    "'guidellm': md.version('guidellm'),"
+    "'python': sys.version.split()[0],"
+    "'executable': sys.executable}))"
+)
+
+RUNNER_HEALTH_ENVIRONMENT = {
+    # Belt and braces: the probe imports libraries only, and these make a
+    # download impossible rather than merely unlikely.
+    "HF_HUB_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1",
+    "HF_HUB_DISABLE_TELEMETRY": "1",
+    "TOKENIZERS_PARALLELISM": "false",
+}
+
+
+@dataclass
+class RunnerHealth:
+    """The outcome of actually importing the runner, not of reading metadata.
+
+    `kind` is one of: ok, missing, version_mismatch, import_failed, crashed,
+    timeout, cancelled, unavailable.
+    """
+
+    ok: bool
+    kind: str
+    message: str
+    detail: str = ""
+    seconds: float = 0.0
+    version: str | None = None
+
+
+def runner_health_check(
+    *,
+    interpreter: str | None = None,
+    timeout: float = 120.0,
+    cancel: Any = None,
+    probe: str | None = None,
+) -> RunnerHealth:
+    """Import the pinned runner in a bounded child process and report what happened.
+
+    Installed metadata is not health: a distribution can be present at exactly
+    the pinned version and still fail to import, which is how a working-looking
+    environment produced a SIGBUS from torch on a contributor's machine. This
+    runs the import in a separate process so a crash is reported rather than
+    taken down with it, bounded by `timeout`, cancellable through `cancel`
+    (any callable returning truthy, polled while waiting), and never falling
+    back to launching a benchmark.
+
+    It downloads nothing, runs no inference, and enables no remote code.
+    """
+    executable = interpreter or sys.executable
+    source = probe if probe is not None else RUNNER_HEALTH_PROBE
+    environment = {**os.environ, **RUNNER_HEALTH_ENVIRONMENT}
+    started = time.monotonic()
+    try:
+        process = subprocess.Popen(
+            # -I: isolated, so a stray PYTHONPATH or user site-packages cannot
+            # make this answer about a different installation than the one the
+            # benchmark will use.
+            [executable, "-I", "-c", source],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=environment, start_new_session=os.name != "nt",
+        )
+    except OSError as error:
+        return RunnerHealth(
+            ok=False, kind="unavailable",
+            message=f"Could not start {executable} to check the runner.",
+            detail=sanitize_diagnostics(str(error)),
+            seconds=time.monotonic() - started,
+        )
+
+    cancelled = False
+    deadline = started + max(1.0, timeout)
+    while True:
+        try:
+            stdout, stderr = process.communicate(timeout=0.25)
+            break
+        except subprocess.TimeoutExpired:
+            pass
+        if cancel is not None and cancel():
+            cancelled = True
+        if cancelled or time.monotonic() > deadline:
+            _terminate_process_tree(process)
+            try:
+                stdout, stderr = process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = "", ""
+            elapsed = time.monotonic() - started
+            if cancelled:
+                return RunnerHealth(ok=False, kind="cancelled", seconds=elapsed,
+                                    message="The runner check was cancelled. Nothing was started.")
+            return RunnerHealth(
+                ok=False, kind="timeout", seconds=elapsed,
+                message=(f"Importing the runner did not finish within {int(timeout)} s. "
+                         "That usually means the environment is unusable rather than slow; "
+                         "check the storage holding it and try again."),
+                detail=sanitize_diagnostics(stderr),
+            )
+
+    elapsed = time.monotonic() - started
+    combined = sanitize_diagnostics((stderr or "") + ("\n" + stdout if stdout else ""))
+    code = process.returncode
+    if code == 0 and "OMOBENCH_RUNNER_HEALTH" in (stdout or ""):
+        document = {}
+        with contextlib.suppress(ValueError):
+            document = json.loads((stdout or "").split("OMOBENCH_RUNNER_HEALTH", 1)[1].strip().splitlines()[0])
+        version = document.get("guidellm") if isinstance(document, dict) else None
+        if version and version != GUIDELLM_VERSION:
+            return RunnerHealth(
+                ok=False, kind="version_mismatch", version=version, seconds=elapsed,
+                message=(f"The runner imports, but it is GuideLLM {version}; OmoBench v1 pins "
+                         f"{GUIDELLM_VERSION}."),
+            )
+        return RunnerHealth(
+            ok=True, kind="ok", version=version, seconds=elapsed,
+            message=(f"The runner imported successfully in {elapsed:.1f} s"
+                     + (f" (GuideLLM {version}" if version else "")
+                     + (f", Python {document.get('python')})" if isinstance(document, dict)
+                        and document.get("python") else ")" if version else "")
+                     + ". Nothing was downloaded and no inference ran."),
+        )
+    if code is not None and code < 0:
+        name = _signal_name(-code)
+        return RunnerHealth(
+            ok=False, kind="crashed", seconds=elapsed,
+            message=(f"Importing the runner crashed ({name}) after {elapsed:.1f} s. The packages are "
+                     "installed, but this environment cannot load them. A crash on import is "
+                     "commonly a damaged or partially written install, or storage that cannot "
+                     "serve the files; OmoBench cannot tell which from here, and does not guess."),
+            detail=combined,
+        )
+    if "ModuleNotFoundError" in combined or "No module named" in combined:
+        return RunnerHealth(
+            ok=False, kind="missing", seconds=elapsed,
+            message=("The runner is not fully installed in this environment. Install it with: "
+                     "python -m pip install -e './cli[ui,runner]'"),
+            detail=combined,
+        )
+    return RunnerHealth(
+        ok=False, kind="import_failed", seconds=elapsed,
+        message=(f"Importing the runner failed with exit code {code} after {elapsed:.1f} s. "
+                 "The reported error below is the runner's own."),
+        detail=combined,
+    )
+
+
+def _terminate_process_tree(process: subprocess.Popen) -> None:
+    """Stop the probe and anything it started, without touching this process."""
+    with contextlib.suppress(Exception):
+        if os.name != "nt":
+            os.killpg(process.pid, signal.SIGTERM)
+        else:
+            process.terminate()
+    with contextlib.suppress(Exception):
+        process.wait(timeout=5)
+    if process.poll() is None:
+        with contextlib.suppress(Exception):
+            if os.name != "nt":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+
+
+def _signal_name(number: int) -> str:
+    with contextlib.suppress(ValueError):
+        return signal.Signals(number).name
+    return f"signal {number}"
 
 
 def detect_nvidia_gpus() -> list[dict[str, Any]]:
@@ -557,6 +779,150 @@ def profile_request_timeout_seconds(root: Path, profile_id: str) -> float | None
     return float(value) if value > 0 else None
 
 
+# A served model identifier and a tokenizer are two different identities. The
+# first is whatever string the inference API accepts ("qwen/qwen3-vl-4b:3" from
+# LM Studio, say); the second is the Hugging Face repository or local directory
+# whose tokenizer builds and counts the synthetic workload. GuideLLM 0.7.3
+# defaults the second to the first, which is correct only when the served alias
+# happens to also be a repository id -- otherwise the run fails while resolving
+# the tokenizer, before a single measurement.
+HF_REPO_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+TOKENIZER_FILES = ("tokenizer.json", "tokenizer_config.json", "vocab.json", "spiece.model", "tokenizer.model")
+
+
+def validate_tokenizer_source(value: str) -> str:
+    """Accept a Hugging Face repository id or an existing local directory.
+
+    Deliberately narrow: the value is passed to GuideLLM as part of a
+    comma-separated `kind=...` argument, and it must never be able to inject a
+    second setting (remote code execution, a different tokenizer kind) into it.
+    """
+    source = value.strip()
+    if not source:
+        raise ValueError("Tokenizer source cannot be empty.")
+    if any(character in source for character in ",="):
+        raise ValueError("A tokenizer source cannot contain ',' or '='.")
+    if any(ord(character) < 32 for character in source) or len(source) > 512:
+        raise ValueError("Tokenizer source is not a usable repository id or path.")
+    if HF_REPO_ID.fullmatch(source):
+        return source
+    path = Path(source).expanduser()
+    if path.is_dir():
+        return str(path)
+    raise ValueError(
+        "Enter a Hugging Face repository id such as Qwen/Qwen3-VL-4B-Instruct, "
+        "or the path of a local folder containing tokenizer files."
+    )
+
+
+def huggingface_cache_directories() -> list[Path]:
+    """Where the Hugging Face hub cache would be, without importing it."""
+    explicit = os.environ.get("HUGGINGFACE_HUB_CACHE") or os.environ.get("HF_HUB_CACHE")
+    if explicit:
+        return [Path(explicit)]
+    home = os.environ.get("HF_HOME")
+    if home:
+        return [Path(home) / "hub"]
+    return [Path.home() / ".cache" / "huggingface" / "hub"]
+
+
+# The four separate things a tokenizer check can be asked about. Only the first
+# two are ever decided here: this check stays offline, so it neither loads a
+# tokenizer nor compares it against the served weights, and it says so rather
+# than letting a passing syntax check imply either.
+TOKENIZER_NOT_LOADED = (
+    "Not loaded here. This check stays offline and does not import the tokenizer, so "
+    "\"the files are present\" is all it can tell you; the runner loads it when the benchmark starts."
+)
+TOKENIZER_NOT_COMPARED = (
+    "Not verified, and not verifiable from here. A tokenizer that parses is not thereby the "
+    "tokenizer your server's weights were trained with. Choosing the wrong one changes how prompts "
+    "are built and how tokens are counted, which changes the measurements -- so pick the repository "
+    "the model card names, not merely one that loads."
+)
+
+
+def tokenizer_source_report(value: str, *, served_model: str | None = None) -> dict[str, Any]:
+    """Describe a tokenizer source without touching the network.
+
+    Says what the runner would do and whether files still have to be
+    downloaded, so the panel can explain that before anything is fetched. It
+    never downloads, never imports transformers, and never claims a local copy
+    it has not seen on disk -- nor that the tokenizer matches the weights.
+    """
+    source = (value or "").strip() or (served_model or "")
+    effective_default = not (value or "").strip()
+    try:
+        resolved = validate_tokenizer_source(source)
+    except ValueError as error:
+        message = (
+            f"The server model identifier {source!r} is not a Hugging Face repository id, "
+            "so the runner cannot use it to build the workload. Enter a tokenizer source."
+            if effective_default else str(error)
+        )
+        return {
+            "ok": False,
+            "kind": "invalid",
+            "source": source,
+            "default": effective_default,
+            "message": message,
+            "checks": [
+                {"id": "syntax", "state": "failed", "detail": message},
+                {"id": "files", "state": "skipped",
+                 "detail": "Not looked for: there is no usable repository id or path to look for."},
+                {"id": "loaded", "state": "untested", "detail": TOKENIZER_NOT_LOADED},
+                {"id": "compatibility", "state": "unverified", "detail": TOKENIZER_NOT_COMPARED},
+            ],
+        }
+    if not HF_REPO_ID.fullmatch(resolved):
+        present = sorted(name for name in TOKENIZER_FILES if (Path(resolved) / name).is_file())
+        message = (
+            f"Local tokenizer folder, containing {', '.join(present)}. Nothing is downloaded."
+            if present else
+            "That folder exists but contains no recognizable tokenizer file "
+            f"({', '.join(TOKENIZER_FILES)})."
+        )
+        return {
+            "ok": bool(present),
+            "kind": "local",
+            "source": resolved,
+            "default": effective_default,
+            "cached": True,
+            "files": present,
+            "message": message,
+            "checks": [
+                {"id": "syntax", "state": "ok", "detail": "Accepted as a local directory path."},
+                {"id": "files", "state": "ok" if present else "missing", "detail": message},
+                {"id": "loaded", "state": "untested", "detail": TOKENIZER_NOT_LOADED},
+                {"id": "compatibility", "state": "unverified", "detail": TOKENIZER_NOT_COMPARED},
+            ],
+        }
+    flattened = "models--" + resolved.replace("/", "--")
+    cached = any((directory / flattened).is_dir() for directory in huggingface_cache_directories())
+    message = (
+        f"Hugging Face repository {resolved}, already in this machine's local cache; "
+        "no download is needed." if cached else
+        f"Hugging Face repository {resolved}. Its tokenizer files are not in this machine's "
+        "cache yet, so the runner will download them from huggingface.co when the benchmark "
+        "starts. Model weights are not downloaded."
+    )
+    return {
+        "ok": True,
+        "kind": "huggingface",
+        "source": resolved,
+        "default": effective_default,
+        "cached": cached,
+        "message": message,
+        "checks": [
+            {"id": "syntax", "state": "ok",
+             "detail": f"Accepted as a Hugging Face repository id: {resolved}."},
+            {"id": "files", "state": "ok" if cached else "missing", "detail": message},
+            {"id": "loaded", "state": "untested", "detail": TOKENIZER_NOT_LOADED},
+            {"id": "compatibility", "state": "unverified", "detail": TOKENIZER_NOT_COMPARED},
+        ],
+    }
+
+
 def build_guidellm_command(
     *,
     root: Path,
@@ -564,10 +930,22 @@ def build_guidellm_command(
     model: str,
     profile_id: str,
     raw_output_path: Path,
+    tokenizer: str | None = None,
 ) -> list[str]:
     spec = PROFILE_SPECS[profile_id]
     target = endpoint.rstrip("/")
     backend = f"kind=openai_http,target={target},model={model},request_format=/v1/chat/completions"
+    # The benchmark must measure the destination that was selected, and only
+    # that one. OpenAIHTTPBackendArgs.follow_redirects defaults to *True* in
+    # GuideLLM 0.7.3 (guidellm/backends/openai/http.py), so without this a
+    # loopback server answering 307 sends every benchmark request -- prompts
+    # included -- to whatever host it names, while the result still records the
+    # loopback target as the thing that was measured. The panel's own
+    # connection checks already refuse a redirect (ui.NoRedirect); this is the
+    # same rule for the requests that actually produce the measurements.
+    # Demonstrated both ways against a redirecting fixture in
+    # cli/tests/test_redirect_destination.py.
+    backend += ",follow_redirects=false"
     # execution.request_timeout_seconds -> OpenAIHTTPBackendArgs.timeout, which
     # GuideLLM 0.7.3 passes to httpx as its READ timeout
     # (httpx.Timeout(read=args.timeout, connect=args.timeout_connect, ...), see
@@ -583,11 +961,15 @@ def build_guidellm_command(
     timeout_seconds = profile_request_timeout_seconds(root, profile_id)
     if timeout_seconds is not None:
         backend += f",timeout={timeout_seconds}"
+    # An explicit tokenizer identity, only when one was supplied: the default
+    # (GuideLLM using the served model identifier) is left exactly as it was.
+    tokenizer_arguments = ["--tokenizer", f"kind=huggingface_auto,model={validate_tokenizer_source(tokenizer)}"] if tokenizer else []
     return [
         "guidellm",
         "run",
         "--backend",
         backend,
+        *tokenizer_arguments,
         "--data",
         f"kind=synthetic_text,prompt_tokens={spec['input_tokens']},output_tokens={spec['output_tokens']}",
         "--profile",
@@ -606,6 +988,108 @@ def build_guidellm_command(
         f"kind=json,path={raw_output_path}",
         "--disable-console-interactive",
     ]
+
+
+def profile_phase_contract(root: Path, profile_id: str) -> dict[str, Any]:
+    """How this profile's warmup and cooldown phases actually resolve, beside
+    what its YAML declares.
+
+    GuideLLM 0.7.3's TransientPhaseConfig resolves a fractional phase value
+    against *duration* whenever a duration budget exists, because its default
+    mode is `prefer_duration`: `compute_limits()` computes both a duration and a
+    request count and then discards the request count. So
+    `kind=synchronous,warmup=0.1` with a 900 s ceiling is a 90-second warmup,
+    not a five-request warmup -- regardless of what the profile's
+    `warmup_requests` says. Only an explicit `mode=requests` phase counts
+    requests. Established against the pinned runner's own accumulator in
+    cli/tests/test_profile_phase_semantics.py.
+
+    This reads OmoBench's own runner mapping and the profile's own declaration;
+    it does not reimplement the runner's resolution, which the tests pin.
+    """
+    spec = PROFILE_SPECS.get(profile_id)
+    if spec is None:
+        return {}
+    mapping = spec["profile"]
+    max_duration = spec.get("max_duration_seconds")
+    max_requests = spec.get("max_requests")
+
+    def phase(name: str) -> tuple[str | None, float | None]:
+        fraction = re.search(rf"{name}=([0-9.]+)", mapping)
+        explicit = re.search(rf"{name}\.value=([0-9.]+)", mapping)
+        requests_mode = f"{name}.mode=requests" in mapping
+        if fraction and not explicit:
+            value = float(fraction.group(1))
+            if value < 1.0 and max_duration is not None:
+                # percent + a duration budget -> duration, via prefer_duration
+                return "duration", value * max_duration
+            if value < 1.0 and max_requests is not None:
+                return "requests", float(int(value * max_requests))
+            return "requests", value
+        if explicit:
+            value = float(explicit.group(1))
+            return ("requests" if requests_mode else "duration"), value
+        return None, None
+
+    warmup_basis, warmup_value = phase("warmup")
+    cooldown_basis, cooldown_value = phase("cooldown")
+    declared = {}
+    try:
+        import yaml
+
+        document = yaml.safe_load((root / "benchmarks" / "profiles" / f"{profile_id}.yaml").read_text(encoding="utf-8"))
+        declared = (document or {}).get("execution", {}) if isinstance(document, dict) else {}
+    except (OSError, ValueError, ImportError):
+        declared = {}
+
+    basis = warmup_basis if warmup_basis == cooldown_basis else "mixed"
+
+    def excluded(phase_basis, value):
+        """What the runner really excludes for this phase.
+
+        Each of GuideLLM 0.7.3's request-count boundaries excludes one request
+        more than the value it is given, which the shipped mappings compensate
+        for; the profile's declared counts are therefore the *actual* counts,
+        and these are what a reader should be shown.
+        """
+        if value is None:
+            return None
+        return value + 1 if phase_basis == "requests" else value
+
+    warmup_actual = excluded(warmup_basis, warmup_value)
+    cooldown_actual = excluded(cooldown_basis, cooldown_value)
+    declares_request_phases = any(declared.get(key) for key in ("warmup_requests", "cooldown_requests"))
+    return {
+        "profile_id": profile_id,
+        # What the runner enforces, from the command OmoBench itself builds.
+        "enforced_max_requests": max_requests,
+        "enforced_max_duration_seconds": max_duration,
+        "phase_basis": basis,
+        # Seconds for a duration phase; requests actually excluded for a
+        # request phase. `*_configured` is the raw value on the command line.
+        "warmup": warmup_actual,
+        "cooldown": cooldown_actual,
+        "warmup_configured": warmup_value,
+        "cooldown_configured": cooldown_value,
+        # What the profile's own YAML declares.
+        "declared_measured_requests": declared.get("measured_requests"),
+        "declared_warmup_requests": declared.get("warmup_requests"),
+        "declared_cooldown_requests": declared.get("cooldown_requests"),
+        # A declared request-count phase that the runner resolves as a duration
+        # window is a real mismatch: the measured window is then a fixed slice
+        # of the clock, and how many requests land inside it depends entirely on
+        # per-request latency.
+        "declaration_matches_execution": not (declares_request_phases and basis == "duration"),
+        "measured_window_seconds": (
+            None if basis != "duration" or max_duration is None or warmup_actual is None
+            or cooldown_actual is None else max_duration - warmup_actual - cooldown_actual
+        ),
+        # For a request-count profile, the measured window of a complete run.
+        "measured_window_requests": (
+            None if basis != "requests" or max_requests is None or warmup_actual is None
+            or cooldown_actual is None else int(max_requests - warmup_actual - cooldown_actual)
+        ),
+    }
 
 
 def profile_measured_requests(root: Path, profile_id: str) -> int | None:
@@ -755,6 +1239,8 @@ def run_guidellm_command(
             stdout_log_path=log_path,
             run_label=profile_id,
             total_measured_requests=profile_measured_requests(root, profile_id),
+            configured_max_requests=PROFILE_SPECS[profile_id].get("max_requests"),
+            phase_contract=profile_phase_contract(root, profile_id),
         )
     except telemetry_module.TelemetryUnavailable as error:
         return plain_subprocess(f"OmoBench: live telemetry unavailable ({error}); running without it.\n")
@@ -860,6 +1346,132 @@ def report_count(report: dict[str, Any], *path: str) -> int:
     return int(value)
 
 
+def finite_number(value: Any) -> float | None:
+    """`value` as a float when it is one, and finite. Otherwise None.
+
+    NaN and the infinities are rejected rather than compared: `nan == 0.0` is
+    False, so a corrupt timestamp would otherwise read as healthy evidence
+    instead of as evidence that could not be read.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def measured_window_integrity(benchmark: dict[str, Any]) -> dict[str, Any]:
+    """Did this run ever establish a measured window, or is it the fallback?
+
+    GuideLLM 0.7.3 sets `measure_start` only on the single scheduler event
+    where the warmup boundary is recognised. For a request-counted phase that
+    event must satisfy *both* halves of
+    `TransientPhaseConfig.compute_transition_time(period="start")`:
+    `state.processed_requests == warmup.value + 1` **and** that request's own
+    `info.started_at is not None`. The equality is exact and is evaluated per
+    event, so the boundary is not merely "reached once enough requests have
+    run" -- the counter can go past it unset. When a duration ceiling expires
+    the scheduler abandons everything still queued, and a request cancelled
+    before it ever reached `in_progress` has no `started_at`; a burst of those
+    carries the counter beyond `value + 1` with no event left that could set
+    the boundary. Observed for real: a run with `warmup.value=4` finishing at
+    `processed_requests=9` and no boundary at all. (A single such cancellation
+    is not enough -- anything that starts while the counter still equals
+    `value + 1` sets it, one request late. Both are pinned in
+    cli/tests/test_measured_window_semantics.py.)
+
+    When `measure_start` stays None,
+    `GenerativeBenchmarkTimings.finalized_measure_start` falls back to
+    `finalized_request_start` -- the start of the run. The measured window
+    becomes the *whole run*, every warmup request lands inside it, and
+    `metrics.request_totals` reports warmup requests as measured. It is silent:
+    the counts look like a short but ordinary measurement.
+
+    The fallback is detected on the two fields it is made of rather than on a
+    derived one: `scheduler_metrics.measure_start_time` and
+    `request_start_time` are `finalized_measure_start` and
+    `finalized_request_start`, so on the fallback path they are *the same
+    value*. `warmup_duration` (their difference) is used only when those
+    fields are absent.
+
+    Equality has exactly two possible causes: the fallback, or a genuine
+    boundary landing within one float ULP (~2.4e-7 s at a 2026 timestamp) of
+    the run's first request start -- which would require the warmup requests to
+    complete in under a quarter of a microsecond. Across every fixture run
+    recorded here the smallest genuine warmup was 0.0865 s, some 360,000x that
+    resolution. The remaining doubt is stated, not hidden: `basis` says which
+    evidence was used and `checked` says whether any was conclusive.
+
+    `scheduler_state.start_requests_time` and the per-request records, when the
+    report carries them, are reported as corroboration. They are never required:
+    a report that omits them is unverifiable, not broken.
+
+    Established against the pinned runner's own accumulator in
+    cli/tests/test_measured_window_semantics.py and end to end by request
+    identity in cli/tests/test_measured_window_identity.py.
+    """
+    configuration = benchmark.get("config")
+    warmup = configuration.get("warmup") if isinstance(configuration, dict) else None
+    warmup = warmup if isinstance(warmup, dict) else {}
+    percent, value = finite_number(warmup.get("percent")), finite_number(warmup.get("value"))
+    configured = bool((percent is not None and percent > 0) or (value is not None and value > 0))
+
+    metrics = benchmark.get("scheduler_metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
+    measure_start = finite_number(metrics.get("measure_start_time"))
+    request_start = finite_number(metrics.get("request_start_time"))
+    recorded_duration = finite_number(benchmark.get("warmup_duration"))
+
+    if not configured:
+        basis, checked, fallback = "no warmup phase is configured", True, False
+    elif measure_start is not None and request_start is not None:
+        basis = "scheduler_metrics.measure_start_time == request_start_time"
+        checked, fallback = True, measure_start == request_start
+    elif recorded_duration is not None:
+        basis = "warmup_duration == 0 (measure/request start times absent)"
+        checked, fallback = True, recorded_duration == 0.0
+    else:
+        basis, checked, fallback = "no usable timing fields in this report", False, False
+
+    state = benchmark.get("scheduler_state")
+    state = state if isinstance(state, dict) else {}
+    start_requests_time = finite_number(state.get("start_requests_time"))
+    corroboration: dict[str, Any] = {
+        "measure_start_equals_start_requests_time":
+            None if (measure_start is None or start_requests_time is None)
+            else measure_start == start_requests_time,
+        "requests_recorded_before_the_window": None,
+    }
+    records = benchmark.get("requests")
+    if isinstance(records, dict) and measure_start is not None:
+        before = 0
+        seen = False
+        for bucket in ("successful", "errored", "incomplete"):
+            for record in records.get(bucket) or []:
+                started = finite_number((record or {}).get("request_start_time"))
+                if started is None:
+                    continue
+                seen = True
+                if started < measure_start:
+                    before += 1
+        if seen:
+            corroboration["requests_recorded_before_the_window"] = before
+
+    return {
+        "warmup_configured": configured,
+        "warmup_mode": warmup.get("mode") if configured else None,
+        "warmup_value": value if configured else None,
+        "warmup_percent": percent if configured else None,
+        "warmup_duration_seconds": recorded_duration,
+        "measure_start_time": measure_start,
+        "request_start_time": request_start,
+        "basis": basis,
+        "checked": checked,
+        "warmup_boundary_crossed": not fallback,
+        "measured_window_is_the_whole_run": fallback,
+        "corroboration": corroboration,
+    }
+
+
 def normalize_guidellm_report(raw_report: dict[str, Any]) -> dict[str, Any]:
     """Extract the stable MVP metrics from one pinned GuideLLM report."""
     report_version = report_value(raw_report, "metadata", "version")
@@ -897,6 +1509,23 @@ def normalize_guidellm_report(raw_report: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("GuideLLM report contains no attempted requests.")
     if successful == 0:
         raise ValueError("GuideLLM report contains no successful requests.")
+
+    # A run whose warmup boundary was never established has no measured window
+    # at all, only a fallback spanning the whole run. Its request_totals are
+    # warmup requests wearing a measured label, and every latency and
+    # throughput figure below is computed from that same window. Reporting
+    # them as a short measurement would be a fabricated result, so this is
+    # refused in the same way an empty report already is.
+    integrity = measured_window_integrity(benchmark)
+    if not integrity["warmup_boundary_crossed"]:
+        raise ValueError(
+            "This run never left its warmup phase, so it has no measured window: the "
+            "runner's measurement start fell back to the start of the run, which means the "
+            f"{attempted} request(s) it reports are warmup requests the profile excludes "
+            "from measurement. Nothing here is a measurement. This normally means the run "
+            "ended -- or was cancelled -- before its warmup finished; give it more time, or "
+            "use a profile with a longer limit."
+        )
 
     started_at_seconds = report_number(benchmark, "scheduler_metrics", "measure_start_time")
     return {
@@ -1160,12 +1789,19 @@ def write_local_run(args: argparse.Namespace) -> int:
         print("--output-dir must stay inside the OmoBench checkout.", file=sys.stderr)
         return 2
     raw_output_path = run_directory / "guidellm-benchmarks.json"
+    tokenizer = getattr(args, "tokenizer", None)
+    try:
+        tokenizer = validate_tokenizer_source(tokenizer) if tokenizer else None
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 2
     command = build_guidellm_command(
         root=root,
         endpoint=args.endpoint,
         model=args.model,
         profile_id=args.profile,
         raw_output_path=raw_output_path,
+        tokenizer=tokenizer,
     )
     safe_command = redact_endpoint(shlex.join(command), args.endpoint)
 
@@ -1202,7 +1838,12 @@ def write_local_run(args: argparse.Namespace) -> int:
     reproduce_path.write_text(
         "# Reproduce this local staging run\n\n"
         f"GuideLLM version: `{GUIDELLM_VERSION}`\n\n"
-        "Replace `<LOCAL_ENDPOINT>` with the local OpenAI-compatible endpoint.\n\n"
+        # Two identities, recorded separately: the string the server answered to,
+        # and the tokenizer that built and counted the workload.
+        + (f"Server model identifier: `{args.model}`\n\nTokenizer source (explicit override): `{tokenizer}`\n\n"
+           if tokenizer else
+           f"Server model identifier: `{args.model}`, also used as the tokenizer source.\n\n")
+        + "Replace `<LOCAL_ENDPOINT>` with the local OpenAI-compatible endpoint.\n\n"
         "```bash\n"
         f"{safe_command}\n"
         "```\n",
@@ -1522,6 +2163,23 @@ def run_prepare_command(args: argparse.Namespace) -> int:
         print(f"Installed {args.recipe} under {managed_setup.managed_root(storage_dir)}")
         print(f"Model: {manifest['model']['path']}")
         print(f"Runtime executable: {manifest['runtime']['executable_path']}")
+        # Say now whether that executable can actually load. Finding out at
+        # launch instead means a contributor downloads several gigabytes, sees
+        # "installed", and only then learns the machine is missing a system
+        # library. Reported, never installed.
+        libraries = managed_setup.check_runtime_libraries(
+            manifest["runtime"]["executable_path"],
+            expected_sha256=manifest["runtime"]["executable_sha256"])
+        if libraries.missing:
+            print(file=sys.stderr)
+            print(libraries.message, file=sys.stderr)
+            if libraries.detail:
+                print(libraries.detail, file=sys.stderr)
+            print("\nThe download is complete and verified; only this prerequisite is missing.",
+                  file=sys.stderr)
+            return 2
+        if libraries.checked:
+            print("Shared libraries: every library the runtime needs is present.")
         print("This is local, reviewed, verified evidence for setup only; it is not a benchmark result.")
         return 0
     except managed_setup.ManagedSetupError as error:
@@ -1587,6 +2245,16 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--profile", required=True, choices=sorted(PROFILE_SPECS), help="versioned OmoBench profile")
     run.add_argument("--output-dir", default=".omobench-runs", help="local staging directory, relative to repository root")
     run.add_argument("--execute", action="store_true", help="actually invoke GuideLLM; omit for a safe dry run")
+    run.add_argument(
+        "--tokenizer",
+        default=None,
+        help=(
+            "optional tokenizer source for building and counting the synthetic workload: a "
+            "Hugging Face repository id or a local tokenizer folder. Use it when --model is a "
+            "serving alias rather than a repository id. Omit to keep the existing default, which "
+            "is the --model value itself. This never changes which model the server serves."
+        ),
+    )
     run.add_argument(
         "--telemetry-dir",
         default=None,

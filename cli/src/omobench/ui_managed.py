@@ -212,6 +212,10 @@ class ManagedController:
                     # "measured requests". For chat-small-extended-v1 this is 50,
                     # even though its runner budget (max_requests, above) is 60.
                     "measured_requests": execution.get("measured_requests"),
+                    # How this profile's warmup/cooldown actually resolve, so a
+                    # recipe card can state a declared target as a declaration
+                    # rather than as a promise (see cli.profile_phase_contract).
+                    "phase_contract": omobench_cli.profile_phase_contract(self.root, recipe["benchmark_profile"]),
                 }
             )
         return results
@@ -338,17 +342,55 @@ class ManagedController:
                 job["progress"][label] = {"done": done, "total": total}
 
         try:
-            managed_setup.download_and_install(self.root, job["recipe"], storage_dir, progress=progress, cancel_event=cancel_event)
+            manifest = managed_setup.download_and_install(
+                self.root, job["recipe"], storage_dir, progress=progress, cancel_event=cancel_event)
+            # The files are downloaded and verified; that is not the same as
+            # the machine being able to run them. A missing system library
+            # makes llama-server exit before it opens a socket, and learning
+            # that only when the benchmark starts wastes the whole download.
+            #
+            # Only a *named missing library* blocks here. Anything else the
+            # check can report -- it could not run, or the path it was given is
+            # not a file -- is not this stage's business and is caught by
+            # verify_installed at launch, so an unusable check never turns a
+            # good download into a failure.
+            missing = self._missing_runtime_libraries(manifest)
             with self.lock:
-                job["status"] = "cancelled" if cancel_event.is_set() else "completed"
+                if cancel_event.is_set():
+                    job["status"] = "cancelled"
+                elif missing is not None:
+                    job["status"] = "failed"
+                    job["error"] = missing
+                else:
+                    job["status"] = "completed"
         except managed_setup.ManagedSetupError as error:
             with self.lock:
                 job["status"] = "cancelled" if cancel_event.is_set() else "failed"
                 job["error"] = str(error)
+        except Exception as error:  # noqa: BLE001
+            # A job that never reaches a terminal status leaves the page
+            # waiting for ever. Whatever went wrong, say so and stop.
+            with self.lock:
+                job["status"] = "cancelled" if cancel_event.is_set() else "failed"
+                job["error"] = f"Preparation stopped unexpectedly: {error}"
         finally:
             with self.lock:
                 job["finished_at"] = datetime.now(UTC).isoformat()
                 self.cancel_events.pop(job["id"], None)
+
+    def _missing_runtime_libraries(self, manifest: Any) -> str | None:
+        """The prerequisite message, or None when there is nothing to report."""
+        from . import managed_setup
+
+        try:
+            runtime = manifest["runtime"]
+            executable, checksum = runtime["executable_path"], runtime["executable_sha256"]
+        except (TypeError, KeyError):
+            return None
+        status = managed_setup.check_runtime_libraries(executable, expected_sha256=checksum)
+        if not status.missing:
+            return None
+        return status.message + ("\n\n" + status.detail if status.detail else "")
 
     def setup_job_detail(self, job_id: str) -> dict:
         with self.lock:

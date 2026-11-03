@@ -318,6 +318,273 @@ def check_platform() -> PlatformStatus:
     return PlatformStatus(True, f"Linux x86_64 with glibc {glibc[0]}.{glibc[1]}: ready for the managed CPU recipe.")
 
 
+# Shared libraries a managed CPU runtime build links against, and the
+# Debian/Ubuntu package that provides each one. This table exists only so a
+# failure can name the package instead of a bare filename: nothing here is ever
+# installed, and the command below is printed for the contributor to run, never
+# executed. A library that is not in this table is still reported by name.
+# Shared libraries a managed CPU runtime build links against, and the
+# Debian/Ubuntu package that provides each one. This table exists only so a
+# failure can name a package instead of a bare filename, and it is used only
+# where the running distribution is actually Debian-derived: nothing here is
+# ever installed, and the command is printed for the contributor to run.
+RUNTIME_LIBRARY_PACKAGES = {
+    "libgomp.so.1": "libgomp1",
+    "libstdc++.so.6": "libstdc++6",
+    "libgcc_s.so.1": "libgcc-s1",
+    "libc.so.6": "libc6",
+    "libm.so.6": "libc6",
+    "libpthread.so.0": "libc6",
+    "libdl.so.2": "libc6",
+    "librt.so.1": "libc6",
+    "libcurl.so.4": "libcurl4",
+    "libgfortran.so.5": "libgfortran5",
+    "libopenblas.so.0": "libopenblas0-pthread",
+}
+
+_LDD_MISSING = re.compile(r"^[ \t]*(?P<name>\S+)[ \t]*=>[ \t]*not found[ \t]*$", re.MULTILINE)
+
+# Bounds on what a probe may cost or report. `ldd` on a correct binary prints a
+# few dozen lines; anything beyond these is a malfunction, not information.
+LDD_TIMEOUT_SECONDS = 20.0
+LDD_MAX_OUTPUT_CHARS = 16384
+LDD_MAX_REPORTED_LIBRARIES = 16
+
+
+def debian_family() -> bool:
+    """Is this distribution one where `apt` and these package names apply?
+
+    Read from /etc/os-release rather than assumed. A contributor on Fedora,
+    Arch or openSUSE gets the library named and no package manager command,
+    because `sudo apt install libgomp1` there is noise at best.
+    """
+    try:
+        text = Path("/etc/os-release").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    identifiers: set[str] = set()
+    for line in text.splitlines():
+        key, _, value = line.partition("=")
+        if key in {"ID", "ID_LIKE"}:
+            identifiers.update(value.strip().strip('"').split())
+    return bool(identifiers & {"debian", "ubuntu"})
+
+
+@dataclass
+class RuntimeLibraryStatus:
+    """Whether the managed runtime binary's shared libraries can be resolved.
+
+    `ok` False with a non-empty `missing` is a prerequisite failure. `ok` True
+    with `checked` False is a probe that could not be completed, which is never
+    reported as a verified environment.
+    """
+
+    ok: bool
+    checked: bool
+    missing: list[str]
+    packages: list[str]
+    message: str
+    detail: str = ""
+    integrity_verified: bool = False
+
+
+def _unchecked(message: str, detail: str = "", *, integrity_verified: bool = False) -> RuntimeLibraryStatus:
+    """A probe that could not be completed. Not a failed prerequisite."""
+    return RuntimeLibraryStatus(
+        ok=True, checked=False, missing=[], packages=[],
+        message=message, detail=detail[:LDD_MAX_OUTPUT_CHARS],
+        integrity_verified=integrity_verified,
+    )
+
+
+def run_ldd(executable_path: str, timeout: float = LDD_TIMEOUT_SECONDS) -> Any:
+    """Run `ldd` on one path, as an argument vector, in its own process group.
+
+    No shell is involved, so the path is never word-split or expanded however
+    it is spelled. The child gets its own session: on timeout the whole group
+    is killed rather than just the `ldd` script, because `ldd` runs the dynamic
+    loader as a further child and killing only the parent would leave it.
+    """
+    import signal
+    import subprocess
+
+    popen_arguments: dict[str, Any] = {}
+    if os.name != "nt":
+        popen_arguments["start_new_session"] = True
+    process = subprocess.Popen(
+        ["ldd", "--", executable_path],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        **popen_arguments,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if os.name != "nt":
+            with contextlib.suppress(ProcessLookupError, OSError):
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        else:  # pragma: no cover - the managed runtime is Linux only
+            process.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.communicate(timeout=5)
+        raise
+
+    class Completed:
+        pass
+
+    result = Completed()
+    result.stdout = (stdout or "")[:LDD_MAX_OUTPUT_CHARS]
+    result.stderr = (stderr or "")[:LDD_MAX_OUTPUT_CHARS]
+    result.returncode = process.returncode
+    return result
+
+
+def check_runtime_libraries(
+    executable_path: Path | str,
+    *,
+    expected_sha256: str | None = None,
+    runner: Callable[[str], Any] | None = None,
+    timeout: float = LDD_TIMEOUT_SECONDS,
+) -> RuntimeLibraryStatus:
+    """Can the managed model server's own binary actually load?
+
+    The Python runner health check establishes that OmoBench and GuideLLM
+    import. It says nothing about `llama-server`, which is a separate native
+    executable with its own shared-library dependencies -- and on a clean
+    distribution one of them is routinely absent. A machine that passed every
+    existing check still failed here with
+
+        llama-server: error while loading shared libraries:
+        libgomp.so.1: cannot open shared object file: No such file or directory
+
+    which the launcher could only report as "the managed model server exited
+    early with code 127", after the model had been downloaded and verified.
+
+    **This probe is not inert.** `ldd` resolves a binary's dependencies by
+    asking the dynamic loader, and on glibc it may do so by running the program
+    itself with `LD_TRACE_LOADED_OBJECTS` set; its own manual page warns
+    against using it on an untrusted executable because that can execute
+    arbitrary code. An earlier version of this docstring claimed it does not
+    execute the binary, which was wrong.
+
+    So the probe is bounded to a binary whose bytes have just been established:
+    pass `expected_sha256` and the file is re-hashed here, immediately before
+    `ldd` is invoked, and the probe is skipped entirely on a mismatch. That is
+    deliberately not "the installer checked it earlier" -- a checksum taken at
+    download time says nothing about the file at probe time, and this is the
+    only window that matters. Without `expected_sha256` nothing is probed and
+    the result is `checked=False`, so an arbitrary path can never reach `ldd`
+    through this function.
+
+    A library the loader cannot find is reported by name, with the package that
+    provides it **on Debian-derived distributions only** and the exact command
+    to install it. OmoBench never installs a system package itself, and nothing
+    needs downloading again: the model and runtime are already installed and
+    verified.
+
+    If `ldd` is unavailable, times out, or cannot interpret the file, this
+    reports `checked=False` and `ok=True`: an unverifiable prerequisite is not
+    evidence of a broken one, and must not block a launch that would work.
+    """
+    import subprocess
+
+    path = Path(executable_path)
+    if not path.is_file():
+        return RuntimeLibraryStatus(
+            ok=False, checked=True, missing=[], packages=[],
+            message=f"The managed runtime executable is missing: {path}.",
+        )
+    if sys.platform == "win32":
+        return _unchecked(
+            "Shared-library prerequisites are checked on Linux/WSL2, where the runtime runs.")
+
+    if expected_sha256 is None:
+        return _unchecked(
+            "The runtime's shared libraries were not checked.",
+            "No verified checksum was supplied for this executable, and this check does not "
+            "inspect a binary whose bytes have not just been established.")
+    try:
+        actual_sha256 = sha256_of_file(path)
+    except OSError as error:
+        return _unchecked("The runtime executable could not be read.", str(error))
+    if actual_sha256 != expected_sha256:
+        return RuntimeLibraryStatus(
+            ok=False, checked=True, missing=[], packages=[],
+            message="The managed runtime executable is not the one that was installed.",
+            detail=(
+                f"{path}\n\nIts checksum is {actual_sha256}, but the installation recorded "
+                f"{expected_sha256}. Nothing was inspected or started. Re-run the download to "
+                "reinstall the reviewed runtime."),
+        )
+
+    try:
+        completed = runner(str(path)) if runner is not None else run_ldd(str(path), timeout)
+    except FileNotFoundError:
+        return _unchecked(
+            "ldd is not available here, so the runtime's shared libraries were not checked.",
+            "If the managed server exits immediately, its log will name the missing library.",
+            integrity_verified=True)
+    except subprocess.TimeoutExpired:
+        return _unchecked(
+            "Checking the runtime's shared libraries timed out.",
+            f"ldd did not finish within {timeout:.0f}s and was stopped.",
+            integrity_verified=True)
+    except Exception as error:  # noqa: BLE001 - a failed check is never a failed prerequisite
+        return _unchecked("The runtime's shared libraries could not be checked.", str(error),
+                          integrity_verified=True)
+
+    stdout = str(getattr(completed, "stdout", "") or "")[:LDD_MAX_OUTPUT_CHARS]
+    stderr = str(getattr(completed, "stderr", "") or "")[:LDD_MAX_OUTPUT_CHARS]
+    output = f"{stdout}\n{stderr}"
+    missing: list[str] = []
+    for match in _LDD_MISSING.finditer(output):
+        name = match.group("name")
+        if name not in missing and len(missing) < LDD_MAX_REPORTED_LIBRARIES:
+            missing.append(name)
+
+    if not missing:
+        if getattr(completed, "returncode", 0) != 0:
+            return _unchecked("The runtime's shared libraries could not be checked.",
+                              output.strip()[:1000], integrity_verified=True)
+        return RuntimeLibraryStatus(
+            ok=True, checked=True, missing=[], packages=[],
+            message="Every shared library the managed runtime needs is present.",
+            integrity_verified=True)
+
+    packages = []
+    for name in missing:
+        package = RUNTIME_LIBRARY_PACKAGES.get(name)
+        if package and package not in packages:
+            packages.append(package)
+
+    named = ", ".join(missing)
+    if packages and debian_family():
+        install = "sudo apt update && sudo apt install -y " + " ".join(packages)
+        remedy = (
+            "Install the package that provides it, from inside this Linux distribution:\n"
+            f"    {install}\n"
+            "That needs your Linux password, so OmoBench does not run it for you.")
+    elif packages:
+        remedy = (
+            "Install the package your distribution ships it in. OmoBench does not install "
+            f"system packages for you. On Debian and Ubuntu it is {' '.join(packages)}; on "
+            "other distributions the package name differs, so look it up for yours.")
+    else:
+        remedy = (
+            "Install the package your distribution ships it in. OmoBench does not install "
+            "system packages for you.")
+    return RuntimeLibraryStatus(
+        ok=False, checked=True, missing=missing, packages=packages,
+        message=(
+            f"The managed model server cannot start: its runtime needs {named}, which this "
+            "system does not have."),
+        detail=(
+            f"{remedy}\n\nThe model and the runtime are already downloaded and verified; "
+            "nothing is downloaded again, and the benchmark is unaffected. Re-run the same "
+            "command once the package is installed."),
+        integrity_verified=True,
+    )
+
+
 def normalize_storage_dir(raw: str) -> Path:
     """Validate a contributor-supplied storage folder without converting it.
 
@@ -920,6 +1187,10 @@ def verify_installed(root: Path, recipe: dict[str, Any] | str, storage_dir: Path
     return {
         "model_path": model_path,
         "executable_path": executable_path,
+        # Carried out so a caller can bound anything it then does to this
+        # executable to the exact bytes verified here, rather than to a
+        # checksum taken when it was downloaded.
+        "executable_sha256": executable_sha256,
         "model_id": recipe["model_id"],
         "benchmark_profile": recipe["benchmark_profile"],
     }

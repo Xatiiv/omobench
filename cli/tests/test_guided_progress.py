@@ -216,5 +216,26 @@ class GuidedHistoryDisplayTests(unittest.TestCase):
         self.assertTrue(self.states["historyActiveTab"]["progressVisible"])
 
 
+class GuidedLocalExportTests(unittest.TestCase):
+    """Saving a local result and preparing a submission are separate here too."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.states = _render_states()
+
+    def test_the_results_screen_exports_the_panels_own_local_report(self):
+        export = self.states["localExport"]
+        self.assertEqual(export["requests"], ["GET /api/runs/job-aaaaaaaaaaaaaaaa/local-report"])
+        self.assertTrue(export["name"].endswith("-local-report.json"))
+        self.assertEqual(export["kind"], "omobench-local-report")
+
+    def test_the_share_screen_lists_every_publication_requirement(self):
+        checklist = self.states["publicationChecklist"]
+        self.assertIn("fail:Canonical model ID is in the OmoBench catalog", checklist["items"])
+        self.assertIn("fail:Immutable revision of the actual weights source", checklist["items"])
+        self.assertIn("requirements still missing", checklist["summary"])
+        self.assertIn("Save local report", checklist["summary"])
+
+
 if __name__ == "__main__":
     unittest.main()

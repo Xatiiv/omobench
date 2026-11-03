@@ -12,6 +12,14 @@ from unittest.mock import patch
 from omobench import launcher, managed_setup as ms
 
 
+
+def _sha256(path) -> str:
+    """The checksum a real installation would have recorded for this file."""
+    import hashlib
+    from pathlib import Path as _Path
+
+    return hashlib.sha256(_Path(path).read_bytes()).hexdigest()
+
 FIXTURE_RECIPE = {
     "id": "fixture-recipe",
     "model_id": "Fixture/Alias",
@@ -80,6 +88,9 @@ class ManagedServerLifecycleTests(unittest.TestCase):
             return_value={
                 "model_path": self.model_path,
                 "executable_path": self.executable,
+                # The check bounds itself to bytes just established, so a
+                # fixture must carry a real checksum like a real install.
+                "executable_sha256": _sha256(self.executable),
                 "model_id": "Fixture/Alias",
                 "benchmark_profile": "chat-small-v1",
             },
@@ -142,6 +153,82 @@ class ManagedServerLifecycleTests(unittest.TestCase):
                 launcher.run_smoke(self.root, "fixture-recipe", self.root)
             popen.assert_not_called()
 
+    def test_missing_shared_library_blocks_before_spawning(self):
+        """A runtime whose libraries cannot be resolved is never started.
+
+        This is the second-machine failure: every file verified, every hash
+        correct, the Python runner importing cleanly, and llama-server still
+        unable to load libgomp.so.1. Caught before a process is spawned, so
+        the message names the library instead of an exit code.
+        """
+        with patch(
+            "omobench.managed_setup.check_runtime_libraries",
+            return_value=ms.RuntimeLibraryStatus(
+                ok=False, checked=True, missing=["libgomp.so.1"], packages=["libgomp1"],
+                message="The managed model server cannot start: its runtime needs "
+                        "libgomp.so.1, which this system does not have.",
+                detail="sudo apt update && sudo apt install -y libgomp1"),
+        ), patch("omobench.launcher.subprocess.Popen") as popen:
+            with self.assertRaisesRegex(launcher.LauncherError, "libgomp.so.1"):
+                launcher.run_smoke(self.root, "fixture-recipe", self.root)
+            popen.assert_not_called()
+
+    def test_the_advice_reaches_the_contributor_intact(self):
+        with patch(
+            "omobench.managed_setup.check_runtime_libraries",
+            return_value=ms.RuntimeLibraryStatus(
+                ok=False, checked=True, missing=["libgomp.so.1"], packages=["libgomp1"],
+                message="needs libgomp.so.1",
+                detail="sudo apt update && sudo apt install -y libgomp1"),
+        ):
+            with self.assertRaises(launcher.LauncherError) as caught:
+                launcher.run_smoke(self.root, "fixture-recipe", self.root)
+        self.assertIn("sudo apt update && sudo apt install -y libgomp1", str(caught.exception))
+
+    def test_a_check_that_cannot_run_does_not_block_a_working_server(self):
+        """The fixture server is a script, so ldd cannot interpret it.
+
+        The real check runs here, unpatched, and must let the launch through:
+        an unverifiable prerequisite is not a failed one.
+        """
+        status = ms.check_runtime_libraries(self.executable)
+        self.assertTrue(status.ok, status.message)
+        self.assertFalse(status.checked)
+        result = launcher.run_smoke(self.root, "fixture-recipe", self.root)
+        self.assertEqual(result["status"], "ready")
+
+    def test_an_early_exit_quotes_the_loader_error_from_the_log(self):
+        """An exit code on its own tells a contributor nothing."""
+        loader_failure = self.root / "loader-failure-server"
+        complaint = (
+            "llama-server: error while loading shared libraries: libgomp.so.1: "
+            "cannot open shared object file: No such file or directory"
+        )
+        loader_failure.write_text(
+            f"#!{sys.executable}\n"
+            "import sys\n"
+            f"sys.stdout.write({complaint!r} + '\\n')\n"
+            "sys.stdout.flush()\n"
+            "sys.exit(127)\n"
+        )
+        loader_failure.chmod(0o755)
+        log_path = self.root / "loader-failure.log"
+        with patch(
+            "omobench.managed_setup.verify_installed",
+            return_value={
+                "model_path": self.model_path,
+                "executable_path": loader_failure,
+                "executable_sha256": _sha256(loader_failure),
+                "model_id": "Fixture/Alias",
+                "benchmark_profile": "chat-small-v1",
+            },
+        ):
+            with self.assertRaises(launcher.LauncherError) as caught:
+                launcher.run_smoke(self.root, "fixture-recipe", self.root, log_path=log_path)
+        message = str(caught.exception)
+        self.assertIn("error while loading shared libraries", message)
+        self.assertIn("libgomp1", message)
+
     def test_cleanup_runs_even_when_server_never_becomes_ready(self):
         never_ready = self.root / "never-ready-server"
         write_fixture_server(never_ready, delay_ready=True)
@@ -150,6 +237,7 @@ class ManagedServerLifecycleTests(unittest.TestCase):
             return_value={
                 "model_path": self.model_path,
                 "executable_path": never_ready,
+                "executable_sha256": _sha256(never_ready),
                 "model_id": "Fixture/Alias",
                 "benchmark_profile": "chat-small-v1",
             },
@@ -169,6 +257,7 @@ class ManagedServerLifecycleTests(unittest.TestCase):
             return_value={
                 "model_path": self.model_path,
                 "executable_path": exits_immediately,
+                "executable_sha256": _sha256(exits_immediately),
                 "model_id": "Fixture/Alias",
                 "benchmark_profile": "chat-small-v1",
             },

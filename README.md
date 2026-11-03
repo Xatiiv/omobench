@@ -123,7 +123,7 @@ below; the default page is the guided benchmark instead.
 1. Enter the **Server address** and **Server model identifier** from your running
    server. Its address is different from the panel's port `8765`.
 2. Click **Test connection** and wait for the streaming connection confirmation.
-3. Choose `chat-small-v1` for a first run. Select **CPU** only after configuring
+3. Choose `chat-small-v2` for a first run. Select **CPU** only after configuring
    CPU execution in the server, or select **GPU** after confirming GPU inference
    in its logs or telemetry. Tick the confirmation.
 4. Click **Run benchmark**, watch the logs, and inspect the final measurements.
@@ -167,9 +167,21 @@ profile, accounting for model revision, quantization, and runtime differences.
 
 | Profile | Purpose | Target input / requested output | Streams | Request limit | Duration limit |
 | --- | --- | ---: | ---: | ---: | ---: |
-| `chat-small-v1` | Interactive chat responsiveness | 1,024 / 256 tokens | 1 | 50 | 900 s |
+| `chat-small-v2` | Interactive chat responsiveness | 1,024 / 256 tokens | 1 | 60 | 900 s |
+| `chat-small-extended-v1` | The same workload, for slower hosts | 1,024 / 256 tokens | 1 | 60 | 5,400 s |
+| `chat-small-v1` (legacy) | Interactive chat responsiveness | 1,024 / 256 tokens | 1 | 50 | 900 s |
 | `chat-long-v1` | Long-context chat latency | 8,192 / 512 tokens | 1 | 30 | 1,800 s |
 | `throughput-v1` | Sustained serving throughput | 1,024 / 256 tokens | 16 | 160 | 900 s |
+
+`chat-small-v2` is the short profile to use for a new run: its 5 warm-up, 50
+measured and 5 cool-down requests are counted as requests, so a complete run
+measures exactly the 50 it declares. `chat-small-v1` resolves those phases
+against the clock instead — its measured window is the middle 720 s of its
+900 s limit, so how many requests it measures depends entirely on how long each
+one takes. It stays available, unchanged, so earlier results can be reproduced;
+it is not interchangeable with v2, and results carry `profile_id` and
+`profile_sha256` so the two are never compared as one workload. See
+[the phase-mapping note](docs/proposals/profile-phase-mapping-v2.md).
 
 The CLI pins GuideLLM to `0.7.3`, sets a fixed synthetic-prompt seed, includes
 warm-up/cool-down phases, and passes request, duration, and 1% error-rate

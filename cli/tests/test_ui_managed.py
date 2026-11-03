@@ -20,6 +20,15 @@ from test_cli import GUIDELLM_REPORT_V2, install_guidellm_module_stub, patch_par
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def _sha256(path) -> str:
+    """The checksum a real installation would have recorded for this file."""
+    import hashlib
+    from pathlib import Path as _Path
+
+    return hashlib.sha256(_Path(path).read_bytes()).hexdigest()
+
+
+
 def make_root(root: Path) -> None:
     for relative in ("benchmarks", "catalog", "schema", "tools"):
         shutil.copytree(ROOT / relative, root / relative, ignore=shutil.ignore_patterns("__pycache__"))
@@ -103,7 +112,8 @@ class GuidedServiceTests(unittest.TestCase):
         self.assertEqual(status, 200)
         payload = json.loads(body)
         self.assertEqual(
-            [r["id"] for r in payload["recipes"]], ["qwen3-4b-cpu-v1", "qwen3-4b-cpu-extended-v1"]
+            [r["id"] for r in payload["recipes"]],
+            ["qwen3-4b-cpu-v2", "qwen3-4b-cpu-v1", "qwen3-4b-cpu-extended-v1"],
         )
 
     def test_extended_recipe_is_selectable_alongside_the_classic_one(self):
@@ -203,7 +213,8 @@ class GuidedServiceTests(unittest.TestCase):
             release.wait(5)
             if cancel_event is not None and cancel_event.is_set():
                 raise ms.ManagedSetupError("cancelled for test")
-            return {"model": {"path": "x"}, "runtime": {"executable_path": "y"}}
+            return {"model": {"path": "x"},
+                    "runtime": {"executable_path": "y", "executable_sha256": "0" * 64}}
 
         with patch("omobench.managed_setup.download_and_install", side_effect=fake_download_and_install):
             with tempfile.TemporaryDirectory() as storage:
@@ -247,7 +258,8 @@ class GuidedServiceTests(unittest.TestCase):
 
         def fake_download_and_install(root, recipe_id, storage_dir, *, progress=None, cancel_event=None):
             Path(storage_dir).mkdir(parents=True, exist_ok=True)  # the real installer creates it too
-            return {"model": {"path": "x"}, "runtime": {"executable_path": "y"}}
+            return {"model": {"path": "x"},
+                    "runtime": {"executable_path": "y", "executable_sha256": "0" * 64}}
 
         with patch("omobench.managed_setup.download_and_install", side_effect=fake_download_and_install):
             with tempfile.TemporaryDirectory() as storage:
@@ -267,6 +279,96 @@ class GuidedServiceTests(unittest.TestCase):
                 status, _, body = self.request("/api/managed/recipes", self.auth())
                 self.assertEqual(status, 200)
                 self.assertEqual(json.loads(body)["default_storage_dir"], storage_dir)
+
+    def test_a_missing_system_library_fails_preparation_with_the_command_to_fix_it(self):
+        """A verified download onto a machine that cannot run it is not "ready".
+
+        This is the second-machine failure reported from a clean Ubuntu: every
+        file correct, and llama-server unable to load libgomp.so.1. Surfaced
+        when preparation finishes, so the next step is one apt command rather
+        than a benchmark that dies with exit code 127.
+        """
+
+        def fake_download_and_install(root, recipe_id, storage_dir, *, progress=None, cancel_event=None):
+            Path(storage_dir).mkdir(parents=True, exist_ok=True)
+            return {"model": {"path": "x"},
+                    "runtime": {"executable_path": "y", "executable_sha256": "0" * 64}}
+
+        missing = ms.RuntimeLibraryStatus(
+            ok=False, checked=True, missing=["libgomp.so.1"], packages=["libgomp1"],
+            message="The managed model server cannot start: its runtime needs libgomp.so.1, "
+                    "which this system does not have.",
+            detail="sudo apt update && sudo apt install -y libgomp1")
+
+        with patch("omobench.managed_setup.download_and_install", side_effect=fake_download_and_install),              patch("omobench.managed_setup.check_runtime_libraries", return_value=missing):
+            with tempfile.TemporaryDirectory() as storage:
+                status, _, body = self.post(
+                    "/api/managed/setup-jobs",
+                    {"recipe": "qwen3-4b-cpu-v1", "storage_dir": str(Path(storage) / "s"), "confirmed": True},
+                )
+                self.assertEqual(status, 202, body)
+                job_id = json.loads(body)["id"]
+
+                def finished():
+                    detail = json.loads(self.request(f"/api/managed/setup-jobs/{job_id}", self.auth())[2])
+                    return detail["status"] in {"failed", "completed", "cancelled"}
+
+                wait_for(finished)
+                detail = json.loads(self.request(f"/api/managed/setup-jobs/{job_id}", self.auth())[2])
+                self.assertEqual(detail["status"], "failed")
+                self.assertIn("libgomp.so.1", detail["error"])
+                self.assertIn("sudo apt update && sudo apt install -y libgomp1", detail["error"])
+
+    def test_a_prerequisite_check_that_cannot_run_does_not_fail_preparation(self):
+        """An unverifiable prerequisite is not a failed one."""
+
+        def fake_download_and_install(root, recipe_id, storage_dir, *, progress=None, cancel_event=None):
+            Path(storage_dir).mkdir(parents=True, exist_ok=True)
+            return {"model": {"path": "x"},
+                    "runtime": {"executable_path": "y", "executable_sha256": "0" * 64}}
+
+        unchecked = ms.RuntimeLibraryStatus(
+            ok=True, checked=False, missing=[], packages=[],
+            message="ldd is not available here, so the runtime's shared libraries were not checked.")
+
+        with patch("omobench.managed_setup.download_and_install", side_effect=fake_download_and_install),              patch("omobench.managed_setup.check_runtime_libraries", return_value=unchecked):
+            with tempfile.TemporaryDirectory() as storage:
+                status, _, body = self.post(
+                    "/api/managed/setup-jobs",
+                    {"recipe": "qwen3-4b-cpu-v1", "storage_dir": str(Path(storage) / "s"), "confirmed": True},
+                )
+                job_id = json.loads(body)["id"]
+
+                def finished():
+                    detail = json.loads(self.request(f"/api/managed/setup-jobs/{job_id}", self.auth())[2])
+                    return detail["status"] in {"failed", "completed", "cancelled"}
+
+                wait_for(finished)
+                detail = json.loads(self.request(f"/api/managed/setup-jobs/{job_id}", self.auth())[2])
+                self.assertEqual(detail["status"], "completed", detail.get("error"))
+
+    def test_an_unexpected_failure_never_leaves_a_job_running_for_ever(self):
+        """The page waits on a terminal status; something must always arrive."""
+
+        def explode(root, recipe_id, storage_dir, *, progress=None, cancel_event=None):
+            raise RuntimeError("something nobody anticipated")
+
+        with patch("omobench.managed_setup.download_and_install", side_effect=explode):
+            with tempfile.TemporaryDirectory() as storage:
+                status, _, body = self.post(
+                    "/api/managed/setup-jobs",
+                    {"recipe": "qwen3-4b-cpu-v1", "storage_dir": str(Path(storage) / "s"), "confirmed": True},
+                )
+                job_id = json.loads(body)["id"]
+
+                def finished():
+                    detail = json.loads(self.request(f"/api/managed/setup-jobs/{job_id}", self.auth())[2])
+                    return detail["status"] in {"failed", "completed", "cancelled"}
+
+                wait_for(finished)
+                detail = json.loads(self.request(f"/api/managed/setup-jobs/{job_id}", self.auth())[2])
+                self.assertEqual(detail["status"], "failed")
+                self.assertIn("something nobody anticipated", detail["error"])
 
     # -- run mode validation ------------------------------------------------------
 
@@ -364,6 +466,7 @@ class GuidedRunLifecycleTests(unittest.TestCase):
             return_value={
                 "model_path": self.model_path,
                 "executable_path": self.llama_server,
+                "executable_sha256": _sha256(self.llama_server),
                 "model_id": "Fixture/Alias",
                 "benchmark_profile": "chat-small-v1",
             },

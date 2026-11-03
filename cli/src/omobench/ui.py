@@ -92,8 +92,13 @@ def endpoint_origin(endpoint: str) -> str:
             or url.username is not None or url.password is not None
             or url.query or url.fragment or url.path.rstrip("/") not in {"", "/v1"}
             or port == 0):
-        raise UIError("Use a localhost model server, such as http://127.0.0.1:8092. "
-                      "Remote servers and credentials in URLs are not supported by this local panel.")
+        raise UIError(
+            "Enter the loopback address your model server listens on, such as "
+            "http://127.0.0.1:<port> (an optional /v1 suffix is accepted). This panel only "
+            "contacts loopback addresses on the machine the benchmark runner runs on: it "
+            "records that machine's hardware as the result's hardware, and it must not be "
+            "usable to reach arbitrary hosts. A server on another machine, or on the Windows "
+            "side of a WSL runner, needs a loopback forwarder you set up yourself.")
     return f"{url.scheme}://{url.netloc}"
 
 
@@ -110,7 +115,18 @@ def run_config(data: dict) -> dict:
         raise UIError("Choose CPU or GPU execution.")
     if data.get("device_confirmed") is not True:
         raise UIError("Confirm the execution device in your model server first.")
-    return {"endpoint": endpoint, "model": model, "profile": profile, "execution_device": device}
+    # Two separate identities. `model` is the exact string the server's API
+    # accepts; `tokenizer` is the repository or folder whose tokenizer builds
+    # and counts the workload. Blank keeps GuideLLM's existing default, which
+    # is to use `model` for both.
+    tokenizer = text_field(data, "tokenizer", optional=True)
+    if tokenizer:
+        try:
+            tokenizer = cli.validate_tokenizer_source(tokenizer)
+        except ValueError as error:
+            raise UIError(str(error)) from error
+    return {"endpoint": endpoint, "model": model, "profile": profile,
+            "execution_device": device, "tokenizer": tokenizer or None}
 
 
 def safe_log(value: str) -> str:
@@ -124,6 +140,26 @@ def safe_log(value: str) -> str:
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         raise UIError("The model server redirected the request. Enter its direct localhost address.")
+
+
+def streaming_probe(endpoint: str, model: str) -> tuple[str, str]:
+    """One small streaming request, reported rather than raised.
+
+    This is the check that matters: OmoBench's workload is streaming
+    `/v1/chat/completions`, so a server that answers /v1/models but cannot
+    stream chat completions cannot run a benchmark.
+    """
+    try:
+        probe_connection({"endpoint": endpoint, "model": model})
+    except UIError as error:
+        message = str(error)
+        if "redirected" in message or "streaming" in message or "chunk" in message:
+            return "failed", (
+                message + " OmoBench's workload is streaming /v1/chat/completions; a server that "
+                "cannot stream it cannot run this benchmark, whatever else it supports.")
+        return "failed", message
+    return "ok", ("One small streaming chat completion arrived, so this server accepts this identifier "
+                  "and streams responses. The test request is not benchmark evidence.")
 
 
 def probe_connection(data: dict) -> dict:
@@ -149,9 +185,163 @@ def probe_connection(data: dict) -> dict:
                         return {"message": "Streaming connection works. The test request is not benchmark evidence."}
             raise UIError("No valid streaming chat chunk arrived.")
     except HTTPError as error:
-        raise UIError(f"The model server returned HTTP {error.code}. Check the model identifier and server settings.") from error
+        raise UIError(
+            f"The model server answered HTTP {error.code} for a streaming chat completion. "
+            "That usually means the model identifier is not the one it serves, or the server "
+            "rejects this request shape.") from error
     except (URLError, TimeoutError, OSError, ValueError) as error:
         raise UIError("Could not read a streaming response. Check that the model is loaded and the server is running.") from error
+
+
+def served_models(endpoint: str, *, timeout: float = 8.0) -> dict:
+    """Ask the server which models it serves, if it implements that endpoint.
+
+    Only the endpoint the contributor entered is contacted, and only on
+    loopback; nothing is discovered, scanned or guessed. A server that does not
+    implement /v1/models is normal, not a failure.
+    """
+    request = Request(endpoint + "/v1/models", headers={"Accept": "application/json"})
+    try:
+        with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=timeout) as response:
+            document = json.loads(response.read(1024 * 1024))
+    except HTTPError as error:
+        code = error.code
+        error.close()
+        # The server answered, so it is reachable; it simply does not offer a listing.
+        return {"models": None, "reachable": True, "detail":
+                f"This server answered HTTP {code} for /v1/models, so its served identifiers could not be listed."}
+    except UIError as error:
+        return {"models": None, "reachable": True, "detail": str(error)}
+    except (URLError, TimeoutError, OSError) as error:
+        return {"models": None, "reachable": False, "detail": f"No response from {endpoint}: {type(error).__name__}."}
+    except ValueError:
+        return {"models": None, "reachable": True,
+                "detail": "This server's /v1/models response was not readable JSON."}
+    entries = document.get("data") if isinstance(document, dict) else None
+    if not isinstance(entries, list):
+        return {"models": None, "reachable": True,
+                "detail": "This server's /v1/models response did not contain a model list."}
+    identifiers = [entry["id"] for entry in entries
+                   if isinstance(entry, dict) and isinstance(entry.get("id"), str) and entry["id"]]
+    if not identifiers:
+        return {"models": [], "reachable": True,
+                "detail": "This server listed no models. Load a model in the server first."}
+    return {"models": identifiers, "reachable": True,
+            "detail": "Served identifiers listed by the server itself."}
+
+
+def server_check(data: dict, *, can_execute: bool = True, runner_message: str = "",
+                 runner_health: Any = None) -> dict:
+    """What can actually be established about a contributor's own server.
+
+    Deliberately staged rather than a single pass/fail: "the server answered"
+    and "this benchmark can run" are different claims, and a working
+    /v1/models response establishes neither streaming support nor a usable
+    tokenizer. Every stage says what it checked, and the report ends by naming
+    what it did not establish.
+
+    Runs in this process, which is the same environment the benchmark runner is
+    launched from, so a reachability result here is a reachability result for
+    the run.
+    """
+    stages: list[dict] = []
+    model = text_field(data, "model", optional=True)
+    tokenizer = text_field(data, "tokenizer", optional=True)
+
+    def stage(identifier, title, state, detail, **extra):
+        stages.append({"id": identifier, "title": title, "state": state, "detail": detail, **extra})
+
+    try:
+        endpoint = endpoint_origin(text_field(data, "endpoint"))
+        stage("endpoint", "Server address accepted", "ok",
+              f"{endpoint} is a loopback address on this machine, which is where the runner runs.")
+    except UIError as error:
+        stage("endpoint", "Server address accepted", "failed", str(error))
+        for identifier, title in (("runner", "Benchmark runner available"),
+                                  ("reachable", "Server reachable"),
+                                  ("model", "Served model identifier"),
+                                  ("streaming", "Streaming chat completions"),
+                                  ("tokenizer", "Tokenizer source")):
+            stage(identifier, title, "skipped", "Not attempted: enter a usable server address first.")
+        return {"stages": stages, "models": None, "ready": False,
+                "checked_from": checked_from(can_execute),
+                "not_established": NOT_ESTABLISHED}
+
+    # Installed metadata is not health. When a real import was attempted, that
+    # is what this stage reports; otherwise it says only what it checked.
+    if runner_health is not None:
+        stage("runner", "Benchmark runner imports", "ok" if runner_health.ok else "failed",
+              runner_health.message, detail_extra=runner_health.detail or None,
+              checked="the runner was imported in a separate, bounded process; "
+                      "nothing was downloaded and no inference ran")
+    else:
+        stage("runner", "Benchmark runner available", "ok" if can_execute else "failed",
+              (runner_message or ("This environment can run the benchmark." if can_execute
+                                  else "This environment cannot run the benchmark."))
+              + " This checked installed metadata only, not whether the runner imports.")
+
+    listing = served_models(endpoint)
+    identifiers, listing_detail = listing["models"], listing["detail"]
+    if not listing["reachable"]:
+        stage("reachable", "Server reachable", "failed",
+              listing_detail + " Start the model server, confirm its port, and confirm it listens on "
+              "loopback on this machine rather than only on another interface or another host.")
+        stage("model", "Served model identifier", "skipped", "Not attempted: the server did not answer.")
+        stage("streaming", "Streaming chat completions", "skipped", "Not attempted: the server did not answer.")
+    else:
+        stage("reachable", "Server reachable", "ok", "The server answered this panel's request.")
+        if identifiers is None:
+            stage("model", "Served model identifier", "unknown",
+                  listing_detail + " Enter the identifier your server documents; the streaming check below "
+                  "is what actually proves the identifier works.")
+        elif not model:
+            stage("model", "Served model identifier", "unknown",
+                  "Choose one of the identifiers this server listed.", options=identifiers)
+        elif model in identifiers:
+            stage("model", "Served model identifier", "ok",
+                  f"{model} is served by this server.", options=identifiers)
+        else:
+            stage("model", "Served model identifier", "failed",
+                  f"This server does not list {model}. It serves: {', '.join(identifiers)}. "
+                  "Use the identifier exactly as the server reports it, including any suffix.",
+                  options=identifiers)
+        if model:
+            state, detail = streaming_probe(endpoint, model)
+            stage("streaming", "Streaming chat completions", state, detail)
+        else:
+            stage("streaming", "Streaming chat completions", "skipped",
+                  "Not attempted: enter or choose a served model identifier first.")
+
+    report = cli.tokenizer_source_report(tokenizer, served_model=model or None)
+    stage("tokenizer", "Tokenizer source", "ok" if report["ok"] else "failed", report["message"],
+          cached=report.get("cached"), kind=report["kind"], source=report["source"],
+          checks=report.get("checks", []))
+
+    # "Ready" means every check passed, except that a server which does not
+    # publish a model list leaves that one unconfirmable -- which must not block
+    # a run the server itself accepted.
+    ready = bool(model) and all(
+        entry["state"] == "ok" or (entry["id"] == "model" and entry["state"] == "unknown")
+        for entry in stages)
+    return {"stages": stages, "models": identifiers, "ready": ready,
+            "checked_from": checked_from(can_execute),
+            "not_established": NOT_ESTABLISHED}
+
+
+def checked_from(can_execute: bool) -> str:
+    return ("Checked from the environment that launches the benchmark runner"
+            if can_execute else
+            "Checked from this panel process, which cannot run the benchmark itself")
+
+
+# Things no reachability or syntax check can establish, stated rather than implied.
+NOT_ESTABLISHED = [
+    "That this tokenizer matches the weights the server actually loaded. Loading a tokenizer "
+    "proves only that its files parse.",
+    "Which device performed inference. CPU or GPU is your declaration about the server.",
+    "The throughput or latency of a full profile run, which only a benchmark measures.",
+    "That the result qualifies for the community registry, which is a separate check.",
+]
 
 
 class Controller:
@@ -222,17 +412,12 @@ class Controller:
         report = cli.doctor_report()
         preflight = cli.guidellm_runner_preflight()
         native_windows = sys.platform == "win32"
-        catalog = []
-        import yaml
-        for path in sorted((self.root / "catalog" / "models").glob("*.yaml")):
-            try:
-                document = yaml.safe_load(path.read_text(encoding="utf-8"))
-                catalog.extend(entry["id"] for entry in document.get("models", [])
-                               if isinstance(entry, dict) and entry.get("modality") == "text-generation" and isinstance(entry.get("id"), str))
-            except (OSError, ValueError, AttributeError, yaml.YAMLError):
-                continue
         return {"environment": report, "profiles": cli.PROFILE_SPECS,
-                "frameworks": cli.RUNTIME_FRAMEWORKS, "catalog": sorted(set(catalog)),
+                # How each profile's phases really resolve, so a page can mark a
+                # profile whose declaration its runner does not enforce.
+                "profile_contracts": {profile_id: cli.profile_phase_contract(self.root, profile_id)
+                                      for profile_id in cli.PROFILE_SPECS},
+                "frameworks": cli.RUNTIME_FRAMEWORKS, "catalog": self.catalog_models(),
                 "can_execute": not native_windows and preflight.ok,
                 "runner_message": ("Start this panel from WSL2 or Linux to execute benchmarks." if native_windows else
                     preflight.message),
@@ -268,6 +453,7 @@ class Controller:
             directory.mkdir()
             job = {"id": job_id, "created_at": datetime.now(UTC).isoformat(), "status": "running",
                    "model": config["model"], "profile": config["profile"], "execution_device": config["execution_device"],
+                   "tokenizer": config.get("tokenizer"),
                    "summary": None, "error": None, "validation": None, "submission": None}
             self.jobs[job_id] = job
             self._save(job)
@@ -275,6 +461,8 @@ class Controller:
             arguments = ["run", f"--endpoint={config['endpoint']}", f"--model={config['model']}",
                          f"--profile={config['profile']}", f"--output-dir={directory.relative_to(self.root).as_posix()}",
                          f"--telemetry-dir={telemetry_dir}", "--execute"]
+            if config.get("tokenizer"):
+                arguments.append(f"--tokenizer={config['tokenizer']}")
             self.worker = threading.Thread(target=self._execute, args=(job, arguments), daemon=True)
             self.worker.start()
             return dict(job)
@@ -405,6 +593,281 @@ class Controller:
         job["log"] = "\n".join(logs)
         return job
 
+    def catalog_models(self) -> list[str]:
+        """The catalogued model IDs, the registry's own source of truth."""
+        import yaml
+
+        catalog: list[str] = []
+        for path in sorted((self.root / "catalog" / "models").glob("*.yaml")):
+            try:
+                document = yaml.safe_load(path.read_text(encoding="utf-8"))
+                catalog.extend(entry["id"] for entry in document.get("models", [])
+                               if isinstance(entry, dict) and entry.get("modality") == "text-generation"
+                               and isinstance(entry.get("id"), str))
+            except (OSError, ValueError, AttributeError, yaml.YAMLError):
+                continue
+        return sorted(set(catalog))
+
+    def local_report(self, job_id: str) -> dict:
+        """A local record of what this machine measured.
+
+        Deliberately not the public result.json contract: it needs no
+        publication metadata, works for an uncatalogued model and an unknown
+        revision, and says "unknown" instead of inventing anything. It carries
+        measurements and the identities OmoBench itself recorded -- never the
+        runner log, the environment snapshot, the endpoint, or anything else
+        that could hold a secret.
+        """
+        with self.lock:
+            job = dict(self._get(job_id))
+        if not job.get("summary"):
+            raise UIError("This run has no completed measurements to export.")
+        summary = job["summary"]
+        tokenizer = job.get("tokenizer")
+
+        def declared(value):
+            return value if value else "unknown"
+
+        return {
+            "kind": "omobench-local-report",
+            "format_version": 1,
+            "note": (
+                "A local record of measurements taken on this machine. This is not an OmoBench "
+                "public result: the registry's contract is result.json, produced by packaging, "
+                "which additionally requires catalogued model identity, an immutable revision, "
+                "exact runtime provenance and the profile's acceptance thresholds. Completing a "
+                "benchmark and being eligible for publication are separate things."
+            ),
+            "run": {
+                "id": job["id"],
+                "status": job["status"],
+                "created_at": job["created_at"],
+                "finished_at": job.get("finished_at"),
+                "profile_id": job["profile"],
+                "runner": "guidellm",
+                "runner_version": summary.get("runner_version", "unknown"),
+                "started_at": summary.get("started_at"),
+            },
+            "server": {
+                "model_identifier": job["model"],
+                "identifier_is": "the string this run sent to the server's API, not a catalog identity",
+                "execution_device": job["execution_device"],
+                "execution_device_source": "declared by the person running the benchmark",
+            },
+            "workload": {
+                "tokenizer_source": tokenizer or job["model"],
+                "tokenizer_source_explicit": bool(tokenizer),
+                "tokenizer_note": (
+                    "An explicit tokenizer source was used to build and count the workload."
+                    if tokenizer else
+                    "No override was given, so the server model identifier was also used as the tokenizer source."
+                ),
+            },
+            "recorded_provenance": {
+                "observed_by_omobench": {
+                    "profile_id": job["profile"],
+                    "runner_version": summary.get("runner_version", "unknown"),
+                    "measurements": "produced by this run",
+                },
+                "declared_or_prefilled": {
+                    "model_revision": declared(job.get("model_revision")),
+                    "model_source": declared(job.get("model_source")),
+                    "quantization": declared(job.get("quantization")),
+                    "runtime_framework": declared(job.get("framework")),
+                    "runtime_version": declared(job.get("framework_version")),
+                    "runtime_arguments": job.get("runtime_args") or [],
+                },
+            },
+            "measurements": summary.get("results"),
+            # The context a comparison needs, in the three groups that answer
+            # different questions. Hardware and CPU/GPU are the *point* of many
+            # comparisons, so they are an execution dimension rather than a
+            # reason two results cannot be compared; the workload definition is
+            # what has to match for a comparison to be controlled.
+            "comparability": self.comparison_context(job, tokenizer),
+            "publication": self.publication_requirements(job_id),
+        }
+
+    def comparison_context(self, job: dict, tokenizer: str | None) -> dict:
+        """What a reader needs to know before putting two of these side by side.
+
+        Three groups, because they answer different questions. The *workload
+        definition* is what must match for a comparison to be controlled: the
+        same profile bytes, request format, concurrency and token targets.
+        *Model configuration* decides whether the same thing is being served.
+        *Execution configuration* -- hardware, the CPU/GPU declaration, the
+        serving runtime -- is usually the dimension under study, so a difference
+        there invites a comparison rather than forbidding one.
+
+        Nothing here grants or withholds permission to compare. It states what
+        differs so a reader can judge, and marks unknowns as unknown rather than
+        as either compatible or disqualifying.
+        """
+        from . import cli as omobench_cli
+
+        profile_id = job["profile"]
+        spec = omobench_cli.PROFILE_SPECS.get(profile_id, {})
+        profile_path = self.root / "benchmarks" / "profiles" / f"{profile_id}.yaml"
+        try:
+            profile_sha256 = omobench_cli.sha256_file(profile_path)
+        except OSError:
+            profile_sha256 = None
+
+        def declared(value):
+            return value if value else "unknown"
+
+        workload = {
+            "profile_id": profile_id,
+            "profile_sha256": profile_sha256 or "unknown",
+            "request_format": "streaming OpenAI-compatible /v1/chat/completions",
+            "concurrency": spec.get("profile"),
+            "input_tokens": spec.get("input_tokens"),
+            "requested_output_tokens": spec.get("output_tokens"),
+            "phase_contract": omobench_cli.profile_phase_contract(self.root, profile_id),
+        }
+        model = {
+            "server_model_identifier": job["model"],
+            "canonical_model_id": declared(job.get("canonical_model")),
+            "model_revision": declared(job.get("model_revision")),
+            "quantization": declared(job.get("quantization")),
+            "tokenizer_source": tokenizer or job["model"],
+            "tokenizer_source_explicit": bool(tokenizer),
+        }
+        execution = {
+            "execution_device_declared": job["execution_device"],
+            "serving_runtime": declared(job.get("framework")),
+            "serving_runtime_version": declared(job.get("framework_version")),
+            "runtime_arguments": job.get("runtime_args") or [],
+            "runner_host": "this machine; see the environment snapshot in the evidence bundle",
+        }
+        unknowns = sorted(
+            key for group in (model, execution)
+            for key, value in group.items() if value == "unknown"
+        )
+        return {
+            "workload_definition": workload,
+            "model_configuration": model,
+            "execution_configuration": execution,
+            "controlled_comparison_requires": [
+                "the same workload_definition (profile id and bytes, request format, "
+                "concurrency and token targets)",
+                "the same model_configuration (identity, revision, quantization and tokenizer source)",
+            ],
+            "intended_comparison_dimensions": [
+                "execution_configuration: hardware, the CPU/GPU declaration and the serving "
+                "runtime and its settings. Comparing CPU against GPU, or one machine against "
+                "another, on an otherwise identical workload is a controlled comparison, not a "
+                "mismatch.",
+            ],
+            "exploratory_when": [
+                "the model, its quantization or its tokenizer source differs: still informative, "
+                "but it is a comparison between different things, not a ranking of one thing",
+                "the profile or its bytes differ: a different workload definition entirely",
+            ],
+            "unknown_fields": unknowns,
+            "comparability_established": not unknowns,
+            "notes": [
+                "Token counts are produced by the tokenizer named above. Two results that report "
+                "the same token count under different tokenizers have not necessarily processed "
+                "the same text or done the same amount of work.",
+                "The execution device is the contributor's declaration about their own server. "
+                "OmoBench does not detect or verify it, and OmoBench's own Python dependencies "
+                "say nothing about which device that server used.",
+                "Unknown fields mean comparability is not fully established for those fields. "
+                "They neither certify a comparison nor forbid one.",
+                "Comparison context is not publication eligibility. A result can be perfectly "
+                "comparable and still ineligible for the registry, and the registry's schema, "
+                "catalog, provenance and acceptance checks are unchanged by anything here.",
+            ],
+        }
+
+    def publication_requirements(self, job_id: str, data: dict | None = None) -> dict:
+        """Everything the public registry needs that this run does not have yet.
+
+        A readable list, computed before packaging is attempted, so the whole
+        set of missing requirements is visible at once instead of one native
+        form popup at a time. It never relaxes anything: packaging and the
+        registry validator remain the authority, and this only reports.
+        """
+        with self.lock:
+            job = dict(self._get(job_id))
+        values = data or {}
+        catalog = self.catalog_models()
+        model = (values.get("model") if isinstance(values.get("model"), str) else None) or job["model"]
+        revision = values.get("model_revision") if isinstance(values.get("model_revision"), str) else job.get("model_revision")
+        framework = values.get("framework") if isinstance(values.get("framework"), str) else job.get("framework")
+        version = values.get("framework_version") if isinstance(values.get("framework_version"), str) else job.get("framework_version")
+        submitter = values.get("submitter") if isinstance(values.get("submitter"), str) else None
+        mutable = {"main", "master", "latest", "head"}
+
+        items = [{
+            "field": None,
+            "label": "Benchmark completed with measurements",
+            "ok": bool(job.get("summary")),
+            "detail": "This run produced measurements." if job.get("summary")
+                      else "Only a completed run can be packaged.",
+        }, {
+            "field": "model",
+            "label": "Canonical model ID is in the OmoBench catalog",
+            "ok": model in catalog,
+            "detail": (f"{model} is catalogued." if model in catalog else
+                       f"{model} is not currently eligible for the community registry: the catalog "
+                       f"({', '.join(catalog)}) is the registry's source of truth, and a model is added "
+                       "to it by a separate, reviewed change. You can still view and export this run's "
+                       "local report. Never substitute a different, catalogued model for the one you ran."),
+        }, {
+            "field": "model_revision",
+            "label": "Immutable revision of the actual weights source",
+            "ok": bool(revision) and revision.strip().lower() not in mutable,
+            "detail": ("Recorded." if revision and revision.strip().lower() not in mutable else
+                       "A commit SHA or other immutable revision of the repository the weights really "
+                       "came from. 'main', 'master' and 'latest' move, so they identify nothing. This is "
+                       "not the file's SHA-256 checksum and not the OmoBench source commit. When the "
+                       "weights come from a quantization repository, record that repository as the "
+                       "weights source and pin its own revision."),
+        }, {
+            "field": "framework_version",
+            "label": "Exact serving runtime version",
+            "ok": bool(framework) and bool(version),
+            "detail": ("Recorded." if framework and version else
+                       "The inference runtime and its exact version, for example llama.cpp build b10621. "
+                       "An application version (the LM Studio release, say) is a different thing from the "
+                       "llama.cpp build it embeds; record the runtime build, and do not guess one."),
+        }, {
+            "field": "submitter",
+            # Not yet typed is not the same as satisfied: with no value to look
+            # at, the honest answer is that this has not been checked.
+            "label": "Submitter identity",
+            "ok": None if submitter is None else bool(submitter.strip()),
+            "detail": ("Your GitHub username or organization, recorded in the bundle."
+                       if submitter is None or submitter.strip()
+                       else "Enter the GitHub username or organization to record in the bundle."),
+        }, {
+            "field": None,
+            "label": "Profile acceptance",
+            "ok": (None if not job.get("validation") else
+                   not any("acceptance:" in message for message in job["validation"].get("errors", []))),
+            "detail": ("Checked when you package this run."
+                       if not job.get("validation") else
+                       " ".join(message for message in job["validation"].get("errors", []) if "acceptance:" in message)
+                       or "Meets this profile's minimum successful requests and maximum error rate."),
+        }]
+        return {
+            "model": model,
+            "catalog": catalog,
+            "catalogued": model in catalog,
+            "items": items,
+            "ready": all(item["ok"] is not False for item in items),
+            "local_export_available": bool(job.get("summary")),
+        }
+
+    def tokenizer_check(self, data: dict) -> dict:
+        """Inspect a tokenizer source offline, before anything is downloaded."""
+        return cli.tokenizer_source_report(
+            text_field(data, "tokenizer", optional=True),
+            served_model=text_field(data, "model", optional=True) or None,
+        )
+
     def listing(self) -> list[dict]:
         with self.lock:
             return [dict(j) for j in sorted(self.jobs.values(), key=lambda j: j["created_at"], reverse=True)]
@@ -477,6 +940,30 @@ class Controller:
                 self.busy = False
                 self._save(job)
         return self.detail(job_id)
+
+    def server_check(self, data: dict) -> dict:
+        """Staged check against a server the contributor runs themselves."""
+        with self.lock:
+            if self.busy or self.closing:
+                raise UIError("Wait for the active operation before checking the server.", 409)
+            self.busy = True
+        try:
+            setup = cli.guidellm_runner_preflight()
+            native_windows = sys.platform == "win32"
+            return server_check(
+                data,
+                can_execute=not native_windows and setup.ok,
+                runner_message=("Start this panel from WSL2, Linux or macOS to execute benchmarks. "
+                                "The panel itself works here for setup and review."
+                                if native_windows else setup.message),
+                # Only worth importing when metadata already agrees, and never
+                # on a platform that cannot run a benchmark at all.
+                runner_health=(cli.runner_health_check(timeout=120, cancel=lambda: self.closing)
+                               if setup.ok and not native_windows else None),
+            )
+        finally:
+            with self.lock:
+                self.busy = False
 
     def github_action(self, action: str) -> dict:
         with self.lock:
@@ -619,7 +1106,10 @@ class UIHandler(BaseHTTPRequestHandler):
                       "/guided": ("guided.html", "text/html; charset=utf-8"),
                       "/guided.js": ("guided.js", "text/javascript; charset=utf-8"),
                       "/community.js": ("community.js", "text/javascript; charset=utf-8"),
+                      "/dashboard.js": ("dashboard.js", "text/javascript; charset=utf-8"),
                       "/guided.css": ("guided.css", "text/css; charset=utf-8"),
+                      "/dashboard.css": ("dashboard.css", "text/css; charset=utf-8"),
+                      "/favicon.svg": ("favicon.svg", "image/svg+xml"),
                       "/advanced": ("index.html", "text/html; charset=utf-8"),
                       "/app.js": ("app.js", "text/javascript; charset=utf-8"),
                       "/style.css": ("style.css", "text/css; charset=utf-8")}
@@ -641,6 +1131,14 @@ class UIHandler(BaseHTTPRequestHandler):
             match = re.fullmatch(r"/api/runs/(job-[a-f0-9]{16})/telemetry", self.path)
             if match:
                 return self._json(controller.telemetry(match[1]))
+            match = re.fullmatch(r"/api/runs/(job-[a-f0-9]{16})/local-report", self.path)
+            if match:
+                return self._json(controller.local_report(match[1]))
+            # Read-only, from what the run already recorded. The POST form of
+            # this path exists only to check values typed but not yet saved.
+            match = re.fullmatch(r"/api/runs/(job-[a-f0-9]{16})/requirements", self.path)
+            if match:
+                return self._json(controller.publication_requirements(match[1]))
             managed = self.server.managed
             if self.path == "/api/managed/recipes":
                 return self._json({"recipes": managed.recipes(), "default_storage_dir": managed.default_storage_dir()})
@@ -677,8 +1175,15 @@ class UIHandler(BaseHTTPRequestHandler):
                 return self._json(controller.github_action(auth[1]))
             if self.path == "/api/connection":
                 return self._json(controller.connection(data))
+            if self.path == "/api/tokenizer-check":
+                return self._json(controller.tokenizer_check(data))
+            if self.path == "/api/server-check":
+                return self._json(controller.server_check(data))
             if self.path == "/api/runs":
                 return self._json(controller.start(data), 202)
+            match = re.fullmatch(r"/api/runs/(job-[a-f0-9]{16})/requirements", self.path)
+            if match:
+                return self._json(controller.publication_requirements(match[1], data))
             match = re.fullmatch(r"/api/runs/(job-[a-f0-9]{16})/(cancel|package|prepare|submit)", self.path)
             if match:
                 job_id, action = match.groups()

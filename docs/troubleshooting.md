@@ -95,11 +95,63 @@ networking or run a server in the same WSL environment. Do not replace localhost
 with a LAN address: this version of the panel accepts loopback endpoints only.
 Authentication headers and redirects are also unsupported.
 
+A server that answers a benchmark request with a redirect fails that request
+rather than being followed, and this now applies to the benchmark itself and
+not only to the panel's connection check. That is deliberate: a result names
+the endpoint it was told to measure, so the requests behind it must go to that
+endpoint and nowhere else. If your server redirects — some proxies add a
+trailing-slash or HTTPS redirect — point OmoBench at the address it redirects
+to.
+
+## The managed model server will not start
+
+If `omobench prepare`/`launch` reports that the runtime needs a shared library
+such as `libgomp.so.1`, the download succeeded and the files are verified: the
+distribution is simply missing a system package the `llama.cpp` build links
+against. A fresh, minimal Ubuntu often is.
+
+Install it once, from inside the distribution, using the exact command
+OmoBench prints. On Debian and Ubuntu, `libgomp.so.1` comes from `libgomp1`:
+
+```bash
+# WSL/Linux shell, Debian/Ubuntu only
+sudo apt update && sudo apt install -y libgomp1
+```
+
+On Fedora, Arch, openSUSE and others the package is named differently, so
+OmoBench names the library and leaves the package to you rather than printing
+an `apt` command that would not work. It never installs a system package
+either way: that needs your Linux password, and changing a machine's packages
+is not something a benchmark tool should do uninvited. Nothing is downloaded
+again afterwards — the model and runtime stay installed and verified — so
+re-running the same command picks up where it left off.
+
+This is checked after preparation and again before launch, so it is reported
+by name rather than as "the managed model server exited early with code 127".
+The Python runner health check does not cover it: that establishes OmoBench and
+GuideLLM import, while `llama-server` is a separate native executable with its
+own library dependencies.
+
+## A run never left its warmup phase
+
+A run that never established its warmup boundary produces no measurement at
+all, and OmoBench refuses to report one. The pinned runner starts its measured
+window on the single event where the warmup boundary is recognised; if that
+event never happens -- the run is stopped during warmup, or cancelled so that
+the requests still outstanding are abandoned before they start -- the runner
+falls back to treating the whole run as measured. That would present warmup
+requests, and every latency figure derived from them, as results. OmoBench
+detects it and says so rather than reporting a short measurement.
+
+Give the run more time, or use `chat-small-extended-v1`, whose ceiling is 90
+minutes. A run that ends *after* measurement began is fine: it reports the
+requests it actually measured, with the warmup requests still excluded.
+
 ## Run is unavailable, slow, or interrupted
 
 - **Run benchmark** is disabled when the pinned runner is missing, native Windows
   is detected, or another operation is active. Check the setup message.
-- Start with `chat-small-v1`. Its duration constraint is 900 seconds; setup,
+- Start with `chat-small-v2`. Its duration constraint is 900 seconds; setup,
   warm-up/cool-down, and in-flight requests mean this is not an exact stopwatch
   deadline. CPU runs may be slow, and log output may arrive in bursts.
 - Do not chat with the model or run another benchmark at the same time.

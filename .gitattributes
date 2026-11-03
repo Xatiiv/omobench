@@ -1,0 +1,20 @@
+# Line endings for the files whose bytes are their identity.
+#
+# A benchmark profile's bytes *are* its identity: every result records
+# `benchmark.profile_sha256`, the SHA-256 of the profile file as it sits in the
+# checkout that produced the run. With no rule here, git's autocrlf converts
+# these files to CRLF on a Windows checkout, so the same profile hashes
+# differently depending on which operating system a contributor cloned on --
+# and git reports the working tree as clean the whole time, because it compares
+# normalized content. `chat-small-extended-v1.yaml` was already in that state.
+#
+# The committed bytes are LF; this keeps the working tree matching them
+# everywhere, so one profile has one hash.
+benchmarks/profiles/*.yaml text eol=lf
+catalog/**/*.json          text eol=lf
+catalog/*.json             text eol=lf
+schema/*.json              text eol=lf
+
+# Shell scripts are run by bash under WSL/Linux. CRLF makes them fail with
+# errors that name the interpreter rather than the problem.
+*.sh text eol=lf

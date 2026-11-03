@@ -528,22 +528,38 @@ class ChatSmallExtendedBoundaryTests(unittest.TestCase):
             "queued_requests": 0, "pending_requests": 0, "processing_requests": 0,
         }
 
-    def _state(self, configured_total: int):
+    def _state(self, configured_total: int, configured_duration: float | None = None,
+               elapsed: float | None = None):
+        """The scheduler state the real constraints publish.
+
+        `configured_duration` mirrors what MaxDurationConstraint reports
+        (progress.total_duration/remaining_duration); omitting it mirrors a run
+        configured with a request constraint only. Both matter: percentage
+        phases resolve against whichever totals progress actually carries (see
+        TransientPhaseConfig.compute_limits).
+        """
         c = self._counters
+        progress = {"remaining_requests": configured_total - c["processed_requests"],
+                    "total_requests": configured_total}
+        if configured_duration is not None:
+            progress["total_duration"] = configured_duration
+            progress["remaining_duration"] = max(0.0, configured_duration - (elapsed or 0.0))
         return self.g["SchedulerState"](
             processed_requests=c["processed_requests"], successful_requests=c["successful_requests"],
             errored_requests=c["errored_requests"], cancelled_requests=c["cancelled_requests"],
             created_requests=c["created_requests"], queued_requests=c["queued_requests"],
             pending_requests=c["pending_requests"], processing_requests=c["processing_requests"],
+            # Duration-based phases are anchored to the scheduler's own start_time
+            # (TransientPhaseConfig.compute_transition_time), not to the first
+            # request, so the replayed clock must share that origin.
+            start_time=0.0,
             start_requests_time=0.0,
-            progress=self.g["SchedulerProgress"](
-                remaining_requests=configured_total - c["processed_requests"], total_requests=configured_total
-            ),
+            progress=self.g["SchedulerProgress"](**progress),
         )
 
     def _replay_request(
         self, accumulator, configured_total: int, request_id: str, start: float, duration: float,
-        *, terminal_status: str = "completed",
+        *, terminal_status: str = "completed", configured_duration: float | None = None,
     ) -> None:
         """Replay one request through the real, full five-event lifecycle a real
         scheduler emits -- queued, pending, in_progress, first_token, terminal --
@@ -557,13 +573,13 @@ class ChatSmallExtendedBoundaryTests(unittest.TestCase):
         c["created_requests"] += 1
         c["queued_requests"] += 1
         info.timings.queued = start
-        accumulator.update_estimate(None, request, info, self._state(configured_total))
+        accumulator.update_estimate(None, request, info, self._state(configured_total, configured_duration, start))
 
         c["queued_requests"] -= 1
         c["pending_requests"] += 1
         info.status = "pending"
         info.timings.dequeued = start + 0.001
-        accumulator.update_estimate(None, request, info, self._state(configured_total))
+        accumulator.update_estimate(None, request, info, self._state(configured_total, configured_duration, start))
 
         c["pending_requests"] -= 1
         c["processing_requests"] += 1
@@ -571,7 +587,7 @@ class ChatSmallExtendedBoundaryTests(unittest.TestCase):
         info.timings.scheduled_at = start + 0.002
         info.timings.resolve_start = start + 0.003
         info.timings.request_start = start + 0.003
-        accumulator.update_estimate(None, request, info, self._state(configured_total))
+        accumulator.update_estimate(None, request, info, self._state(configured_total, configured_duration, start))
 
         if terminal_status == "cancelled_before_start":
             # A request cut off before the backend ever began resolving it: no
@@ -584,14 +600,14 @@ class ChatSmallExtendedBoundaryTests(unittest.TestCase):
             info.status = "cancelled"
             info.timings.resolve_start = None
             info.timings.request_start = None
-            accumulator.update_estimate(None, request, info, self._state(configured_total))
+            accumulator.update_estimate(None, request, info, self._state(configured_total, configured_duration, start))
             return
 
         info.status = "first_token"
         info.timings.first_request_iteration = start + 0.01
         info.timings.first_token_iteration = start + 0.01
         info.timings.first_output_token_iteration = start + 0.01
-        accumulator.update_estimate(None, request, info, self._state(configured_total))
+        accumulator.update_estimate(None, request, info, self._state(configured_total, configured_duration, start))
 
         end = start + duration - 0.01
         if terminal_status == "completed":
@@ -616,7 +632,7 @@ class ChatSmallExtendedBoundaryTests(unittest.TestCase):
         info.timings.request_end = end
         info.timings.resolve_end = end
         info.timings.finalized = end
-        accumulator.update_estimate(None, request, info, self._state(configured_total))
+        accumulator.update_estimate(None, request, info, self._state(configured_total, configured_duration, start))
 
     def _run_full_pipeline(self, configured_total: int, completed_count: int, warmup_value: int = 4, cooldown_value: int = 4):
         """Replay `completed_count` sequential (concurrency=1), successful requests,

@@ -11,6 +11,11 @@ OmoBench is a GitHub-backed evidence registry and test harness for self-hosted, 
 `omobench ui` is a local browser controller around the same CLI. It can run CPU
 or GPU workloads; both are eligible for public v1 packaging and submission.
 The comparison website and its `/run` launch guide are separate from this panel.
+Both panel routes mount one shared live dashboard (`cli/src/omobench/web/dashboard.js`
+and `dashboard.css`); keep it shared rather than reimplementing it per page, and
+let each route declare only the stages it actually observes. Saving a local
+report and preparing a public submission are separate actions with separate
+requirements, on both routes.
 
 It is **not** a model host, model downloader, cloud GPU provider, or automatic proof that a model server used the declared execution device.
 

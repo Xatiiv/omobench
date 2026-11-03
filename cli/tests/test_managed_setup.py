@@ -80,7 +80,10 @@ class RecipeValidationTests(unittest.TestCase):
     def test_real_catalog_validates_and_references_a_cataloged_model(self):
         recipes = ms.load_recipes(ROOT)
         self.assertEqual(
-            [r["id"] for r in recipes], ["qwen3-4b-cpu-v1", "qwen3-4b-cpu-extended-v1"]
+            [r["id"] for r in recipes],
+            # The corrected short recipe is offered first; the legacy one stays
+            # so earlier chat-small-v1 results can be reproduced.
+            ["qwen3-4b-cpu-v2", "qwen3-4b-cpu-v1", "qwen3-4b-cpu-extended-v1"],
         )
         self.assertEqual(ms.get_recipe(ROOT, "qwen3-4b-cpu-v1")["model_id"], "Qwen/Qwen3-4B")
         self.assertEqual(ms.get_recipe(ROOT, "qwen3-4b-cpu-extended-v1")["model_id"], "Qwen/Qwen3-4B")

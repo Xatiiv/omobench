@@ -88,7 +88,7 @@ For the example above, enter these exact values in OmoBench:
 | --- | --- |
 | Server address | `http://127.0.0.1:8092` |
 | Server model identifier | `Qwen/Qwen3-0.6B` |
-| Benchmark profile | `chat-small-v1` |
+| Benchmark profile | `chat-small-v2` |
 | Server execution device | CPU · local measurements |
 
 The model server's address is not the panel's address (`127.0.0.1:8765`).
@@ -133,7 +133,7 @@ if this request fails.
 Load your chosen model in the server, test its actual API identifier, and enter
 that identifier in the panel. Set a context size large enough for the profile's
 input, requested output, and template overhead. The demo's context/slot settings
-are for `chat-small-v1`; long-context and 16-stream workloads need appropriate
+are for the short chat profiles; long-context and 16-stream workloads need appropriate
 server capacity.
 
 For GPU measurements, configure offload/acceleration in the runtime first.

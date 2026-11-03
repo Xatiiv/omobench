@@ -1,0 +1,59 @@
+id: chat-small-v2
+profile_format_version: 1
+status: active
+title: Interactive chat latency
+description: >-
+  A single streaming chat completion with a typical assistant-sized context.
+  Use this profile to compare first-token and token-to-token responsiveness.
+  Identical workload to chat-small-v1; its warmup and cooldown phases are
+  counted in requests rather than taken as a fraction of the duration ceiling,
+  so the measured window is the same 50 requests on fast and slow hardware
+  alike. Results from the two profiles are not interchangeable and are
+  identified separately by profile_id and profile_sha256.
+transport:
+  protocol: openai-chat-completions
+  streaming: true
+workload:
+  prompt_source: synthetic-deterministic
+  prompt_seed: 20260828
+  prompt_uniqueness: per-request
+  target_input_tokens: 1024
+  input_token_tolerance_percent: 2
+  requested_output_tokens: 256
+execution:
+  concurrency: 1
+  # A complete run executes 5 + 50 + 5 = 60 requests and measures the middle 50.
+  # These counts are what the runner enforces, verified end to end against the
+  # pinned GuideLLM release by request identity, not by totals; see
+  # docs/proposals/profile-phase-mapping-v2.md.
+  #
+  # A run cut short after measurement has begun reports the requests it
+  # actually measured, never these targets, and the five warmup requests stay
+  # excluded. A run that never established its warmup boundary -- cut short
+  # during warmup, or cancelled so that the outstanding requests were
+  # abandoned without starting -- has no measured window at all: GuideLLM
+  # 0.7.3 then falls back to treating the whole run as measured, which would
+  # present warmup requests as measurements. OmoBench refuses such a report
+  # rather than reporting a short measurement. See
+  # cli.measured_window_integrity(), cli/tests/test_measured_window_semantics.py
+  # (the runner's own accumulator) and test_measured_window_identity.py (end to
+  # end, by request identity).
+  measured_requests: 50
+  warmup_requests: 5
+  cooldown_requests: 5
+  request_timeout_seconds: 300
+  maximum_duration_seconds: 900
+acceptance:
+  minimum_successful_requests: 40
+  maximum_error_rate_percent: 1
+report:
+  exclude_warmup_and_cooldown: true
+  required_metrics:
+    - ttft_p50_ms
+    - ttft_p95_ms
+    - inter_token_latency_p50_ms
+    - inter_token_latency_p95_ms
+    - output_tokens_per_second
+    - total_tokens_per_second
+    - requests_per_second
+    - error_rate_percent

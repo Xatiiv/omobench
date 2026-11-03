@@ -104,7 +104,7 @@ omobench package \
   --framework-version YOUR_VLLM_VERSION \
   --execution-device gpu \
   --runtime-arg=--served-model-name=Qwen/Qwen3-4B \
-  --profile chat-small-v1 \
+  --profile chat-small-v2 \
   --submitter YOUR_GITHUB_USERNAME
 ```
 
