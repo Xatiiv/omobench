@@ -234,8 +234,10 @@ class AdvancedDashboardTests(unittest.TestCase):
         self.assertIn("Save local report", checklist["summary"])
 
     def test_viewing_a_run_never_packages_uploads_or_executes(self):
+        # Every one of these is a read. /api/workflow takes a body because it
+        # reads the form's current values, and computes; it writes nothing.
         allowed_posts = {"POST /api/runs/<job>/cancel", "POST /api/runs/<job>/requirements",
-                         "POST /api/tokenizer-check"}
+                         "POST /api/tokenizer-check", "POST /api/workflow"}
         posts = {entry for entry in self.states["allRequests"] if entry.startswith("POST")}
         self.assertTrue(posts <= allowed_posts, posts)
 

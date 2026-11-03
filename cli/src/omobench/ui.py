@@ -916,6 +916,8 @@ class Controller:
             with self.lock:
                 job = dict(self._get(job_id))
 
+        if type(values.get("windows_bridge", False)) is not bool:
+            raise UIError("Windows bridge selection must be a boolean.")
         endpoint = text_field(values, "endpoint", optional=True)
         tokenizer = text_field(values, "tokenizer", optional=True)
         model = text_field(values, "model", optional=True) or job.get("model")
@@ -930,9 +932,7 @@ class Controller:
             setup_ok=readiness[0], setup_message=readiness[1],
             endpoint=endpoint, server_check=(served or {}).get("report"),
             tokenizer_report=loaded, tokenizer_source=tokenizer or model,
-        )
-        if job:
-            checks += self.requirement_checks(job, values)
+        ) + self.requirement_checks(job or self._preview_job(model, values), values)
         proposal = self.proposal_status(values) if model else None
         identity_settled = bool(model) and (
             model in self.catalog_models() or bool((proposal or {}).get("document")))
@@ -953,7 +953,26 @@ class Controller:
                 "submit": "What stands between a valid bundle and the public registry. None of "
                           "it can stop a benchmark or invalidate a bundle.",
             },
+            "local_report": (
+                "Saving a local report needs none of this. It records the measurements this "
+                "machine made, for any model, on any hardware, with no sign-in -- along with "
+                "the workload, model and execution configuration that produced them."),
+            "has_run": bool(job),
         }
+
+    def _preview_job(self, model: str | None, values: dict) -> dict:
+        """A stand-in for the run that has not happened yet.
+
+        Before a benchmark exists the packaging and submission checks still
+        have something to say, and what they say depends on the arrangement
+        the contributor has chosen: selecting the Windows bridge means the
+        serving machine will have to be described, and finding that out
+        afterwards is the problem this preview exists to solve.
+        """
+        job: dict = {"model": model}
+        if values.get("windows_bridge"):
+            job["transport"] = {"kind": "windows-stdio-http1-v1"}
+        return job
 
     def evidence_summary(self, job_id: str) -> dict:
         """What this run's packaged result says about how it came about."""
@@ -1092,96 +1111,6 @@ class Controller:
             return preflight.download_plan(source)
         except ValueError as error:
             raise UIError(str(error)) from error
-
-    def publication_outlook(self, data: dict) -> dict:
-        """What a public submission will need, said before the run rather than after.
-
-        Running and publishing are two different things with two different
-        requirement lists, and the second one used to appear only once the
-        benchmark had finished -- which is how somebody spends an hour
-        measuring a model and then learns there is no route for it.
-
-        This blocks nothing. A local-only run needs none of it, and that is the
-        first thing it says.
-        """
-        from .model_identity import suggest_catalog_models
-
-        served = text_field(data, "model", optional=True) or ""
-        tokenizer = text_field(data, "tokenizer", optional=True)
-        bridged = bool(data.get("windows_bridge"))
-        if type(data.get("windows_bridge", False)) is not bool:
-            raise UIError("Windows bridge selection must be a boolean.")
-        catalog = self.catalog_models()
-        suggestion = suggest_catalog_models(served, catalog)
-
-        items = [{
-            "id": "local",
-            "label": "Saving a local report needs none of this",
-            "state": "ok",
-            "detail": ("Any model, any hardware, no sign-in. It records the measurements this "
-                       "machine made along with the workload, model and execution configuration "
-                       "that produced them. Everything below is about the public registry only."),
-        }, {
-            "id": "model",
-            "label": "A catalogued model, or a proposal for one",
-            "state": ("ok" if served in catalog else
-                      "attention" if suggestion["candidates"] else "action"),
-            "detail": (f"{served} is catalogued." if served in catalog else
-                       (f"{served!r} is the identifier your server answers to, which is a serving "
-                        "alias rather than a catalog identity. " + suggestion["message"])
-                       if suggestion["candidates"] else
-                       (f"No catalog entry matches {served!r}. You can still run this benchmark, "
-                        "and submit it with a proposal asking for the model to be reviewed for "
-                        "the catalog. A proposal needs its family, parameter class, publisher "
-                        "page and licence." if served else
-                        "Enter the identifier your server answers to.")),
-        }, {
-            "id": "revision",
-            "label": "An immutable revision of the weights you actually ran",
-            "state": "action",
-            "detail": ("A commit of the repository the weights really came from. 'main' and "
-                       "'latest' move, so they identify nothing. Weights with no public immutable "
-                       "revision can be identified by their bytes instead: `omobench weights` "
-                       "hashes the files you name. Find this before you start, not afterwards."),
-        }, {
-            "id": "runtime",
-            "label": "The serving runtime's own build",
-            "state": "action",
-            "detail": ("The inference engine's version, such as llama.cpp b10621. An application "
-                       "release -- the LM Studio version, say -- is a different thing, and both "
-                       "are recorded separately."),
-        }, {
-            "id": "tokenizer",
-            "label": "A tokenizer the runner can load",
-            "state": "attention" if not tokenizer else "ok",
-            "detail": ("The workload's prompts are built and counted with this, and the runner "
-                       "resolves it before sending a single request -- so a tokenizer it cannot "
-                       "load ends the run with nothing measured. A GGUF repository is the usual "
-                       "case: it serves perfectly well and contains no Transformers tokenizer. "
-                       "Use 'Load tokenizer now' before starting."
-                       if not tokenizer else
-                       f"{tokenizer} will be used. 'Load tokenizer now' confirms the runner can "
-                       "actually load it.")},
-        ]
-        if bridged:
-            items.append({
-                "id": "serving",
-                "label": "A description of the machine that served the model",
-                "state": "action",
-                "detail": ("Your server runs on Windows and this runner is in WSL, so they are "
-                           "two environments and the result records them separately. You will be "
-                           "asked for the serving machine's operating system, processor, memory, "
-                           "accelerators and runtime: nothing WSL can see of the Windows host "
-                           "counts as evidence about it. The companion can read them for you. "
-                           "The bridge's own latency is inside every measurement and is never "
-                           "subtracted."),
-            })
-        return {
-            "served_model_id": served, "catalog": catalog, "catalogued": served in catalog,
-            "suggestion": suggestion, "items": items,
-            "summary": ("Nothing here stops the benchmark. It is what a public submission will "
-                        "additionally need, so you can gather it now rather than after the run."),
-        }
 
     def serving_probe(self, data: dict) -> dict:
         """Read the Windows serving machine's hardware, on that machine.
@@ -1680,8 +1609,6 @@ class UIHandler(BaseHTTPRequestHandler):
                 return self._json(controller.workflow_state(data))
             if self.path == "/api/model-proposal":
                 return self._json(controller.proposal_status(data))
-            if self.path == "/api/publication-outlook":
-                return self._json(controller.publication_outlook(data))
             if self.path == "/api/weight-identity":
                 return self._json(controller.weight_identity(data))
             if self.path == "/api/server-check":

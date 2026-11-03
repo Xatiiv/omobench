@@ -55,6 +55,9 @@ export function makeDocument({ selectors = {} } = {}) {
     },
     createElement: (tag) => makeElement(`created:${tag}`),
     querySelectorAll: (selector) => selectors[selector] || [],
+    // Returns null for a selector nothing matches, exactly as a browser does,
+    // so a page that guards on the result is exercised rather than crashing.
+    querySelector: (selector) => (selectors[selector] || [])[0] ?? null,
     addEventListener: () => {},
   };
 }

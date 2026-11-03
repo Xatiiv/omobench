@@ -28,6 +28,14 @@
       <p class="intro">Connect a model server, run a fixed workload, and inspect the measurements.</p>
       <div id="notice" class="notice" role="status" hidden></div>
       <div id="runner-status" class="notice">Checking the runner…</div>
+      <nav class="stepper" id="workflow-stepper" aria-label="Benchmark workflow">
+        <button type="button" class="step-tab" data-stage="connect" data-target="configure">1 · Connect</button>
+        <button type="button" class="step-tab" data-stage="identify" data-target="identity-block">2 · Identify</button>
+        <button type="button" class="step-tab" data-stage="check" data-target="preflight">3 · Check</button>
+        <button type="button" class="step-tab" data-stage="run" data-target="run-panel">4 · Run</button>
+        <button type="button" class="step-tab" data-stage="review" data-target="package-panel">5 · Review</button>
+        <button type="button" class="step-tab" data-stage="submit" data-target="submission-preview">6 · Submit</button>
+      </nav>
       <section id="configure" class="panel">
         <div class="section-head"><div><span class="step">01</span><h2>Connect &amp; run</h2></div><span class="muted small">Uses the OmoBench CLI</span></div>
         <p class="muted">Start and load your model in a local inference server first, then point this panel at it. Any server that exposes streaming OpenAI-compatible <code>/v1/chat/completions</code> on this machine's loopback address works; the two guided recipes are presets, not the limit of what can be benchmarked.</p>
@@ -43,17 +51,74 @@
           <label>Tokenizer source <span class="muted small">optional</span><input id="tokenizer" name="tokenizer" placeholder="Hugging Face repository or local tokenizer folder" spellcheck="false">
             <span class="hint">Leave blank to use the server model identifier above. Set it when that identifier is a serving alias rather than a Hugging Face repository — an LM Studio alias such as <code>qwen/qwen3-vl-4b:3</code>, for example. The workload's prompts are built and counted with this tokenizer; it never changes which model your server serves, and it is not a claim about which weights are loaded.</span></label>
           <p id="profile-detail" class="profile-detail"></p>
+          <section id="identity-block" class="identity">
+            <h3>Which model is this?</h3>
+            <p class="hint">Two different things, kept apart. Your server answers to whatever identifier it was configured with; the catalog has its own canonical identity for the model. Nothing maps one to the other without you choosing it, and a model the catalog does not have can still be benchmarked and saved — only submitting it publicly needs the catalog's answer.</p>
+            <div class="grid two">
+              <label>Canonical model ID<input name="model" id="package-model" form="package-form" list="catalog-models" spellcheck="false"><datalist id="catalog-models"></datalist><span class="hint">The catalogued identity of the model, which is not the same as the alias your server answers to.</span></label>
+              <label>Identifier your server answers to<input name="served_model_id" id="served-model-id" form="package-form" spellcheck="false" placeholder="For example deepseek-r1-distill-qwen-14b"><span class="hint">The string this run sends to the server's API. It is a serving alias a serving application made up, not an identity claim.</span></label>
+            </div>
+            <div class="actions"><button id="suggest-model" type="button" class="secondary">Suggest a catalog model</button></div>
+            <div id="model-suggestions" class="notice" hidden>
+              <p id="model-suggestion-message"></p>
+              <ul id="model-suggestion-list" class="status-checklist"></ul>
+            </div>
+            <div id="catalog-status" class="notice" hidden>
+              <p id="catalog-status-summary"></p>
+              <ul class="status-checklist" id="catalog-status-items"></ul>
+              <p id="catalog-status-review" class="hint"></p>
+            </div>
+            <details id="model-proposal-section" hidden>
+            <summary>Propose this model for the catalog</summary>
+            <p class="hint">The model you ran is not in the catalog, so it cannot be published as a catalogued result. You can submit this result with a proposal: a reviewer sees the request and the evidence together. A proposal does not add the model to the catalog, and merging this result would not either.</p>
+            <div class="grid two">
+              <label>Family<input name="proposal_family" id="proposal-family" placeholder="For example DeepSeek"></label>
+              <label>Parameter class<input name="proposal_parameter_class" id="proposal-parameter-class" placeholder="For example 14B"></label>
+              <label>Publisher page<input name="proposal_source" id="proposal-source" type="url" placeholder="https://huggingface.co/..."></label>
+              <label>Licence<input name="proposal_licence" id="proposal-licence" placeholder="For example MIT"></label>
+            </div>
+            <label>Why this model belongs in the catalog<textarea name="proposal_rationale" id="proposal-rationale" rows="2"></textarea></label>
+            <label class="check"><input id="proposal-public" type="checkbox"><span>These weights are publicly downloadable under the licence above.</span></label>
+            <div class="actions"><button id="check-proposal" type="button" class="secondary">Check this proposal</button></div>
+            <div id="proposal-status" class="notice" hidden>
+              <p id="proposal-status-summary"></p>
+              <ul class="status-checklist" id="proposal-missing"></ul>
+              <p class="hint" id="proposal-saved"></p>
+              <details id="proposal-preview" hidden><summary>Exactly what a reviewer would receive</summary><pre id="proposal-json" tabindex="0"></pre></details>
+            </div>
+          </details>
+          </section>
+
           <label class="check"><input id="device-confirmed" type="checkbox" required><span>I have configured this device in my model server and confirmed inference actually runs there (in the server logs or telemetry).</span></label>
           <p class="hint">Selecting CPU or GPU records your declaration about the server; it does not configure the server and does not prove which device ran inference. OmoBench's own Python dependencies say nothing about your server's device. Neither device rules a result out: CPU and GPU are equally publishable, and so is a server on Windows measured through the bridge. What a public submission needs is listed under <strong>What a public submission will also need</strong> below, before you start.</p>
           <div class="actions"><button id="test-connection" type="button" class="secondary">Check this server</button><button id="check-tokenizer" type="button" class="secondary">Check tokenizer</button><button id="load-tokenizer" type="button" class="secondary">Load tokenizer now</button><button id="start-run" type="submit">Run benchmark <span aria-hidden="true">↗</span></button></div>
           <p class="hint"><strong>Check tokenizer</strong> stays offline and only looks at the shape of the identifier and whether its files are already here. <strong>Load tokenizer now</strong> actually loads it in the interpreter the benchmark uses — which is where a run otherwise dies, before it sends a single request. It may contact huggingface.co to read the repository, and will tell you before it fetches anything. Model weights are never downloaded by either.</p>
+          <p id="run-caution" class="hint" role="status" hidden></p>
           <ul class="status-checklist" id="server-check"></ul>
-          <details id="publication-outlook">
-            <summary>What a public submission will also need</summary>
-            <p class="hint">Running and publishing are two different things. Nothing here stops the benchmark; it is what the registry will additionally ask for, listed now so you can find it before spending the time rather than afterwards.</p>
-            <ul class="status-checklist" id="publication-outlook-items"></ul>
-            <p id="publication-outlook-summary" class="hint"></p>
-          </details>
+          <section id="preflight" class="preflight">
+            <h3>Before you start</h3>
+            <p class="hint" id="preflight-local"></p>
+            <div class="gate" data-gate="run">
+              <h4>Running this benchmark <span class="gate-count" id="gate-count-run"></span></h4>
+              <p class="hint" id="gate-note-run"></p>
+              <ul class="status-checklist" id="gate-run"></ul>
+            </div>
+            <div class="gate" data-gate="package">
+              <h4>Packaging the evidence <span class="gate-count" id="gate-count-package"></span></h4>
+              <p class="hint" id="gate-note-package"></p>
+              <ul class="status-checklist" id="gate-package"></ul>
+            </div>
+            <div class="gate" data-gate="submit">
+              <h4>Submitting to the public registry <span class="gate-count" id="gate-count-submit"></span></h4>
+              <p class="hint" id="gate-note-submit"></p>
+              <ul class="status-checklist" id="gate-submit"></ul>
+            </div>
+            <div class="gate" data-gate="none" id="gate-none-block" hidden>
+              <h4>Recorded, but in nobody's way</h4>
+              <p class="hint">Facts worth knowing that stop nothing: things this evidence cannot establish, and costs it carries and declares.</p>
+              <ul class="status-checklist" id="gate-none"></ul>
+            </div>
+          </section>
           <p id="connection-result" class="hint" role="status"></p>
           <p id="tokenizer-result" class="hint" role="status"></p>
           <div id="tokenizer-preflight" class="notice" hidden>
@@ -115,7 +180,6 @@
         <p id="publication-summary" class="hint"></p>
         <form id="package-form">
           <div class="grid two">
-            <label>Canonical model ID<input name="model" id="package-model" list="catalog-models" spellcheck="false"><datalist id="catalog-models"></datalist><span class="hint">The catalogued identity of the model, which is not the same as the alias your server answers to. Public results must use a model listed in the catalog.</span></label>
             <label>Immutable model revision<input name="model_revision" placeholder="Commit SHA of the weights repository" spellcheck="false"><span class="hint">The repository revision of the weights you actually ran. Not the file's SHA-256 checksum and not the OmoBench commit; 'main' and 'latest' move, so they identify nothing.</span></label>
             <label>Framework<select name="framework" id="framework"></select></label>
             <label>Exact framework version<input name="framework_version" placeholder="Runtime build, e.g. llama.cpp b10621"><span class="hint">The serving runtime's own build. An application version, such as the LM Studio release, is a different thing; record the runtime build rather than guessing one.</span></label>
@@ -123,12 +187,6 @@
             <label>Submitter<input id="submitter" name="submitter" placeholder="GitHub username or organization"></label>
           </div>
           <label>Model weights source (optional)<input name="model_source" id="package-model-source" type="url" placeholder="Exact pinned download URL, if different from a generic catalog reference" spellcheck="false"><span class="hint">When set, the model revision above is understood as this source's own repository, not necessarily the canonical model ID's repository. Prefilled automatically for a managed CPU run.</span></label>
-          <label>Identifier your server answers to<input name="served_model_id" id="served-model-id" spellcheck="false" placeholder="For example deepseek-r1-distill-qwen-14b"><span class="hint">The string this run sent to the server's API. It is a serving alias a serving application made up, not an identity claim: recording it keeps the two apart instead of publishing one as the other.</span>
-            <span class="actions"><button id="suggest-model" type="button" class="secondary">Suggest a catalog model</button></span></label>
-          <div id="model-suggestions" class="notice" hidden>
-            <p id="model-suggestion-message"></p>
-            <ul id="model-suggestion-list" class="status-checklist"></ul>
-          </div>
           <details id="serving-environment" open>
             <summary>The machine that served the model</summary>
             <p class="hint" id="serving-why">Where inference actually happened, which is not always where this panel is running. Each fact is recorded with how it was established: detected on the serving machine, or declared by you. Nothing is filled in from a machine that did not serve the model.</p>
@@ -156,24 +214,23 @@
             <label>Serving settings that change the measurement<textarea name="serving_settings" id="serving-settings" rows="2" placeholder="context_length = 8192"></textarea><span class="hint">One <code>name = value</code> per line: context length, GPU layer count, batch size. Do not include tokens or passwords.</span></label>
             <label>Weight manifest (optional)<textarea name="weights_manifest" id="weights-manifest" rows="2" placeholder="Paste the JSON from: omobench weights --directory ... --file ..."></textarea><span class="hint">For weights with no public immutable revision. <code>omobench weights</code> hashes the files you name and prints a manifest; the revision it gives you goes in the revision field above. A filename is never taken as proof of identity.</span></label>
           </details>
-          <details id="model-proposal-section" hidden>
-            <summary>Propose this model for the catalog</summary>
-            <p class="hint">The model you ran is not in the catalog, so it cannot be published as a catalogued result. You can submit this result with a proposal: a reviewer sees the request and the evidence together. A proposal does not add the model to the catalog, and merging this result would not either.</p>
-            <div class="grid two">
-              <label>Family<input name="proposal_family" id="proposal-family" placeholder="For example DeepSeek"></label>
-              <label>Parameter class<input name="proposal_parameter_class" id="proposal-parameter-class" placeholder="For example 14B"></label>
-              <label>Publisher page<input name="proposal_source" id="proposal-source" type="url" placeholder="https://huggingface.co/..."></label>
-              <label>Licence<input name="proposal_licence" id="proposal-licence" placeholder="For example MIT"></label>
-            </div>
-            <label>Why this model belongs in the catalog<textarea name="proposal_rationale" id="proposal-rationale" rows="2"></textarea></label>
-            <label class="check"><input id="proposal-public" type="checkbox"><span>These weights are publicly downloadable under the licence above.</span></label>
-          </details>
+
           <label id="description-field" hidden>Server description<input name="server_description" id="server-description" placeholder="Name and details of the generic server"></label>
           <label>Runtime startup arguments<textarea name="runtime_args" rows="3" placeholder="One argument per line, e.g. --ctx-size=2048"></textarea><span class="hint">Record the actual server settings, including GPU offload. Do not include tokens or passwords.</span></label>
           <details><summary>Hardware details, if detection is incomplete</summary><div class="grid two"><label id="gpu-memory-field">GPU memory per card (GB)<input name="gpu_memory_gb" type="number" min="0.01" step="any" placeholder="Only if detected VRAM is unknown"></label><label>CPU description<input name="cpu" placeholder="Leave blank to use detected CPU"></label></div></details>
           <div class="actions"><button id="check-requirements" type="button" class="secondary">Check publication requirements</button><button id="package-button" type="submit">Package &amp; validate</button></div>
         </form>
         <p id="validation-result" class="notice" role="status" hidden></p>
+        <section id="completion" hidden>
+          <h3>Where this run has got to</h3>
+          <p class="hint">Six separate things, each shown only once something confirms it. A validated bundle is not a submission, and an open pull request is not an accepted result.</p>
+          <ul class="status-checklist" id="completion-steps"></ul>
+        </section>
+        <details id="evidence-summary" hidden>
+          <summary>What this evidence says <span class="hint">Every recorded fact, and where it came from</span></summary>
+          <p class="hint" id="evidence-qualifications"></p>
+          <div id="evidence-sections"></div>
+        </details>
         <button id="prepare-button" class="secondary" type="button" hidden>Review submission files</button>
         <div id="submission-preview" hidden>
           <h3>Submission preview</h3><p id="repository" class="muted"></p>

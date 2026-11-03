@@ -43,6 +43,34 @@ const SETUP = {
   catalog: ["Qwen/Qwen3-4B"],
   can_execute: true, can_validate: true, runner_message: "GuideLLM 0.7.3 ready.",
 };
+const WORKFLOW = {
+  stages: [
+    { id: "connect", label: "Connect", state: "done" },
+    { id: "identify", label: "Identify", state: "blocked" },
+    { id: "check", label: "Check", state: "done" },
+    { id: "run", label: "Run", state: "done" },
+    { id: "review", label: "Review", state: "current" },
+    { id: "submit", label: "Submit", state: "todo" },
+  ],
+  checks: [
+    { id: "runner", label: "The benchmark runner can start here", state: "ok",
+      observed: "ready", source: "this machine", blocks: "run", recovery: "", detail: "", field: null },
+    { id: "catalog", label: "Canonical model ID is in the OmoBench catalog", state: "attention",
+      observed: "Qwen/Qwen3-VL-4B-Instruct", source: "you", blocks: "submit",
+      recovery: "fixture catalog recovery", detail: "fixture catalog detail", field: "model" },
+    { id: "tokenizer-match", label: "The tokenizer matches the served weights", state: "unknown",
+      observed: null, source: "not checked yet", blocks: null, recovery: "", detail: "fixture", field: null },
+  ],
+  blocking: { run: [], package: [], submit: ["catalog"] },
+  proposal: null,
+  completion: [
+    { id: "benchmark", label: "Benchmark completed", state: "done", detail: "fixture" },
+    { id: "published", label: "Accepted and published", state: "pending", detail: "fixture" },
+  ],
+  gates: { run: "fixture run gate", package: "fixture package gate", submit: "fixture submit gate" },
+  local_report: "fixture local report note",
+  has_run: true,
+};
 const REQUIREMENTS = {
   model: "Qwen/Qwen3-VL-4B-Instruct", catalog: ["Qwen/Qwen3-4B"], catalogued: false,
   ready: false, local_export_available: true,
@@ -86,6 +114,13 @@ const context = createContext({
     else if (path === "/api/runs" && method === "GET") data = state.jobs;
     else if (path === "/api/github/auth") data = { status: "signed_out", enabled: true, generation: "g1", account: null, repository: "Xatiiv/omobench" };
     else if (path === "/api/tokenizer-check") data = { ok: true, kind: "huggingface", source: "Qwen/Qwen3-VL-4B-Instruct", cached: false, message: "fixture tokenizer message" };
+    // The workflow the page now reads for its stepper and preflight. Shaped
+    // like the real answer, with the uncatalogued model this harness uses.
+    else if (path === "/api/workflow") data = WORKFLOW;
+    else if (path === "/api/model-proposal") data = { model: ALIAS, catalogued: false, required: true,
+      missing: ["family"], summary: "fixture proposal summary", review_note: "fixture review note",
+      saved_as: "model-proposal.json", document: null, catalog: SETUP.catalog, conflict: null };
+    else if (/\/evidence$/.test(path)) data = { schema_version: "1.0", sections: [], qualifications: [] };
     else if (detail) {
       if (state.pendingDetail && state.pendingDetail.id === detail[1]) {
         return state.pendingDetail.promise.then((value) => ({ ok: true, json: async () => value }));
@@ -242,6 +277,9 @@ const running = job();
 state.jobs = [running];
 state.details[running.id] = running;
 state.telemetry[running.id] = null;
+// The page's own start-up finishes first, so its single polling loop is
+// attributed to start-up and not to the selection measured next.
+await settle();
 scheduledTimers = 0;
 await context.selectRun(running.id);
 await settle();

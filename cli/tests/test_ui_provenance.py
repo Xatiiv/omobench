@@ -213,76 +213,91 @@ class BridgedPackagingTests(PanelFixture):
         self.assertIn("LM Studio 0.3.31", body)
 
 
-class PublicationOutlookTests(PanelFixture):
+class WorkflowPreviewTests(PanelFixture):
     """What a public submission will need, said before the benchmark runs.
 
     The requirements used to appear only after a run finished, which is how
     somebody spends an hour measuring a model and then learns there is no route
-    for it.
+    for it. They are previewed from the same checks that later judge the real
+    run, so the preview and the verdict cannot disagree.
     """
 
-    def outlook(self, **data) -> dict:
-        return self.controller.publication_outlook(data)
+    def workflow(self, **data) -> dict:
+        return self.controller.workflow_state(data)
 
     def states(self, report: dict) -> dict:
-        return {item["id"]: item["state"] for item in report["items"]}
+        return {item["id"]: item["state"] for item in report["checks"]}
 
-    def test_a_local_report_is_the_first_thing_it_says_needs_none_of_this(self) -> None:
-        report = self.outlook(model="Qwen/Qwen3-4B")
-        first = report["items"][0]
-        self.assertEqual(first["id"], "local")
-        self.assertEqual(first["state"], "ok")
-        self.assertIn("Any model, any hardware, no sign-in", first["detail"])
+    def gate(self, report: dict, identifier: str) -> str | None:
+        return next(item["blocks"] for item in report["checks"] if item["id"] == identifier)
 
-    def test_it_blocks_nothing(self) -> None:
-        report = self.outlook(model="acme/unknown-model")
-        self.assertIn("Nothing here stops the benchmark", report["summary"])
+    def test_a_local_report_needs_none_of_it(self) -> None:
+        report = self.workflow(model="Qwen/Qwen3-4B")
+        self.assertIn("Saving a local report needs none of this", report["local_report"])
+        self.assertIn("any model, on any hardware", report["local_report"])
+
+    def test_the_three_gates_are_described_separately(self) -> None:
+        gates = self.workflow(model="Qwen/Qwen3-4B")["gates"]
+        self.assertEqual(set(gates), {"run", "package", "submit"})
+        self.assertIn("can stop a benchmark or invalidate a bundle", gates["submit"])
+
+    def test_requirements_are_previewed_before_any_run_exists(self) -> None:
+        report = self.workflow(model="acme/private-v9")
+        self.assertFalse(report["has_run"])
+        self.assertIn("weights-revision", self.states(report))
+        self.assertIn("catalog", self.states(report))
 
     def test_a_catalogued_model_is_already_satisfied(self) -> None:
-        report = self.outlook(model="Qwen/Qwen3-4B")
-        self.assertEqual(self.states(report)["model"], "ok")
-        self.assertTrue(report["catalogued"])
+        report = self.workflow(model="Qwen/Qwen3-4B")
+        self.assertEqual(self.states(report)["catalog"], "ok")
+        self.assertTrue(report["proposal"]["catalogued"])
 
-    def test_a_serving_alias_is_flagged_before_the_run_with_its_candidate(self) -> None:
-        report = self.outlook(model="deepseek-r1-distill-qwen-14b")
-        model = next(item for item in report["items"] if item["id"] == "model")
-        self.assertEqual(model["state"], "attention")
-        self.assertIn("serving alias rather than a catalog identity", model["detail"])
-        self.assertIn("deepseek-ai/DeepSeek-R1-Distill-Qwen-14B", model["detail"])
+    def test_an_uncatalogued_model_blocks_submission_and_nothing_else(self) -> None:
+        report = self.workflow(model="acme/private-v9")
+        self.assertEqual(self.gate(report, "catalog"), "submit")
+        self.assertNotIn("catalog", report["blocking"]["run"])
+        self.assertNotIn("catalog", report["blocking"]["package"])
 
-    def test_an_uncatalogued_model_is_pointed_at_the_proposal_route(self) -> None:
-        model = next(item for item in self.outlook(model="acme/private-v9")["items"]
-                     if item["id"] == "model")
-        self.assertEqual(model["state"], "action")
-        self.assertIn("submit it with a proposal", model["detail"])
+    def test_an_unloaded_tokenizer_blocks_running(self) -> None:
+        report = self.workflow(model="unsloth/Model-GGUF")
+        self.assertEqual(self.states(report)["tokenizer"], "unknown")
+        self.assertIn("tokenizer", report["blocking"]["run"])
+        recovery = next(item["recovery"] for item in report["checks"]
+                        if item["id"] == "tokenizer")
+        self.assertIn("contains no Transformers tokenizer", recovery)
 
-    def test_the_tokenizer_warning_names_the_gguf_case_before_the_run(self) -> None:
-        tokenizer = next(item for item in self.outlook(model="unsloth/Model-GGUF")["items"]
-                         if item["id"] == "tokenizer")
-        self.assertEqual(tokenizer["state"], "attention")
-        self.assertIn("contains no Transformers tokenizer", tokenizer["detail"])
+    def test_an_unchecked_endpoint_is_reported_as_unchecked(self) -> None:
+        report = self.workflow(model="Qwen/Qwen3-4B", endpoint="http://127.0.0.1:9999")
+        self.assertEqual(self.states(report)["endpoint"], "unknown")
+        self.assertIn("endpoint", report["blocking"]["run"])
 
-    def test_an_explicit_tokenizer_is_already_satisfied(self) -> None:
-        report = self.outlook(model="unsloth/Model-GGUF", tokenizer="Qwen/Qwen3-4B")
-        self.assertEqual(self.states(report)["tokenizer"], "ok")
+    def test_the_stepper_starts_at_connect_with_nothing_done(self) -> None:
+        # Pinned so the stage does not depend on whether this particular
+        # machine can run a benchmark at all.
+        with patch.object(Controller, "runner_readiness", return_value=(True, "ready")):
+            stages = {stage["id"]: stage["state"]
+                      for stage in self.workflow(model="Qwen/Qwen3-4B")["stages"]}
+        self.assertEqual(stages["connect"], "current")
+        self.assertEqual(stages["run"], "todo")
 
-    def test_the_bridge_adds_the_serving_description_before_the_run(self) -> None:
-        report = self.outlook(model="Qwen/Qwen3-4B", windows_bridge=True)
-        serving = next(item for item in report["items"] if item["id"] == "serving")
-        self.assertIn("two environments", serving["detail"])
-        self.assertIn("never subtracted", serving["detail"])
+    def test_an_unusable_runner_blocks_the_first_stage_rather_than_waiting(self) -> None:
+        with patch.object(Controller, "runner_readiness",
+                          return_value=(False, "Install the runner first.")):
+            report = self.workflow(model="Qwen/Qwen3-4B")
+        stages = {stage["id"]: stage["state"] for stage in report["stages"]}
+        self.assertEqual(stages["connect"], "blocked")
+        self.assertIn("runner", report["blocking"]["run"])
 
-    def test_a_direct_run_is_not_asked_for_a_serving_description(self) -> None:
-        self.assertNotIn("serving", self.states(self.outlook(model="Qwen/Qwen3-4B")))
-
-    def test_the_revision_and_runtime_requirements_are_always_named(self) -> None:
-        states = self.states(self.outlook(model="Qwen/Qwen3-4B"))
-        self.assertEqual(states["revision"], "action")
-        self.assertEqual(states["runtime"], "action")
+    def test_choosing_the_bridge_previews_its_serving_requirement(self) -> None:
+        """Found out before the run, not after an hour of measuring."""
+        report = self.workflow(model="Qwen/Qwen3-4B", windows_bridge=True)
+        self.assertIn("serving-environment", report["blocking"]["package"])
+        direct = self.workflow(model="Qwen/Qwen3-4B")
+        self.assertNotIn("serving-environment", direct["blocking"]["package"])
 
     def test_an_invalid_bridge_selection_is_refused(self) -> None:
         with self.assertRaises(UIError):
-            self.outlook(model="Qwen/Qwen3-4B", windows_bridge="yes")
+            self.workflow(model="Qwen/Qwen3-4B", windows_bridge="yes")
 
 
 class ModelSuggestionEndpointTests(PanelFixture):

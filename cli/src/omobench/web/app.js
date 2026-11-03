@@ -64,6 +64,20 @@ async function api(path, data, binary = false) {
 function updateButtons() {
   const busy = pending || jobs.some((job) => activeStates.has(job.status));
   $("start-run").disabled = busy || !setup?.can_execute;
+  // Advisory, never a gate. Only an actual runner constraint stops a run, and
+  // an unloaded tokenizer or an uncatalogued model is not one -- the
+  // measurements would be just as real. What this does is make sure nobody
+  // spends an hour discovering it.
+  const outstanding = workflow ? workflow.blocking.run.length : 0;
+  $("run-caution").hidden = !outstanding;
+  if (outstanding) {
+    const labels = workflow.checks
+      .filter((item) => item.blocks === "run" && item.state !== "ok")
+      .map((item) => item.label);
+    $("run-caution").textContent =
+      `${outstanding} thing(s) are not established yet: ${labels.join("; ")}. `
+      + "You can still start the benchmark; these are the ones that would stop it or waste it.";
+  }
   $("test-connection").disabled = busy;
   $("package-button").disabled = busy || !setup?.can_validate;
   $("prepare-button").disabled = busy;
@@ -150,7 +164,11 @@ function renderRun(job, telemetry = null) {
   $("run-panel").hidden = false;
   $("run-title").textContent = job.model;
   $("run-transport").hidden = !job.transport;
-  $("run-transport").textContent = job.transport ? "Windows bridge, local reports only. Measurements include bridge overhead. The model runs on Windows; the benchmark runner runs in WSL." : "";
+  $("run-transport").textContent = job.transport
+    ? "Measured through the Windows bridge: the model ran on Windows, the benchmark runner in WSL. "
+      + "The bridge's own latency is inside every number here and is never subtracted. This run can "
+      + "be submitted once you describe the machine that served the model, below."
+    : "";
   $("run-status").textContent = `${job.execution_device.toUpperCase()} · ${job.status}`;
   const duration = Math.max(0, Math.floor((new Date(job.finished_at || Date.now()) - new Date(job.created_at)) / 1000));
   $("run-meta").textContent = `${job.profile} · ${Math.floor(duration / 60)}m ${duration % 60}s · ${new Date(job.created_at).toLocaleString()}`
@@ -246,6 +264,10 @@ async function selectRun(id) {
   const telemetry = await api(`/api/runs/${id}/telemetry`).catch(() => null);
   if (selected !== id) return;
   renderRun(job, telemetry); renderJobs();
+  // Reopening a saved run recomputes where it got to and what its evidence
+  // says, rather than leaving the previous run's answers on screen.
+  await refreshWorkflow();
+  await refreshEvidence(id);
 }
 
 function download(blob, name) {
@@ -301,30 +323,205 @@ function renderServerCheck(report) {
   $("server-check-limits").hidden = false;
 }
 
-// What a public submission will need, shown before the run rather than after
-// it. It gates nothing: a local report needs none of it.
-async function refreshPublicationOutlook() {
-  const outlook = await api("/api/publication-outlook", {
-    model: $("model").value, tokenizer: $("tokenizer").value,
-    windows_bridge: $("windows-bridge").checked,
-  });
-  // The same checklist shape the server check uses. "ok" is already satisfied;
-  // everything else is pending, because none of it blocks the benchmark.
-  $("publication-outlook-items").replaceChildren(...outlook.items.map((item) => {
-    const li = document.createElement("li");
-    li.className = `status-item ${item.state === "ok" ? "ok" : "pending"}`;
-    const strong = document.createElement("strong"), detail = document.createElement("span");
-    strong.textContent = item.label;
-    detail.textContent = item.detail;
-    li.append(strong, detail);
-    return li;
-  }));
-  $("publication-outlook-summary").textContent = outlook.summary;
+
+// --- Where you are, and what is in the way --------------------------------
+// One request answers all of it: the six stages, and every check grouped by
+// whether it would stop a run, a package or a submission. Three surfaces
+// deciding for themselves whether a run is ready is three chances to disagree.
+let workflow = null;
+
+const GATE_IDS = ["run", "package", "submit"];
+const CHECK_CLASS = {ok: "ok", blocked: "fail", attention: "pending", unknown: "pending"};
+const STATE_WORD = {ok: "ready", blocked: "needs attention", attention: "worth checking",
+                    unknown: "not established"};
+
+function workflowRequest() {
+  const data = Object.fromEntries(new FormData($("package-form")));
+  const enriched = withProvenance(data);
+  enriched.endpoint = $("endpoint").value;
+  enriched.tokenizer = $("tokenizer").value;
+  enriched.windows_bridge = $("windows-bridge").checked;
+  enriched.model = $("package-model").value.trim() || $("model").value.trim();
+  if (selected) enriched.job = selected;
+  return enriched;
 }
 
-$("publication-outlook").addEventListener("toggle", () => {
-  if ($("publication-outlook").open) action(refreshPublicationOutlook);
+function renderCheck(item) {
+  const li = document.createElement("li");
+  li.className = `status-item ${CHECK_CLASS[item.state] || "pending"}`;
+  const strong = document.createElement("strong");
+  strong.textContent = item.label;
+  li.append(strong);
+  // What was looked at, and where the answer came from.
+  const observed = document.createElement("span");
+  observed.className = "sub-check";
+  observed.textContent = item.observed
+    ? `Seen: ${item.observed} — from ${item.source}`
+    : `${STATE_WORD[item.state] || item.state} — ${item.source}`;
+  li.append(observed);
+  if (item.detail) {
+    const detail = document.createElement("span");
+    detail.textContent = item.detail;
+    li.append(detail);
+  }
+  // A specific thing to do, rather than a restatement of the problem.
+  if (item.recovery) {
+    const recovery = document.createElement("span");
+    recovery.className = "recovery";
+    recovery.textContent = item.recovery;
+    li.append(recovery);
+  }
+  return li;
+}
+
+function renderWorkflow(report) {
+  workflow = report;
+  $("preflight-local").textContent = report.local_report;
+  for (const gate of GATE_IDS) {
+    const items = report.checks.filter((item) => item.blocks === gate);
+    $(`gate-${gate}`).replaceChildren(...items.map(renderCheck));
+    $(`gate-note-${gate}`).textContent = report.gates[gate];
+    const waiting = report.blocking[gate].length;
+    $(`gate-count-${gate}`).textContent = waiting
+      ? `${waiting} outstanding` : items.length ? "nothing outstanding" : "";
+    $(`gate-count-${gate}`).className = `gate-count ${waiting ? "waiting" : "clear"}`;
+  }
+  // Checks that gate nothing get their own place. Listing them under a gate
+  // would suggest they stand in its way, which is the opposite of what they say.
+  const ungated = report.checks.filter((item) => item.blocks === null);
+  $("gate-none-block").hidden = !ungated.length;
+  $("gate-none").replaceChildren(...ungated.map(renderCheck));
+
+  report.stages.forEach((stage) => {
+    const tab = document.querySelector(`.step-tab[data-stage="${stage.id}"]`);
+    if (!tab) return;
+    tab.className = `step-tab stage-${stage.state}`;
+    tab.setAttribute("aria-current", stage.state === "current" ? "step" : "false");
+  });
+  renderCatalogStatus(report.proposal);
+  renderCompletion(report.completion);
+}
+
+async function refreshWorkflow() {
+  renderWorkflow(await api("/api/workflow", workflowRequest()));
+}
+
+// Moving between stages reveals, it never resets: every field stays exactly as
+// it was typed, so fixing something earlier costs nothing later.
+document.querySelectorAll(".step-tab").forEach((tab) => {
+  tab.addEventListener("click", () => {
+    const target = $(tab.dataset.target);
+    if (!target || target.hidden) {
+      notice("That step is not available yet. The checks above say what it is waiting for.");
+      return;
+    }
+    const open = target.closest("details");
+    if (open) open.open = true;
+    target.scrollIntoView({behavior: "smooth", block: "start"});
+  });
 });
+
+// --- Catalogued, or proposed ----------------------------------------------
+function renderCatalogStatus(proposal) {
+  if (!proposal || !proposal.model) { $("catalog-status").hidden = true; return; }
+  $("catalog-status").hidden = false;
+  $("catalog-status-summary").textContent = proposal.summary;
+  $("catalog-status").classList.toggle("error", Boolean(proposal.conflict));
+  const rows = [
+    ["Is this model in the catalog?", proposal.catalogued ? "Yes" : "No"],
+    ["Does it need a proposal to be submitted?", proposal.required ? "Yes" : "No"],
+  ];
+  if (proposal.conflict) rows.push(["Conflict", proposal.conflict]);
+  $("catalog-status-items").replaceChildren(...rows.map(([label, value]) => {
+    const li = document.createElement("li");
+    li.className = "status-item pending";
+    const strong = document.createElement("strong"), span = document.createElement("span");
+    strong.textContent = label; span.textContent = value;
+    li.append(strong, span);
+    return li;
+  }));
+  $("catalog-status-review").textContent = proposal.review_note;
+  // Opened only when it is needed, and never closed over the contributor's work.
+  if (proposal.required && $("model-proposal-section").hidden) {
+    $("model-proposal-section").hidden = false;
+  }
+}
+
+$("check-proposal").addEventListener("click", () => action(async () => {
+  const data = workflowRequest();
+  const status = await api("/api/model-proposal", data);
+  $("proposal-status").hidden = false;
+  $("proposal-status").classList.toggle("error", Boolean(status.error));
+  $("proposal-status-summary").textContent = status.summary;
+  $("proposal-missing").replaceChildren(...(status.missing || []).map((field) => {
+    const li = document.createElement("li");
+    li.className = "status-item fail";
+    const strong = document.createElement("strong");
+    strong.textContent = `Still needed: ${field.replace(/_/g, " ")}`;
+    li.append(strong);
+    return li;
+  }));
+  // What lands on this machine, and what a reviewer would be asked to decide.
+  $("proposal-saved").textContent = status.document
+    ? `Saved beside the evidence as ${status.saved_as} and uploaded with it. ${status.review_note}`
+    : status.review_note;
+  $("proposal-preview").hidden = !status.document;
+  if (status.document) $("proposal-json").textContent = JSON.stringify(status.document, null, 2);
+}));
+
+// --- Six states, none of them assumed -------------------------------------
+const COMPLETION_CLASS = {done: "ok", failed: "fail", blocked: "fail", pending: "pending"};
+
+function renderCompletion(steps) {
+  $("completion").hidden = !steps || !steps.length;
+  if (!steps || !steps.length) return;
+  $("completion-steps").replaceChildren(...steps.map((step) => {
+    const li = document.createElement("li");
+    li.className = `status-item ${COMPLETION_CLASS[step.state] || "pending"}`;
+    const strong = document.createElement("strong"), span = document.createElement("span");
+    strong.textContent = step.label;
+    span.textContent = step.detail;
+    li.append(strong, span);
+    return li;
+  }));
+}
+
+// --- What the evidence says ------------------------------------------------
+async function refreshEvidence(jobId) {
+  const summary = await api(`/api/runs/${jobId}/evidence`).catch(() => null);
+  $("evidence-summary").hidden = !summary;
+  if (!summary) return;
+  $("evidence-qualifications").textContent = summary.qualifications.join(" ");
+  $("evidence-sections").replaceChildren(...summary.sections.map((section) => {
+    const block = document.createElement("section");
+    const heading = document.createElement("h4");
+    heading.textContent = section.title;
+    const list = document.createElement("dl");
+    list.className = "kv";
+    section.rows.forEach((row) => {
+      const dt = document.createElement("dt"), dd = document.createElement("dd");
+      dt.textContent = row.label;
+      dd.textContent = row.value;
+      if (!row.recorded) dd.classList.add("unrecorded");
+      // Where it came from, and what it still does not establish.
+      if (row.source) {
+        const source = document.createElement("span");
+        source.className = "sub-check";
+        source.textContent = row.source;
+        dd.append(source);
+      }
+      if (row.note) {
+        const note = document.createElement("span");
+        note.className = "sub-check";
+        note.textContent = row.note;
+        dd.append(note);
+      }
+      list.append(dt, dd);
+    });
+    block.append(heading, list);
+    return block;
+  }));
+}
 
 $("test-connection").addEventListener("click", () => action(async () => {
   $("connection-result").textContent = "Checking the address, this environment, the server, its model list and one streaming request…";
@@ -332,7 +529,7 @@ $("test-connection").addEventListener("click", () => action(async () => {
     endpoint: $("endpoint").value, model: $("model").value, tokenizer: $("tokenizer").value,
     windows_bridge: $("windows-bridge").checked,
   }));
-  if ($("publication-outlook").open) await refreshPublicationOutlook();
+  await refreshWorkflow();
 }));
 $("run-form").addEventListener("submit", (event) => {
   event.preventDefault(); action(async () => {
@@ -545,6 +742,7 @@ $("load-tokenizer").addEventListener("click", () => action(async () => {
   renderPreflight(await api("/api/tokenizer-preflight", {
     tokenizer: $("tokenizer").value, model: $("model").value, network: "metadata",
   }));
+  await refreshWorkflow();
 }));
 
 $("tokenizer-download-confirm").addEventListener("click", () => action(async () => {
@@ -570,6 +768,8 @@ $("package-form").addEventListener("submit", (event) => {
       throw new Error("This run is not ready for a community submission. The checklist above lists every missing requirement. Your measurements are kept either way.");
     }
     renderRun(await api(`/api/runs/${selected}/package`, data));
+    await refreshWorkflow();
+    await refreshEvidence(selected);
   });
 });
 const community = new CommunitySubmission(api, () => {
@@ -625,6 +825,7 @@ async function init() {
     community.refresh();
     await refreshSetup(); jobs = await api("/api/runs"); renderJobs();
     if (jobs.length) await selectRun(jobs[0].id);
+    else await refreshWorkflow();
     poll();
   } catch (error) { notice(error.message, true); $("runner-status").hidden = true; }
 }

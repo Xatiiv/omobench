@@ -190,8 +190,22 @@ class GateSeparationTests(unittest.TestCase):
         self.assertIn("12 successful requests", item["recovery"])
 
     def test_a_submitter_nobody_entered_is_unchecked_not_satisfied(self) -> None:
+        """Absent, empty and present are three different answers."""
         self.assertEqual(find(self.submit(submitter=None), "submitter")["state"], "unknown")
-        self.assertEqual(find(self.submit(submitter="  "), "submitter")["state"], "blocked")
+        self.assertEqual(find(self.submit(submitter="  "), "submitter")["state"], "attention")
+        self.assertEqual(find(self.submit(submitter="xatiiv"), "submitter")["state"], "ok")
+        for value in (None, "  "):
+            self.assertIn("submitter", ids(self.submit(submitter=value), "submit"))
+
+    def test_what_is_absent_is_not_reported_as_what_is_wrong(self) -> None:
+        """Before a run, "you will need this" is not a failure."""
+        absent = find(self.package(revision=None), "weights-revision")
+        wrong = find(self.package(revision="main"), "weights-revision")
+        self.assertEqual(absent["state"], "attention")
+        self.assertEqual(wrong["state"], "blocked")
+        self.assertEqual(find(self.package(job={}), "measurements")["state"], "attention")
+        self.assertIn("Run the benchmark first",
+                      find(self.package(job={}), "measurements")["recovery"])
 
     def test_a_bridged_run_needs_its_serving_machine_before_packaging(self) -> None:
         job = {**COMPLETED_JOB, "transport": {"kind": "windows-stdio-http1-v1"}}

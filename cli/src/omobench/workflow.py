@@ -67,10 +67,13 @@ def check(
 ) -> dict[str, Any]:
     """One check, in the shape every surface renders.
 
-    `state` is "ok", "blocked", "attention" or "unknown". Only "blocked"
-    actually stops the gate named in `blocks`; "attention" is worth reading and
-    "unknown" means nobody has established it, which is never reported as a
-    pass.
+    `state` separates three ways of not being ready, because they call for
+    different things. "blocked" is a value that is present and wrong -- a
+    revision that moves, a server that refused. "attention" is a value that is
+    simply not there yet, which before a run is an ordinary statement of what
+    will be needed rather than a fault. "unknown" is a check nobody has run,
+    which is never reported as a pass. All three stand in the way of their
+    gate; only "blocked" is a failure.
     """
     if state not in {"ok", "blocked", "attention", "unknown"}:
         raise ValueError(f"Unknown check state: {state!r}")
@@ -241,12 +244,15 @@ def package_checks(
     checks = [check(
         "measurements",
         "Benchmark completed with measurements",
-        state="ok" if summary else "blocked",
+        state="ok" if summary else "attention",
         observed=(f"{summary['requests']['succeeded']} successful requests"
                   if summary and summary.get("requests") else None),
         source=SOURCE_RUN if summary else SOURCE_UNCHECKED,
         blocks="package",
-        recovery="" if summary else "Only a completed run can be packaged.",
+        recovery="" if summary else (
+            "This run produced no measurements, so there is nothing to package."
+            if job.get("status") in {"failed", "cancelled"} else
+            "Run the benchmark first; only a completed run can be packaged."),
     )]
 
     if job.get("transport"):
@@ -255,7 +261,7 @@ def package_checks(
             "serving-environment",
             "Serving environment is described separately from the runner",
             field="serving",
-            state="ok" if declared else ("unknown" if serving is None else "blocked"),
+            state="ok" if declared else ("unknown" if serving is None else "attention"),
             observed=(serving.get("host") or {}).get("cpu") if declared else None,
             source=SOURCE_YOU,
             blocks="package",
@@ -283,7 +289,9 @@ def package_checks(
         "weights-revision",
         "Immutable revision of the actual weights source",
         field="model_revision",
-        state="ok" if immutable else "blocked",
+        # Absent is a statement of what will be needed; a revision that moves
+        # is a value that is present and wrong.
+        state="ok" if immutable else ("attention" if not revision else "blocked"),
         observed=revision or None,
         source=SOURCE_YOU,
         blocks="package",
@@ -301,7 +309,7 @@ def package_checks(
         "runtime-build",
         "Exact serving runtime version",
         field="framework_version",
-        state="ok" if recorded else "blocked",
+        state="ok" if recorded else "attention",
         observed=f"{framework} {framework_version}" if recorded else None,
         source=SOURCE_YOU,
         blocks="package",
@@ -381,7 +389,7 @@ def submit_checks(
         field="submitter",
         # Absent is not the same as empty: with no value to look at, the
         # honest answer is that nobody has entered one yet.
-        state="unknown" if submitter is None else ("ok" if submitter.strip() else "blocked"),
+        state="unknown" if submitter is None else ("ok" if submitter.strip() else "attention"),
         observed=(submitter or "").strip() or None,
         source=SOURCE_YOU,
         blocks="submit",
