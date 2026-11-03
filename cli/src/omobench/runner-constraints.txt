@@ -1,0 +1,5 @@
+# Managed installer policy, not a complete transitive dependency lock.
+# Install torch from its CPU index first. Keep it CPU-only when resolving the
+# application from PyPI; an incompatible dependency must fail, not replace it.
+torch==2.15.0+cpu
+guidellm==0.7.3

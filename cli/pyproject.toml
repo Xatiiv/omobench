@@ -25,4 +25,4 @@ where = ["src"]
 license-files = ["LICENSE", "NOTICE"]
 
 [tool.setuptools.package-data]
-omobench = ["web/*.html", "web/*.css", "web/*.js"]
+omobench = ["web/*.html", "web/*.css", "web/*.js", "runner-constraints.txt"]

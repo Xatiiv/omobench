@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import hashlib
+import base64
+import binascii
 import json
 import sys
 from pathlib import Path
@@ -107,17 +109,22 @@ def load_profile_acceptance(
     if not profile_path.is_file():
         return None, f"benchmark.profile_id: profile file is missing: {profile_path}"
     try:
-        actual_hash = sha256(profile_path)
+        profile_bytes = profile_path.read_bytes()
+        actual_hash = "sha256:" + hashlib.sha256(profile_bytes).hexdigest()
     except OSError as error:
         return None, f"benchmark.profile_id: could not read profile file {profile_path}: {error}"
     if actual_hash != profile_sha256:
-        return None, (
-            f"benchmark.profile_sha256: does not match the current contents of {profile_path}; "
-            "the profile may have changed since this result was packaged"
-        )
+        # Only repository-reviewed snapshots may supply historical thresholds.
+        # Never derive a path from a submitted digest or normalize result bytes.
+        profile_bytes = historical_profile_bytes(profiles_path, profile_id, profile_sha256)
+        if profile_bytes is None:
+            return None, (
+                f"benchmark.profile_sha256: does not match the current contents of {profile_path} "
+                "or a verified historical snapshot; the profile may have changed since this result was packaged"
+            )
     try:
-        document = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
-    except yaml.YAMLError as error:
+        document = yaml.safe_load(profile_bytes.decode("utf-8"))
+    except (yaml.YAMLError, UnicodeError) as error:
         return None, f"benchmark.profile_id: malformed profile YAML at {profile_path} ({error})"
     acceptance = document.get("acceptance") if isinstance(document, dict) else None
     if not isinstance(acceptance, dict):
@@ -135,6 +142,35 @@ def load_profile_acceptance(
             "must be a non-negative number"
         )
     return {"minimum_successful_requests": minimum, "maximum_error_rate_percent": maximum}, None
+
+
+def historical_profile_bytes(profiles_path: Path, profile_id: str, digest: str) -> bytes | None:
+    """Resolve an exact, reviewed snapshot; a corrupt/ambiguous ledger fails closed.
+
+    Base64 keeps the historical bytes intact under Git line-ending conversion.
+    Acceptance is read from those bytes, never a second hand-maintained table.
+    This does not equate different hashes or make them comparable.
+    """
+    path = profiles_path / "history.json"
+    try:
+        if path.is_symlink() or path.stat().st_size > 1024 * 1024:
+            return None
+        ledger = json.loads(path.read_text(encoding="utf-8"))
+        if ledger.get("format_version") != 1 or not isinstance(ledger.get("entries"), list):
+            return None
+        matches = [entry for entry in ledger["entries"] if isinstance(entry, dict)
+                   and entry.get("profile_id") == profile_id and entry.get("sha256") == digest]
+        if len(matches) != 1:
+            return None
+        raw = base64.b64decode(matches[0]["content_base64"], validate=True)
+        if "sha256:" + hashlib.sha256(raw).hexdigest() != digest:
+            return None
+        document = yaml.safe_load(raw.decode("utf-8"))
+        if not isinstance(document, dict) or document.get("id") != profile_id:
+            return None
+        return raw
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, binascii.Error, yaml.YAMLError):
+        return None
 
 
 def safe_artifact_path(result_path: Path, artifact_path: str) -> Path | None:
