@@ -1163,13 +1163,23 @@ def guidellm_runner_invocation(command: list[str]) -> list[str]:
     return [sys.executable, "-m", "guidellm", *command[1:]]
 
 
-def run_guidellm_command(
+def run_guidellm_command(command, *, log_path, root, profile_id, telemetry_dir, bridge_credentials=None):
+    kwargs = dict(log_path=log_path, root=root, profile_id=profile_id, telemetry_dir=telemetry_dir)
+    if bridge_credentials is None:
+        return _run_guidellm_command(command, **kwargs)
+    from .bridge_runner import authenticated_backend
+    with authenticated_backend(bridge_credentials):
+        return _run_guidellm_command(command, bridge_credentials=bridge_credentials, **kwargs)
+
+
+def _run_guidellm_command(
     command: list[str],
     *,
     log_path: Path,
     root: Path,
     profile_id: str,
     telemetry_dir: Path | None,
+    bridge_credentials: dict | None = None,
 ) -> RunnerOutcome:
     """Run `command` (as built by build_guidellm_command) exactly as the
     plain subprocess path always has -- unless `telemetry_dir` is given, in
@@ -1185,6 +1195,10 @@ def run_guidellm_command(
     truncate the evidence it already wrote.
     """
     invocation = guidellm_runner_invocation(command)
+    private_input = {}
+    if bridge_credentials is not None:
+        invocation = [sys.executable, "-m", "omobench.bridge_runner", *command[1:]]
+        private_input = {"input": json.dumps(bridge_credentials) + "\n"}
 
     def plain_subprocess(note: str | None = None) -> RunnerOutcome:
         log_file = log_path.open("w", encoding="utf-8")
@@ -1192,7 +1206,7 @@ def run_guidellm_command(
             if note is not None:
                 log_file.write(note)
                 log_file.flush()
-            returncode = subprocess.run(invocation, stdout=log_file, stderr=subprocess.STDOUT, text=True).returncode
+            returncode = subprocess.run(invocation, stdout=log_file, stderr=subprocess.STDOUT, text=True, **private_input).returncode
         except BaseException:
             with contextlib.suppress(OSError, ValueError):
                 log_file.close()
@@ -1773,6 +1787,26 @@ def hardware_from_environment(
 
 
 def write_local_run(args: argparse.Namespace) -> int:
+    if getattr(args, "windows_bridge", False) and args.execute:
+        from .bridge import BridgeSession, provenance
+        from .bridge_http import Destination
+        try:
+            target = Destination.parse(args.endpoint.removesuffix("/v1").rstrip("/"))
+            if target.host != "127.0.0.1":
+                raise ValueError("The first Windows bridge supports IPv4 loopback only.")
+            with BridgeSession(target.port) as session:
+                bridged = argparse.Namespace(**vars(args))
+                bridged.endpoint = session.endpoint
+                bridged._bridge_credentials = session.credentials
+                bridged._bridge_provenance = provenance(target.port)
+                return _write_local_run(bridged)
+        except (ValueError, OSError) as error:
+            print(str(error), file=sys.stderr)
+            return 2
+    return _write_local_run(args)
+
+
+def _write_local_run(args: argparse.Namespace) -> int:
     root = find_repository_root()
     if root is None:
         print("Could not find an OmoBench checkout.", file=sys.stderr)
@@ -1803,6 +1837,8 @@ def write_local_run(args: argparse.Namespace) -> int:
         raw_output_path=raw_output_path,
         tokenizer=tokenizer,
     )
+    if getattr(args, "_bridge_credentials", None):
+        command[command.index("--backend") + 1] += ",http2=false"
     safe_command = redact_endpoint(shlex.join(command), args.endpoint)
 
     if not args.execute:
@@ -1825,6 +1861,7 @@ def write_local_run(args: argparse.Namespace) -> int:
         root=root,
         profile_id=args.profile,
         telemetry_dir=(root / telemetry_dir).resolve() if telemetry_dir else None,
+        **({"bridge_credentials": args._bridge_credentials} if getattr(args, "_bridge_credentials", None) else {}),
     )
     returncode = outcome.returncode
 
@@ -1833,11 +1870,18 @@ def write_local_run(args: argparse.Namespace) -> int:
         encoding="utf-8",
     )
     environment_path = run_directory / "environment.json"
-    environment_path.write_text(json.dumps(doctor_report(), indent=2) + "\n", encoding="utf-8")
+    environment = doctor_report()
+    if getattr(args, "_bridge_provenance", None):
+        environment["transport"] = args._bridge_provenance
+    environment_path.write_text(json.dumps(environment, indent=2) + "\n", encoding="utf-8")
     reproduce_path = run_directory / "reproduce.md"
     reproduce_path.write_text(
         "# Reproduce this local staging run\n\n"
         f"GuideLLM version: `{GUIDELLM_VERSION}`\n\n"
+        + ("Transport: experimental Windows stdio bridge, HTTP/1.1, local reports only. "
+           "Its latency is included. Reopen through the updated companion and select Windows bridge "
+           f"with Windows port {args._bridge_provenance['windows_port']}; the private ephemeral endpoint "
+           "below cannot be reused directly.\n\n" if getattr(args, "_bridge_provenance", None) else "")
         # Two identities, recorded separately: the string the server answered to,
         # and the tokenizer that built and counted the workload.
         + (f"Server model identifier: `{args.model}`\n\nTokenizer source (explicit override): `{tokenizer}`\n\n"
@@ -1946,6 +1990,8 @@ def package_local_run(args: argparse.Namespace) -> int:
         )
         if not isinstance(environment, dict):
             raise ValueError("environment.json must contain an object at its root.")
+        if environment.get("transport") is not None:
+            raise ValueError("Bridged measurements are local-only: the public schema cannot represent both serving and runner hosts.")
         hardware = hardware_from_environment(
             environment,
             args.cpu,
@@ -2244,6 +2290,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--model", required=True, help="canonical model ID served by the endpoint")
     run.add_argument("--profile", required=True, choices=sorted(PROFILE_SPECS), help="versioned OmoBench profile")
     run.add_argument("--output-dir", default=".omobench-runs", help="local staging directory, relative to repository root")
+    run.add_argument("--windows-bridge", action="store_true", help="explicit Windows loopback bridge, local reports only")
     run.add_argument("--execute", action="store_true", help="actually invoke GuideLLM; omit for a safe dry run")
     run.add_argument(
         "--tokenizer",
