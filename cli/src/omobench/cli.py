@@ -2489,8 +2489,15 @@ def build_parser() -> argparse.ArgumentParser:
     tokenizer = subcommands.add_parser(
         "tokenizer", help="load a tokenizer source in the runner's own interpreter, before benchmarking"
     )
-    tokenizer.add_argument("--source", required=True, help="Hugging Face repository id or local tokenizer folder")
-    tokenizer.add_argument("--model", help="the identifier your server answers to, when it differs")
+    tokenizer.add_argument("--source", help="Hugging Face repository id or local tokenizer folder")
+    tokenizer.add_argument(
+        "--model",
+        help=(
+            "the identifier your server answers to. Checked when --source is omitted, because "
+            "that is what the runner uses by default -- which is exactly the case that fails "
+            "when the identifier is a serving alias rather than a repository"
+        ),
+    )
     tokenizer.add_argument(
         "--network",
         choices=["none", "metadata", "download"],
@@ -2731,8 +2738,15 @@ def run_tokenizer_command(args: argparse.Namespace) -> int:
     """Load a tokenizer the way the benchmark will, before the benchmark does."""
     from . import tokenizer_preflight
 
+    # With no --source the runner would use the served identifier, so that is
+    # what gets checked: the default is the case worth checking, not a gap.
+    source = args.source or args.model
+    if not source:
+        print("Give --source, or --model to check the identifier the runner would fall back to.",
+              file=sys.stderr)
+        return 2
     report = tokenizer_preflight.preflight(
-        args.source, network=args.network, timeout=args.timeout)
+        source, network=args.network, timeout=args.timeout)
     print(report.message)
     for check in report.checks:
         print(f"  [{check['state']:>10}] {check['id']}: {check['detail']}")

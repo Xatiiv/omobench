@@ -318,6 +318,63 @@ class CancellationAndTimeoutTests(PreflightFixture):
         self.assertEqual(report.kind, "runner-unusable")
 
 
+class CommandLineTests(unittest.TestCase):
+    """The `omobench tokenizer` entry point, which drives the same preflight."""
+
+    def run_command(self, arguments: list[str]) -> tuple[int, str, str]:
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        from omobench.cli import build_parser, run_tokenizer_command
+
+        args = build_parser().parse_args(["tokenizer", *arguments])
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = run_tokenizer_command(args)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_neither_a_source_nor_a_model_is_refused(self) -> None:
+        code, _, stderr = self.run_command([])
+        self.assertEqual(code, 2)
+        self.assertIn("--source", stderr)
+
+    def checked_source(self, arguments: list[str]) -> str:
+        """Which source the command actually hands to the preflight."""
+        from unittest.mock import patch
+
+        from omobench.tokenizer_preflight import TokenizerPreflight
+
+        seen = {}
+
+        def record(source, **kwargs):
+            seen["source"] = source
+            return TokenizerPreflight(ok=True, kind="loaded", message="", source=source,
+                                      network=kwargs.get("network", "none"))
+
+        with patch("omobench.tokenizer_preflight.preflight", side_effect=record):
+            self.run_command(arguments)
+        return seen["source"]
+
+    def test_the_served_identifier_is_what_gets_checked_without_a_source(self) -> None:
+        """The runner falls back to it, so this is the case worth checking."""
+        self.assertEqual(self.checked_source(["--model", "deepseek-r1-distill-qwen-14b"]),
+                         "deepseek-r1-distill-qwen-14b")
+
+    def test_an_explicit_source_wins_over_the_served_identifier(self) -> None:
+        self.assertEqual(
+            self.checked_source(["--source", "Qwen/Qwen3-4B", "--model", "qwen3-4b"]),
+            "Qwen/Qwen3-4B")
+
+    def test_an_unloadable_source_exits_non_zero(self) -> None:
+        code, _, _ = self.run_command(["--source", "not a repo id"])
+        self.assertEqual(code, 1)
+
+    def test_the_offline_level_is_the_default(self) -> None:
+        from omobench.cli import build_parser
+        self.assertEqual(build_parser().parse_args(
+            ["tokenizer", "--source", "Qwen/Qwen3-4B"]).network, "none")
+
+
 class RealRunnerTests(unittest.TestCase):
     """One check against the interpreter and library the benchmark really uses."""
 
