@@ -1,0 +1,515 @@
+"""Six stages, and one list of checks that says what each one blocks.
+
+The panel used to answer three different questions with three different
+vocabularies. "Check this server" reported stages. "Check publication
+requirements" reported a checklist that only appeared after a run. Packaging
+reported validator errors. A contributor had to work out for themselves which
+of those stood between them and a measurement, which between them and a saved
+bundle, and which between them and the public registry.
+
+Those are three different gates and this module names them as three:
+
+    blocks="run"      the benchmark cannot start, or would die having
+                      measured nothing
+    blocks="package"  the benchmark can run, but its evidence cannot become a
+                      schema-valid bundle
+    blocks="submit"   the bundle is valid and the public registry will not
+                      take it
+
+Nothing here relaxes anything. Packaging and the registry validator remain the
+authority; this reports what they will say, early enough to act on. In
+particular a model awaiting catalog review blocks only submission: the
+benchmark runs, the evidence is real and the bundle is valid, because nothing
+about a pending review changes what the runner measured.
+
+Every check carries what was looked at, what was seen, where that came from,
+what it blocks, and what to do about it. A check nobody has run yet says so
+rather than passing.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+STAGES = ("connect", "identify", "check", "run", "review", "submit")
+STAGE_LABELS = {
+    "connect": "Connect",
+    "identify": "Identify",
+    "check": "Check",
+    "run": "Run",
+    "review": "Review",
+    "submit": "Submit",
+}
+GATES = ("run", "package", "submit")
+MUTABLE_REVISIONS = {"main", "master", "latest", "head"}
+
+# Where an observed value came from. Deliberately the contributor's vocabulary
+# rather than the schema's: "you" and "this machine" are what a person can act
+# on, and the result's own provenance field stays the schema's business.
+SOURCE_YOU = "you"
+SOURCE_SERVER = "your server"
+SOURCE_MACHINE = "this machine"
+SOURCE_CATALOG = "the OmoBench catalog"
+SOURCE_RUN = "this run's evidence"
+SOURCE_UNCHECKED = "not checked yet"
+
+
+def check(
+    identifier: str,
+    label: str,
+    *,
+    state: str,
+    observed: Any = None,
+    source: str = SOURCE_UNCHECKED,
+    blocks: str | None = None,
+    recovery: str = "",
+    detail: str = "",
+    field: str | None = None,
+) -> dict[str, Any]:
+    """One check, in the shape every surface renders.
+
+    `state` is "ok", "blocked", "attention" or "unknown". Only "blocked"
+    actually stops the gate named in `blocks`; "attention" is worth reading and
+    "unknown" means nobody has established it, which is never reported as a
+    pass.
+    """
+    if state not in {"ok", "blocked", "attention", "unknown"}:
+        raise ValueError(f"Unknown check state: {state!r}")
+    if blocks is not None and blocks not in GATES:
+        raise ValueError(f"A check can only block {', '.join(GATES)}: {blocks!r}")
+    return {
+        "id": identifier,
+        "label": label,
+        "state": state,
+        "observed": observed,
+        "source": source if observed is not None else SOURCE_UNCHECKED,
+        "blocks": blocks,
+        "recovery": recovery,
+        "detail": detail,
+        "field": field,
+    }
+
+
+def as_requirement(item: dict[str, Any]) -> dict[str, Any]:
+    """One check in the panel checklist's older shape.
+
+    The checklist predates this module and several surfaces read it. Rather
+    than compute the same conclusions twice, it became a view: `ok` is true
+    when the check passed, false when something is standing in the way, and
+    null when nobody has established it -- which is never reported as a pass.
+    """
+    return {
+        "field": item["field"],
+        "label": item["label"],
+        "ok": True if item["state"] == "ok" else None if item["state"] == "unknown" else False,
+        "detail": " ".join(part for part in (item["detail"], item["recovery"]) if part),
+        "blocks": item["blocks"],
+    }
+
+
+def blocking(checks: list[dict[str, Any]], gate: str) -> list[dict[str, Any]]:
+    """Everything still standing between the contributor and one named gate.
+
+    Not established counts. A tokenizer nobody has loaded and a submitter
+    nobody has entered are as much in the way as a check that failed, and
+    treating "we have not looked" as "fine" is how a run gets started that
+    dies resolving its tokenizer.
+    """
+    return [item for item in checks if item["state"] != "ok" and item["blocks"] == gate]
+
+
+def failing(checks: list[dict[str, Any]], gate: str) -> list[dict[str, Any]]:
+    """The subset that is actually wrong, rather than merely unestablished.
+
+    The difference matters for what a stage is called: something to go and do
+    is not the same as something that went wrong.
+    """
+    return [item for item in checks if item["state"] == "blocked" and item["blocks"] == gate]
+
+
+def run_checks(
+    *,
+    setup_ok: bool,
+    setup_message: str,
+    endpoint: str | None,
+    server_check: dict[str, Any] | None,
+    tokenizer_report: dict[str, Any] | None,
+    tokenizer_source: str | None,
+) -> list[dict[str, Any]]:
+    """What stands between this configuration and a benchmark that measures something.
+
+    These are the only checks that can stop a run. Everything else -- catalog
+    eligibility, an immutable revision, a submitter -- is about what happens to
+    the measurements afterwards, and a run blocked on any of those would be a
+    run refused for a reason the runner does not have.
+    """
+    checks = [check(
+        "runner",
+        "The benchmark runner can start here",
+        state="ok" if setup_ok else "blocked",
+        observed="ready" if setup_ok else "unavailable",
+        source=SOURCE_MACHINE,
+        blocks="run",
+        recovery="" if setup_ok else setup_message,
+        detail=setup_message,
+    )]
+
+    if not endpoint:
+        checks.append(check(
+            "endpoint", "Your server answered", state="unknown", blocks="run",
+            recovery="Enter the loopback address and port your server listens on, then "
+                     "choose Check this server."))
+    elif server_check is None:
+        checks.append(check(
+            "endpoint", "Your server answered", state="unknown", observed=endpoint,
+            source=SOURCE_YOU, blocks="run",
+            recovery="Choose Check this server. Until it runs, nothing here has contacted "
+                     "that address."))
+    else:
+        failed = [stage for stage in server_check.get("stages", [])
+                  if stage.get("state") == "failed"]
+        passed = not failed
+        checks.append(check(
+            "endpoint",
+            "Your server answered",
+            state="ok" if passed else "blocked",
+            observed=endpoint,
+            source=SOURCE_SERVER,
+            blocks="run",
+            recovery="" if passed else failed[0].get("detail", ""),
+            detail=(server_check.get("summary") or "")
+                   if passed else "; ".join(stage.get("title", "") for stage in failed),
+        ))
+        served = server_check.get("served_models") or []
+        if served:
+            checks.append(check(
+                "served-models", "The server listed the models it serves",
+                state="ok", observed=", ".join(served[:6]), source=SOURCE_SERVER,
+                detail="These are the identifiers its API answers to, which are not "
+                       "necessarily catalog model identities."))
+
+    if tokenizer_report is None:
+        checks.append(check(
+            "tokenizer", "The runner can load the tokenizer",
+            state="unknown",
+            observed=tokenizer_source or None,
+            source=SOURCE_YOU if tokenizer_source else SOURCE_UNCHECKED,
+            blocks="run",
+            recovery="Choose Load tokenizer now. GuideLLM resolves the tokenizer before it "
+                     "sends a single request, so one it cannot load ends the run having "
+                     "measured nothing -- and a GGUF repository, which serves perfectly "
+                     "well, contains no Transformers tokenizer at all."))
+    else:
+        loaded = bool(tokenizer_report.get("ok"))
+        identity = tokenizer_report.get("identity") or {}
+        checks.append(check(
+            "tokenizer",
+            "The runner can load the tokenizer",
+            state="ok" if loaded else "blocked",
+            observed=(f"{tokenizer_report.get('source')}"
+                      + (f" · {identity['class']}" if identity.get("class") else "")),
+            source=SOURCE_MACHINE,
+            blocks="run",
+            recovery="" if loaded else (
+                (tokenizer_report.get("suggestion") or {}).get("source")
+                and f"The publisher names {tokenizer_report['suggestion']['source']} as this "
+                    "repository's base model. Check the model card, then enter it deliberately."
+                or "Enter a repository that publishes a Transformers tokenizer, and load it again."),
+            detail=tokenizer_report.get("message", ""),
+        ))
+        checks.append(check(
+            "tokenizer-match", "The tokenizer matches the served weights",
+            state="unknown", observed=None, blocks=None,
+            detail="Not verifiable from here, and nothing available to OmoBench can establish "
+                   "it. A tokenizer that loads is not thereby the one the served weights were "
+                   "trained with; the wrong one changes every token count and so every "
+                   "measurement.",
+            recovery="Pick the repository the model card names, not merely one that loads."))
+    return checks
+
+
+def package_checks(
+    *,
+    job: dict[str, Any],
+    model: str | None,
+    revision: str | None,
+    framework: str | None,
+    framework_version: str | None,
+    serving: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """What stands between a finished run and a schema-valid bundle."""
+    summary = job.get("summary")
+    checks = [check(
+        "measurements",
+        "Benchmark completed with measurements",
+        state="ok" if summary else "blocked",
+        observed=(f"{summary['requests']['succeeded']} successful requests"
+                  if summary and summary.get("requests") else None),
+        source=SOURCE_RUN if summary else SOURCE_UNCHECKED,
+        blocks="package",
+        recovery="" if summary else "Only a completed run can be packaged.",
+    )]
+
+    if job.get("transport"):
+        declared = bool(serving and (serving.get("host") or {}).get("cpu"))
+        checks.append(check(
+            "serving-environment",
+            "Serving environment is described separately from the runner",
+            field="serving",
+            state="ok" if declared else ("unknown" if serving is None else "blocked"),
+            observed=(serving.get("host") or {}).get("cpu") if declared else None,
+            source=SOURCE_YOU,
+            blocks="package",
+            recovery="" if declared else
+                     "Describe the serving machine: its operating system, processor, memory, "
+                     "accelerators and serving runtime. This panel is running in WSL, and what "
+                     "WSL can see of the Windows host is not evidence about what served the "
+                     "model, so none of it is filled in for you.",
+            detail="Recorded, and marked as declared by you rather than detected here."
+                   if declared else
+                   "This run's model server and its benchmark runner were different "
+                   "environments, so the result records them separately.",
+        ))
+        checks.append(check(
+            "transport-overhead",
+            "Bridge latency is inside the measurements",
+            state="ok", observed="included, never subtracted", source=SOURCE_RUN,
+            detail="Every number this run reports includes the loopback bridge's own latency. "
+                   "It is recorded as included and is never subtracted, so a bridged result is "
+                   "comparable with other bridged results and is labelled wherever it is shown.",
+        ))
+
+    immutable = bool(revision) and revision.strip().lower() not in MUTABLE_REVISIONS
+    checks.append(check(
+        "weights-revision",
+        "Immutable revision of the actual weights source",
+        field="model_revision",
+        state="ok" if immutable else "blocked",
+        observed=revision or None,
+        source=SOURCE_YOU,
+        blocks="package",
+        recovery="" if immutable else
+                 "A commit SHA or other immutable revision of the repository the weights really "
+                 "came from. 'main', 'master' and 'latest' move, so they identify nothing. This "
+                 "is not the file's SHA-256 checksum and not the OmoBench source commit. When "
+                 "the weights come from a quantization repository, record that repository as "
+                 "the weights source and pin its own revision. Weights with no public immutable "
+                 "revision can be identified by their bytes instead: `omobench weights` hashes "
+                 "the files you name and prints the revision to record.",
+    ))
+    recorded = bool(framework) and bool(framework_version)
+    checks.append(check(
+        "runtime-build",
+        "Exact serving runtime version",
+        field="framework_version",
+        state="ok" if recorded else "blocked",
+        observed=f"{framework} {framework_version}" if recorded else None,
+        source=SOURCE_YOU,
+        blocks="package",
+        recovery="" if recorded else
+                 "The inference runtime and its exact version, for example llama.cpp build "
+                 "b10621. An application version (the LM Studio release, say) is a different "
+                 "thing from the llama.cpp build it embeds; record the runtime build, and do "
+                 "not guess one. Both are recorded separately.",
+    ))
+    return checks
+
+
+def submit_checks(
+    *,
+    job: dict[str, Any],
+    model: str | None,
+    catalog: list[str],
+    proposal: dict[str, Any] | None,
+    submitter: str | None,
+) -> list[dict[str, Any]]:
+    """What stands between a valid bundle and the public registry.
+
+    None of these can stop a benchmark or invalidate a bundle. A model awaiting
+    catalog review is the clearest case: the measurements are real, the
+    evidence is complete and the bundle validates, and all that is missing is a
+    decision somebody else has to make.
+    """
+    catalogued = bool(model) and model in catalog
+    missing = (proposal or {}).get("missing") or []
+    complete = bool(proposal) and not missing
+    checks: list[dict[str, Any]] = [check(
+        "catalog",
+        "Canonical model ID is in the OmoBench catalog",
+        field="model",
+        state="ok" if catalogued else ("ok" if complete else "attention"),
+        observed=(model or None) if catalogued or not model else
+                 (f"{model} (proposed for review)" if complete else model),
+        source=SOURCE_CATALOG if catalogued else SOURCE_YOU,
+        blocks=None if catalogued or complete else "submit",
+        recovery="" if catalogued or complete else
+                 f"{model} is not currently eligible for the community registry as a "
+                 f"catalogued model: the catalog ({', '.join(catalog)}) is the registry's "
+                 "source of truth. Either choose the catalogued identity you actually ran -- "
+                 "never substitute a different, catalogued model for the one you ran -- or "
+                 "submit a proposal with this result so a reviewer can consider adding it. "
+                 "You can still run this benchmark and export its local report either way.",
+        detail=f"{model} is catalogued." if catalogued else
+               ("Submitted with a proposal asking for this model to be reviewed for the "
+                "catalog. The result and the proposal are judged separately."
+                if complete else
+                "Catalog eligibility is a separate question from whether your server serves "
+                "this model. The server answering to a name establishes nothing about the "
+                "catalog."),
+    )]
+
+    if not catalogued:
+        checks.append(check(
+            "proposal",
+            "Model proposal for review",
+            state="ok" if complete else ("unknown" if proposal is None else "blocked"),
+            observed="complete" if complete else (", ".join(missing) or None),
+            source=SOURCE_YOU,
+            blocks="submit",
+            recovery="" if complete else
+                     "Fill in the model's family, parameter class, publisher page, licence and "
+                     "why it belongs, and confirm the weights are publicly downloadable."
+                     if proposal is not None else
+                     "Open Propose this model for the catalog, or choose a catalogued identity.",
+            detail="A proposal is a request for review and nothing more. Accepting it is a "
+                   "separate, reviewed change to the catalog: merging this result would not "
+                   "add the model, and this result is marked as proposed wherever it appears.",
+        ))
+
+    checks.append(check(
+        "submitter",
+        "Submitter identity",
+        field="submitter",
+        # Absent is not the same as empty: with no value to look at, the
+        # honest answer is that nobody has entered one yet.
+        state="unknown" if submitter is None else ("ok" if submitter.strip() else "blocked"),
+        observed=(submitter or "").strip() or None,
+        source=SOURCE_YOU,
+        blocks="submit",
+        recovery="" if (submitter or "").strip() else
+                 "Enter the GitHub username or organization to record in the bundle.",
+    ))
+
+    validation = job.get("validation")
+    acceptance = [message for message in (validation or {}).get("errors", [])
+                  if "acceptance:" in message]
+    checks.append(check(
+        "acceptance",
+        "Profile acceptance",
+        state="unknown" if not validation else ("blocked" if acceptance else "ok"),
+        observed=None if not validation else ("not met" if acceptance else "met"),
+        source=SOURCE_RUN if validation else SOURCE_UNCHECKED,
+        blocks="submit",
+        recovery=" ".join(acceptance) if acceptance else
+                 ("" if validation else "Checked when you package this run."),
+        detail="The profile sets its own minimum successful requests and maximum error rate. "
+               "A benchmark that finished is not thereby a result the registry will take.",
+    ))
+    return checks
+
+
+def stages(
+    checks: list[dict[str, Any]],
+    *,
+    endpoint_checked: bool,
+    identity_settled: bool,
+    job: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Where the contributor actually is, derived from state rather than clicks.
+
+    A stage is "done" because the thing it stands for happened, so going back
+    to fix something does not lose the stages after it -- they simply recompute
+    from what is true now.
+    """
+    job = job or {}
+    completed = bool(job.get("summary"))
+    packaged = bool((job.get("validation") or {}).get("valid"))
+    submitted = bool((job.get("submission") or {}).get("pull_request_url"))
+    runnable = not blocking(checks, "run")
+
+    done = {
+        "connect": endpoint_checked,
+        "identify": identity_settled,
+        "check": runnable and endpoint_checked,
+        "run": completed,
+        "review": packaged,
+        "submit": submitted,
+    }
+    blocked = {
+        "connect": bool(failing(checks, "run")) and not endpoint_checked,
+        "check": bool(failing(checks, "run")),
+        "review": completed and bool(failing(checks, "package")),
+        "submit": packaged and bool(failing(checks, "submit")),
+    }
+    current = next((stage for stage in STAGES if not done[stage]), STAGES[-1])
+    return [{
+        "id": stage,
+        "label": STAGE_LABELS[stage],
+        "state": ("done" if done[stage] else
+                  "blocked" if blocked.get(stage) else
+                  "current" if stage == current else "todo"),
+    } for stage in STAGES]
+
+
+# What a contributor means by "done" changes six times between a finished
+# benchmark and a published result, and the panel used to show two of those
+# six. The gap is where false confidence lives: a validated bundle is not a
+# submission, and an open pull request is not an accepted result.
+COMPLETION_STEPS = (
+    ("benchmark", "Benchmark completed"),
+    ("evidence", "Evidence saved on this machine"),
+    ("package", "Bundle validated"),
+    ("ready", "Ready to submit"),
+    ("submitted", "Submitted for review"),
+    ("published", "Accepted and published"),
+)
+
+
+def completion(job: dict[str, Any], *, submit_blocked: bool) -> list[dict[str, Any]]:
+    """Six states, each reported only once something confirms it.
+
+    Nothing here is inferred forwards. A pull request that exists is submitted
+    and not accepted; acceptance is somebody else's decision, happens after a
+    merge and a site build, and this panel never observes it -- so it is shown
+    as outstanding rather than assumed, however long ago the submission went in.
+    """
+    validation = job.get("validation") or {}
+    submission = job.get("submission") or {}
+    measured = bool(job.get("summary"))
+    saved = bool(job.get("run_path")) and measured
+    validated = validation.get("valid") is True
+    state = {
+        "benchmark": "done" if measured else (
+            "failed" if job.get("status") in {"failed", "cancelled"} else "pending"),
+        "evidence": "done" if saved else "pending",
+        "package": "done" if validated else (
+            "failed" if validation.get("valid") is False else "pending"),
+        "ready": "done" if validated and not submit_blocked else (
+            "blocked" if validated else "pending"),
+        "submitted": "done" if submission.get("pull_request_url") else (
+            "failed" if submission.get("started") and not submission.get("pull_request_url")
+            else "pending"),
+        "published": "pending",
+    }
+    detail = {
+        "benchmark": "This run produced measurements." if measured else
+                     "No measurements were produced." if state["benchmark"] == "failed" else
+                     "Not finished yet.",
+        "evidence": f"Kept at {job.get('run_path')}." if saved else
+                    "The run's own files are written when it finishes.",
+        "package": "The registry validator accepted this bundle." if validated else
+                   "The registry validator refused this bundle; its reasons are listed above."
+                   if state["package"] == "failed" else "Not packaged yet.",
+        "ready": "Nothing is standing in the way of submitting this." if state["ready"] == "done"
+                 else "The bundle is valid; the registry still needs something above."
+                 if state["ready"] == "blocked" else "Package the run first.",
+        "submitted": f"Pull request open: {submission.get('pull_request_url')}"
+                     if submission.get("pull_request_url") else
+                     "Submission started but no pull request was created. The evidence is "
+                     "untouched and can be submitted again without re-running anything."
+                     if state["submitted"] == "failed" else "Not submitted.",
+        "published": "Acceptance follows review, a merge and a website build. This panel does "
+                     "not observe it, so it is never shown as done here -- check the pull "
+                     "request.",
+    }
+    return [{"id": key, "label": label, "state": state[key], "detail": detail[key]}
+            for key, label in COMPLETION_STEPS]
