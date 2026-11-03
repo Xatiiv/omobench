@@ -34,6 +34,13 @@ namespace OmoBench.Companion
                 int port;
                 return int.TryParse(argv[1], out port) ? BridgeWorker.Run(port) : 2;
             }
+            // Reads this machine's serving hardware and prints it. Like the
+            // bridge worker above, it is outside the GUI singleton and
+            // configuration lifecycle, and is unreachable from a URI.
+            if (argv.Length == 1 && argv[0] == "--hardware-probe-v1")
+            {
+                return HardwareProbe.Run();
+            }
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 

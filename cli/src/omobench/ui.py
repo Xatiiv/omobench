@@ -359,6 +359,9 @@ class Controller:
         self.worker: threading.Thread | None = None
         self.busy = False
         self.closing = False
+        # What the companion last read on the serving machine. Session-only: a
+        # detection is a reading of a machine at a time, not a saved fact.
+        self.last_serving_probe: dict | None = None
         from .github_auth import DeviceSession
         self.github_auth = DeviceSession()
         self.community_reviews: dict[str, dict] = {}
@@ -974,6 +977,62 @@ class Controller:
         except ValueError as error:
             raise UIError(str(error)) from error
 
+    def serving_probe(self, data: dict) -> dict:
+        """Read the Windows serving machine's hardware, on that machine.
+
+        This exists for one arrangement: the model server on Windows, the
+        benchmark runner in WSL2. From in here the host's processor, memory and
+        accelerators are invisible or wrong, and publishing what WSL can see as
+        though it described the server is the mistake the whole schema exists
+        to prevent. The companion reads them where they live.
+
+        Finding a card is not evidence that inference used it, so nothing here
+        claims a role for one; and video memory is deliberately absent, because
+        Windows reports it capped and wrong for exactly the cards this matters
+        for.
+        """
+        from .bridge import helper_path
+        from .serving_metadata import HARDWARE_PROBE_KIND
+
+        if type(data.get("windows_bridge", False)) is not bool:
+            raise UIError("Windows bridge selection must be a boolean.")
+        try:
+            helper = helper_path()
+        except ValueError as error:
+            raise UIError(str(error)) from error
+        with self.lock:
+            if self.busy or self.closing:
+                raise UIError("Wait for the active operation before reading the serving hardware.", 409)
+            self.busy = True
+        try:
+            completed = subprocess.run([helper, "--hardware-probe-v1"],
+                                       capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise UIError("The companion did not answer. Open this panel through the updated "
+                          "Windows companion and try again.") from error
+        finally:
+            with self.lock:
+                self.busy = False
+        if completed.returncode != 0:
+            raise UIError("The companion could not read this machine's hardware. Enter the "
+                          "serving machine's details yourself instead.")
+        try:
+            document = json.loads(completed.stdout)
+        except ValueError as error:
+            raise UIError("The companion returned something this panel cannot read.") from error
+        if not isinstance(document, dict) or document.get("kind") != HARDWARE_PROBE_KIND:
+            raise UIError("The companion returned a document this panel does not recognise.")
+        with self.lock:
+            self.last_serving_probe = {key: document[key]
+                                       for key in ("kind", "os", "cpu", "ram_gb", "accelerators")
+                                       if key in document}
+        document["note"] = (
+            "Read on the Windows machine itself, so these are detected facts. Video memory is "
+            "not among them: Windows reports it capped and wrong for larger cards, so enter it "
+            "from the serving runtime's own hardware panel. Finding a card is not evidence that "
+            "inference used it; say which one served.")
+        return document
+
     def model_suggestions(self, data: dict) -> dict:
         """Catalog entries a served alias may mean. It never picks one."""
         from .model_identity import suggest_catalog_models
@@ -1053,6 +1112,15 @@ class Controller:
         served = text_field(data, "served_model_id", optional=True)
         if served:
             declaration["served_model_id"] = served
+        if data.get("probe"):
+            # The page asks for the probe by name; it never supplies one. What
+            # is recorded as detected is what this panel read for itself, not a
+            # document that made a round trip through a browser.
+            probe = self.last_serving_probe
+            if not probe:
+                raise UIError("No serving hardware has been read on this machine yet. Use "
+                              "'Read the serving hardware' first, or describe it yourself.")
+            declaration.setdefault("serving", {})["probe"] = dict(probe)
         status = data.get("catalog_status")
         if status is not None:
             if status not in {"catalogued", "proposed"}:
@@ -1383,6 +1451,8 @@ class UIHandler(BaseHTTPRequestHandler):
                 return self._json(controller.tokenizer_download_plan(data))
             if self.path == "/api/model-suggestions":
                 return self._json(controller.model_suggestions(data))
+            if self.path == "/api/serving-probe":
+                return self._json(controller.serving_probe(data))
             if self.path == "/api/weight-identity":
                 return self._json(controller.weight_identity(data))
             if self.path == "/api/server-check":

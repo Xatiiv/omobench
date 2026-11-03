@@ -142,18 +142,30 @@ def _accelerators(declaration: dict[str, Any], probe: dict[str, Any] | None) -> 
     # but it says nothing about which device served, so anything it adds that
     # the contributor did not claim keeps role "unknown".
     for entry in probed:
-        candidate = accelerator({**entry, "role": "unknown"} if isinstance(entry, dict) else entry,
-                                provenance="detected")
+        if not isinstance(entry, dict):
+            raise ServingMetadataError("The hardware probe reported an unusable accelerator.")
+        # A probe reports more than an accelerator record holds -- a driver
+        # version, for instance. Only the device facts are taken, and the role
+        # is left unknown because a probe watched nothing run.
+        candidate = accelerator(
+            {key: entry[key] for key in ("vendor", "model", "memory_gb", "count") if key in entry}
+            | {"role": "unknown"},
+            provenance="detected")
         match = next((existing for existing in entries
                       if existing["vendor"] == candidate["vendor"]
                       and existing["model"] == candidate["model"]), None)
         if match is None:
             entries.append(candidate)
             continue
-        match["provenance"] = "detected"
         match["count"] = candidate["count"]
         if candidate["memory_gb"] is not None:
             match["memory_gb"] = candidate["memory_gb"]
+            match["provenance"] = "detected"
+        elif match["memory_gb"] is None:
+            match["provenance"] = "detected"
+        # Otherwise the probe found the device but not its memory, and the
+        # memory came from a person. The entry as a whole is then not a
+        # detection, and is left as what it is.
     if len(entries) > MAX_ACCELERATORS:
         raise ServingMetadataError(f"At most {MAX_ACCELERATORS} accelerators can be recorded.")
     return entries

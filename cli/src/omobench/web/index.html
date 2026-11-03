@@ -125,7 +125,9 @@
           </div>
           <details id="serving-environment" open>
             <summary>The machine that served the model</summary>
-            <p class="hint" id="serving-why">Where inference actually happened, which is not always where this panel is running. Each fact is recorded with how it was established: detected here, or declared by you. Nothing is filled in from a machine that did not serve the model.</p>
+            <p class="hint" id="serving-why">Where inference actually happened, which is not always where this panel is running. Each fact is recorded with how it was established: detected on the serving machine, or declared by you. Nothing is filled in from a machine that did not serve the model.</p>
+            <div class="actions"><button id="read-serving-hardware" type="button" class="secondary">Read the serving hardware</button></div>
+            <p id="serving-probe-result" class="hint" role="status"></p>
             <div class="grid two">
               <label>Serving operating system<input name="serving_os" id="serving-os" placeholder="For example Windows 11 Pro 10.0.26200"></label>
               <label>Serving processor<input name="serving_cpu" id="serving-cpu" placeholder="For example AMD Ryzen 7 9800X3D"></label>

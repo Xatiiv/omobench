@@ -433,6 +433,8 @@ function withProvenance(data) {
   if (weights) enriched.weights = weights;
   const proposal = proposalDeclaration();
   if (proposal) { enriched.proposal = proposal; enriched.catalog_status = "proposed"; }
+  // A request for the probe the panel read itself, not a document from here.
+  if (servingProbeRead) enriched.probe = true;
   delete enriched.serving_os; delete enriched.serving_cpu; delete enriched.serving_ram_gb;
   delete enriched.serving_placement; delete enriched.serving_placement_detail;
   delete enriched.serving_accelerators; delete enriched.serving_application;
@@ -443,6 +445,24 @@ function withProvenance(data) {
   delete enriched.proposal_licence; delete enriched.proposal_rationale;
   return enriched;
 }
+
+// Asks the companion to read the Windows machine's hardware, where it lives.
+// What comes back fills the fields; what it cannot know stays empty rather
+// than being guessed at, and the page never sends a probe document of its own.
+let servingProbeRead = false;
+$("read-serving-hardware").addEventListener("click", () => action(async () => {
+  $("serving-probe-result").textContent = "Asking the companion to read this machine's hardware…";
+  const probe = await api("/api/serving-probe", {windows_bridge: $("windows-bridge").checked});
+  servingProbeRead = true;
+  if (probe.os) $("serving-os").value = probe.os;
+  if (probe.cpu) $("serving-cpu").value = probe.cpu;
+  if (probe.ram_gb) $("serving-ram-gb").value = String(probe.ram_gb);
+  const lines = (probe.accelerators || []).map((device) =>
+    // Memory is left out on purpose: see the note the probe returns.
+    [device.vendor, device.model, "", String(device.count ?? 1), "unknown"].join(", "));
+  if (lines.length) $("serving-accelerators").value = lines.join("\n");
+  $("serving-probe-result").textContent = probe.note;
+}));
 
 $("suggest-model").addEventListener("click", () => action(async () => {
   const alias = $("served-model-id").value.trim() || $("model").value.trim();

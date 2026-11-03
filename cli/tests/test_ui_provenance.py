@@ -16,6 +16,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from omobench import bridge  # noqa: F401  (patched by name below)
 from omobench.ui import Controller, UIError
 from test_cli import GUIDELLM_REPORT_V2
 from test_ui import make_root
@@ -281,6 +282,149 @@ class TokenizerEndpointTests(PanelFixture):
             with self.controller.lock:
                 self.controller.busy = False
 
+
+COMPANION = r"C:\Program Files\OmoBench\OmoBenchCompanion.exe"
+
+PROBE_DOCUMENT = {
+    "kind": "omobench-serving-hardware-probe-v1",
+    "os": "Microsoft Windows 11 Pro 10.0.26200",
+    "cpu": "AMD Ryzen 7 9800X3D",
+    "ram_gb": 63.72,
+    # What the real companion reports: a driver version it also knows, and no
+    # video memory, because Windows reports that capped and wrong.
+    "accelerators": [
+        {"vendor": "amd", "model": "AMD Radeon RX 9070", "memory_gb": None, "count": 1,
+         "driver_version": "32.0.15.9671"},
+    ],
+}
+
+
+class ServingProbeTests(PanelFixture):
+    """Reading the Windows machine's hardware, on the Windows machine."""
+
+    def probe(self, *, returncode=0, stdout=None, raises=None):
+        """Stand in for the companion, and only for the companion.
+
+        Every other subprocess the panel starts -- packaging runs the real CLI
+        -- goes through untouched, so these tests exercise the real packaging
+        path with a stand-in reading of the serving machine.
+        """
+        import subprocess as subprocess_module
+
+        calls = []
+        real_run = subprocess_module.run
+
+        def fake_run(command, **kwargs):
+            if not (isinstance(command, list) and "--hardware-probe-v1" in command):
+                return real_run(command, **kwargs)
+            calls.append(command)
+            if raises is not None:
+                raise raises
+            return subprocess_module.CompletedProcess(
+                command, returncode,
+                stdout=json.dumps(PROBE_DOCUMENT) if stdout is None else stdout, stderr="")
+
+        helper = patch("omobench.bridge.helper_path", return_value=COMPANION)
+        runner = patch("omobench.ui.subprocess.run", side_effect=fake_run)
+        helper.start(); runner.start()
+        self.addCleanup(helper.stop); self.addCleanup(runner.stop)
+        return calls
+
+    def test_the_probe_runs_the_companion_and_nothing_else(self) -> None:
+        calls = self.probe()
+        document = self.controller.serving_probe({})
+        self.assertEqual(calls, [[COMPANION, "--hardware-probe-v1"]])
+        self.assertEqual(document["cpu"], "AMD Ryzen 7 9800X3D")
+
+    def test_the_answer_says_what_it_cannot_establish(self) -> None:
+        self.probe()
+        note = self.controller.serving_probe({})["note"]
+        self.assertIn("Video memory is not among them", note)
+        self.assertIn("not evidence that inference used it", note)
+
+    def test_facts_read_on_the_serving_machine_are_recorded_as_detected(self) -> None:
+        self.probe()
+        self.controller.serving_probe({})
+        job_id = self.completed_job(bridged=True)
+        self.controller.package(job_id, {**PACKAGE_FORM, "serving": SERVING, "probe": True})
+        result = json.loads(
+            (self.controller.run_directory(job_id) / "result.json").read_text(encoding="utf-8"))
+        host = result["environment"]["serving"]["host"]
+        self.assertEqual(host["cpu"], {"value": "AMD Ryzen 7 9800X3D", "provenance": "detected"})
+        self.assertEqual(host["os"]["provenance"], "detected")
+
+    def test_a_device_whose_memory_a_person_supplied_is_not_a_pure_detection(self) -> None:
+        """The probe found the card; Windows would not say how much VRAM it has."""
+        self.probe()
+        self.controller.serving_probe({})
+        job_id = self.completed_job(bridged=True)
+        self.controller.package(job_id, {**PACKAGE_FORM, "serving": SERVING, "probe": True})
+        result = json.loads(
+            (self.controller.run_directory(job_id) / "result.json").read_text(encoding="utf-8"))
+        device = result["environment"]["serving"]["accelerators"][0]
+        self.assertEqual(device["memory_gb"], 16.0)
+        self.assertEqual(device["provenance"], "contributor-declared")
+        self.assertEqual(device["role"], "inference")
+
+    def test_the_panel_uses_the_probe_it_read_rather_than_one_it_was_handed(self) -> None:
+        self.probe()
+        self.controller.serving_probe({})
+        job_id = self.completed_job(bridged=True)
+        invented = {"kind": "omobench-serving-hardware-probe-v1", "os": "Invented OS",
+                    "cpu": "Invented CPU", "ram_gb": 999.0, "accelerators": []}
+        self.controller.package(job_id, {**PACKAGE_FORM, "serving": SERVING, "probe": invented})
+        result = json.loads(
+            (self.controller.run_directory(job_id) / "result.json").read_text(encoding="utf-8"))
+        self.assertEqual(result["environment"]["serving"]["host"]["cpu"]["value"],
+                         "AMD Ryzen 7 9800X3D")
+        self.assertNotEqual(result["hardware"]["ram_gb"], 999.0)
+
+    def test_asking_for_a_probe_before_reading_one_is_refused(self) -> None:
+        job_id = self.completed_job(bridged=True)
+        with self.assertRaises(UIError) as raised:
+            self.controller.package(job_id, {**PACKAGE_FORM, "serving": SERVING, "probe": True})
+        self.assertIn("No serving hardware has been read", str(raised.exception))
+
+    def test_a_companion_that_is_not_there_is_reported_not_guessed_around(self) -> None:
+        helper = patch("omobench.bridge.helper_path",
+                       side_effect=ValueError("Open this panel through the updated companion."))
+        helper.start(); self.addCleanup(helper.stop)
+        with self.assertRaises(UIError):
+            self.controller.serving_probe({})
+
+    def test_a_failing_probe_sends_the_contributor_to_the_form(self) -> None:
+        self.probe(returncode=1)
+        with self.assertRaises(UIError) as raised:
+            self.controller.serving_probe({})
+        self.assertIn("Enter the serving machine's details yourself", str(raised.exception))
+
+    def test_a_document_this_panel_does_not_recognise_is_refused(self) -> None:
+        self.probe(stdout=json.dumps({"kind": "something-else"}))
+        with self.assertRaises(UIError):
+            self.controller.serving_probe({})
+
+    def test_output_that_is_not_json_is_refused(self) -> None:
+        self.probe(stdout="not json at all")
+        with self.assertRaises(UIError):
+            self.controller.serving_probe({})
+
+    def test_a_companion_that_does_not_answer_is_reported(self) -> None:
+        import subprocess as subprocess_module
+        self.probe(raises=subprocess_module.TimeoutExpired("companion", 60))
+        with self.assertRaises(UIError) as raised:
+            self.controller.serving_probe({})
+        self.assertIn("did not answer", str(raised.exception))
+
+    def test_the_probe_does_not_start_while_another_action_holds_the_panel(self) -> None:
+        self.probe()
+        with self.controller.lock:
+            self.controller.busy = True
+        try:
+            with self.assertRaises(UIError):
+                self.controller.serving_probe({})
+        finally:
+            with self.controller.lock:
+                self.controller.busy = False
 
 if __name__ == "__main__":
     unittest.main()

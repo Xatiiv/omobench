@@ -4,10 +4,16 @@ import os
 from pathlib import Path
 import threading
 
-from .bridge_http import BridgeFrontend, Destination
-from .bridge_transport import Multiplexer
-
 VERSION = "windows-stdio-http1-v1"
+
+
+def _destination(host, port):
+    """Imported here, not at module scope: the HTTP frontend needs h11, and
+    `helper_path()` -- which only reads an environment variable and checks a
+    file -- is useful in installs that never selected the bridge extra."""
+    from .bridge_http import Destination
+
+    return Destination(host, port)
 
 
 def helper_path():
@@ -19,23 +25,29 @@ def helper_path():
 
 
 def provenance(port):
-    Destination("127.0.0.1", port)
+    _destination("127.0.0.1", port)
     return {"kind": VERSION, "windows_port": port, "runner_host": "WSL2",
             "serving_host": "Windows loopback, hardware not independently verified",
             "protocol": "HTTP/1.1, one request per connection",
             "overhead": "Included in measured latency and throughput, not subtracted",
-            "publication": "local-only"}
+            # Publishable, but only as the two environments it was: schema 1.1
+            # records the serving host separately from the runner, and nothing
+            # visible from WSL can supply the serving side.
+            "publication": "requires a declared serving environment"}
 
 
 class BridgeSession:
     def __init__(self, port, *, _helper_command=None):
-        self.destination = Destination("127.0.0.1", port)
+        self.destination = _destination("127.0.0.1", port)
         self.command = _helper_command or [helper_path(), "--bridge-stdio-v1", str(port)]
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
         self.process = self.mux = self.frontend = None
 
     async def _start(self):
+        from .bridge_http import BridgeFrontend
+        from .bridge_transport import Multiplexer
+
         try:
             self.process = await asyncio.create_subprocess_exec(
                 *self.command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
