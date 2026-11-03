@@ -526,17 +526,21 @@ class ProductionV1ControlTests(RunMixin, unittest.TestCase):
     """The v1 contrast, run with its own shipped configuration."""
 
     def test_v1_stops_at_fifty_requests_and_measures_none_of_them(self):
-        """50 scheduled, not 60, and a clock window nothing lands in.
+        """50 scheduled, not 60, against the unchanged production configuration.
 
-        The only substitution is the duration ceiling, which shortens the test
-        rather than changing what v1 does: at 900 s its warmup alone is 90 s,
-        and a run of 50 fast requests finishes inside it just the same.
+        A shortened ceiling also shortens the clock warmup. A two-second
+        warmup was consumed by worker startup on Python 3.14, invalidating the
+        old control's assumption of zero measurements. Keep the real 90-second
+        warmup; the 50-request cap still ends this fixture promptly.
         """
-        ledger = self.run_profile("chat-small-v1", seconds_per_request=0.02, max_duration=20)
-        self.assertEqual(ledger.overrides, [("kind=max_duration,seconds=900",
-                                             "kind=max_duration,seconds=20")])
+        ledger = self.run_profile("chat-small-v1", seconds_per_request=0.02)
+        self.assertEqual(ledger.overrides, [])
         self.assertEqual(ledger.scheduled["total"], 50, ledger.describe())
         self.assertEqual(len(ledger.served), 50, ledger.describe())
+        self.assertEqual(ledger.before, list(range(1, 51)), ledger.describe())
+        self.assertEqual(ledger.inside, [], ledger.describe())
+        self.assertEqual(ledger.after, [], ledger.describe())
+        self.assertEqual(ledger.in_flight_or_undispatched, 0, ledger.describe())
         self.assertEqual(ledger.totals["total"], 0, ledger.describe())
         with self.assertRaises(ValueError):
             cli.normalize_guidellm_report(ledger.report)

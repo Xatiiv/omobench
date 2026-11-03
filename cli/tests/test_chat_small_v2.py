@@ -279,10 +279,12 @@ class EndToEndPhaseTests(unittest.TestCase):
         self.assertLess(outcome["benchmark_arrivals"], 60)
 
     def test_the_v1_profile_still_measures_by_the_clock(self):
-        """The contrast, on the same fixture: a fast host measures far fewer."""
-        outcome = self.run_profile("chat-small-v1", seconds_per_request=0.02, max_duration=20)
-        # v1's window is [start+2 s, start+18 s] at a 20 s ceiling, and the run
-        # ends at its 50-request limit in about a second, so nothing lands in it.
+        """The unchanged production v1, including its real clock window."""
+        outcome = self.run_profile("chat-small-v1", seconds_per_request=0.02)
+        # Do not shorten the ceiling to 20 seconds here. That also shortens
+        # warmup to two seconds, which worker startup can consume on Python
+        # 3.14, changing the premise of this control. The real 900-second
+        # ceiling does not make this test wait: its 50-request cap ends it.
         self.assertEqual(outcome["measured"]["total"], 0)
         self.assertEqual(outcome["all_phases"]["total"], 50)
 
