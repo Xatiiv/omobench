@@ -177,7 +177,9 @@ For a CPU demonstration, load a small model with CPU execution explicitly
 enabled in your server, choose **chat-small-v2**, select **CPU**, and run. This is a
 real inference workload on your CPU, not a general CPU hardware test. Slower CPUs
 may reach the profile's time limit; the UI does not shorten or alter the workload.
-CPU and GPU results are both eligible for packaging and submission through the panel.
+CPU and GPU results are both eligible for packaging and submission through the
+panel, and so is a run measured through the Windows–WSL bridge, provided its
+serving machine is described. See [provenance.md](provenance.md).
 The [CPU demo walkthrough](local-demo.md) gives the two-terminal launch sequence
 and exact form values. [Troubleshooting](troubleshooting.md) covers connection
 failures, missing commands, and slow runs.
@@ -305,10 +307,15 @@ The exact serving runtime version is the runtime's own build, such as
 `llama.cpp b10621`; an application version, for example the LM Studio release,
 is a different thing, and OmoBench will not guess a build for you.
 
-If a model is not in `catalog/models/`, it is not currently eligible for the
-community registry. The panel says so and keeps local viewing and export
-available. It never relabels the run as a different, catalogued model. Adding a
-model to the catalog is a separate, reviewed change.
+If a model is not in `catalog/models/`, it is not catalogued, and the panel
+never relabels the run as a different, catalogued model. Two routes remain
+open. **Suggest a catalog model** offers entries the served alias may mean and
+applies none of them: one match is a suggestion to confirm, several make the
+mapping ambiguous and you choose. When nothing matches, the panel opens a
+**model proposal**, which travels with the result so a reviewer sees the
+request and the evidence together. A proposal does not add the model to the
+catalog and merging the result would not either; accepting one is a separate,
+reviewed change. Local viewing and export need none of this.
 
 1. Enter the canonical model ID, immutable model revision, framework and exact
    version, quantization, submitter, and the server's actual startup arguments.

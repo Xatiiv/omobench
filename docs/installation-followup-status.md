@@ -17,10 +17,15 @@ tested, checked against its metadata and published.
 The [experimental bridge](bridge-frontend-status.md) now has an explicit panel
 opt-in, a bounded multiplexed Windows stdio helper and both runner integrations.
 It parses HTTP/1.1 and strips its own token on every single-request connection.
-The public registry still refuses bridged measurements: local reports label the
-separate Windows serving and WSL runner hosts and include transport overhead.
+The public registry accepts bridged measurements under schema 1.1, which records
+the Windows serving host and the WSL runner as the two environments they are and
+marks the bridge's latency as included in every measured number and never
+subtracted. What it will not accept is a bridged run that describes its serving
+machine from inside WSL: the serving side has to be declared or read on the
+Windows machine itself. See [provenance.md](provenance.md).
 The existing redirect restriction remains in place. Windows–WSL behaviour and
-overhead still require real-machine verification before a general support claim.
+overhead still require real-machine verification before a general support claim:
+nothing here measures what the bridge costs.
 
 ## Required external verification
 

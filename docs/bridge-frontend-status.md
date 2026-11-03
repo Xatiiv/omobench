@@ -3,7 +3,9 @@
 The experimental bridge is now connected to the advanced panel and both runner
 execution paths. It is explicit and off by default. It is not a published
 installer update, and native helper tests do not establish real Windows–WSL
-interop or overhead. Public submission remains blocked for bridged measurements.
+interop or overhead. Bridged measurements are publishable under schema 1.1, which
+records the Windows serving host and the WSL runner separately and marks the
+bridge's latency as included in every number; see [provenance.md](provenance.md).
 
 ## Use in an updated installation
 

@@ -9,7 +9,9 @@ The [README](README.md) is the user-facing contributor guide. This file explains
 OmoBench is a GitHub-backed evidence registry and test harness for self-hosted, open-weight language-model inference. A contributor runs a fixed profile against their own OpenAI-compatible server, preserves raw evidence, packages a normalized result, and submits the complete bundle through a GitHub pull request.
 
 `omobench ui` is a local browser controller around the same CLI. It can run CPU
-or GPU workloads; both are eligible for public v1 packaging and submission.
+or GPU workloads, and a Windows server measured from WSL through the explicit
+bridge; all are eligible for public v1 packaging and submission, the bridged
+case once its serving machine is described.
 The comparison website and its `/run` launch guide are separate from this panel.
 Both panel routes mount one shared live dashboard (`cli/src/omobench/web/dashboard.js`
 and `dashboard.css`); keep it shared rather than reimplementing it per page, and
@@ -29,7 +31,10 @@ See [guided-launcher.md](docs/guided-launcher.md).
 
 ## V1 scope and invariants
 
-- Public results are for catalogued open-weight, text-generation models.
+- Public results are for catalogued open-weight, text-generation models, or for
+  a model submitted with a proposal for the catalog. A proposal is a request for
+  review: `catalog/models/` stays the only source of eligible models, merging a
+  result never adds one, and accepting a proposal is a separate reviewed change.
 - Requests use streaming OpenAI-compatible `/v1/chat/completions`.
 - Public v1 results must be genuinely executed on their declared device. CPU and GPU are both first-class, publishable execution devices; `execution_device` describes what actually performed inference, not merely what hardware is installed.
 - Benchmark profiles in `benchmarks/profiles/` are versioned workload definitions. Do not silently change their load, token counts, or metrics.
@@ -38,6 +43,38 @@ See [guided-launcher.md](docs/guided-launcher.md).
 - Runtime provenance matters. Preserve the exact framework, version, startup arguments, and a meaningful description for `openai-compatible-other`.
 - GPU metadata is vendor-neutral. Do not make NVIDIA-only assumptions or infer VRAM from an unreliable source.
 - `--execution-device` records a contributor's declaration; it does not create or independently prove execution on that device. A CPU result must not represent an installed-but-unused GPU as having performed inference, its `hardware.gpus` stays empty even when the machine has an idle GPU.
+
+### Schema versions and serving provenance
+
+- `schema_version` is `1.0` or `1.1`. **1.0 is frozen.** Every 1.1-only property
+  is forbidden on a 1.0 result, so a stored bundle keeps the meaning it was
+  written with and never acquires a fact nobody collected. Packaging emits 1.0
+  unless `--provenance` is supplied, byte for byte as before, with the same
+  `configuration_fingerprint`.
+- 1.1 separates the environment that ran the benchmark from the environment that
+  served the model, and records the transport between them. `hardware` still
+  means "what performed inference", so on a bridged run it comes from the
+  serving side. **What WSL can see of its Windows host is not evidence about
+  what served the model**: never fill the serving side from the runner's own
+  snapshot, and never from a probe that did not run on the serving machine.
+- Every serving fact carries how it was established: `detected`,
+  `server-reported`, `contributor-declared` or `unknown`. A null value and
+  `unknown` always travel together. A fact is never upgraded between them.
+- Detecting a device is not evidence that inference used it. An accelerator's
+  `role` is a separate claim; only `role: inference` devices become
+  `hardware.gpus`.
+- Transport latency is recorded as included in every measured number and is
+  never subtracted. Bridged results compare with bridged results.
+- Four identities stay apart: the served alias the API answers to, the canonical
+  catalog model, the weight source, and the weight revision. A repository commit,
+  a file SHA-256 and a `sha256-manifest:` hash are different things and are never
+  interchanged. A serving alias is never mapped to a catalog model without a
+  person choosing it, and an ambiguous mapping requires a choice.
+- `runtime.version` is the inference engine's build. An application release, such
+  as the LM Studio version, belongs in
+  `environment.serving.runtime.application.version`.
+
+See [provenance.md](docs/provenance.md).
 
 ## Evidence and result integrity
 
@@ -71,7 +108,7 @@ Keep localhost/token/origin protections and the one-panel-per-checkout lock.
 | `catalog/models/` | Eligible-model registry |
 | `catalog/downloads/` | Reviewed managed download recipes (model + runtime provenance for `omobench prepare`/`launch`); see [guided-launcher.md](docs/guided-launcher.md) |
 | `cli/` | `omobench` CLI, browser controller/assets, and tests |
-| `schema/` | Public `result.json` contract |
+| `schema/` | Public `result.json` and model-proposal contracts |
 | `tools/` | Result validator and validator tests |
 | `results/` | Submitted evidence bundles |
 | `app/` | Results website |

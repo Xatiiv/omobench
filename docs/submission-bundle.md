@@ -13,7 +13,8 @@ packaging (CLI or panel) to produce a schema-ready bundle instead.
 
 There are two submission routes: **Review & submit** in `omobench ui`, or the
 [manual PR workflow](#manual-pull-request-workflow). Both preserve the same five
-evidence files and go through CI and maintainer review. Packaging stays local;
+evidence files — six when the bundle also proposes a model for the catalog —
+and go through CI and maintainer review. Packaging stays local;
 uploading a branch/PR makes evidence visible according to GitHub repository
 permissions. The website registry updates after merge and a build containing it.
 
@@ -32,11 +33,24 @@ with a clear error instead of silently accepting or rejecting every
 submission.
 
 The API identifier used during a run may be an alias. Packaging must use the
-canonical catalog ID of the model actually served. Adding an alias does not
-make a different model eligible. New eligible models can be added through a
-catalog YAML change, without changing the runner; the browser uploader does not
-automatically make that source change. The catalog's `initial_runtimes` field
-is planning information, not an enforced runtime allowlist.
+canonical catalog ID of the model actually served, and schema 1.1 records the
+alias separately as `model.served_model_id` so the two are never confused.
+Adding an alias does not make a different model eligible.
+
+An uncatalogued model has a route to review without a hand-written catalog
+change first: a schema 1.1 bundle may carry `model-proposal.json`, bound to
+that model, that run and that submitter, with `model.catalog_status` set to
+`proposed`. The validator checks the proposal and its relationship to the
+result, and rejects a second proposal for the same model. It does not make the
+model eligible: `catalog/models/*.yaml` remains the only source of eligible
+models, and accepting a proposal is a separate, reviewed catalog change. The
+catalog's `initial_runtimes` field is planning information, not an enforced
+runtime allowlist.
+
+Schema 1.1 also records what served the model, separately from what measured
+it, along with the weight identity, the tokenizer that counted the tokens, and
+the transport. See [provenance.md](provenance.md). Schema 1.0 is unchanged and
+stored 1.0 bundles keep exactly the meaning they were written with.
 
 ## Immutable model revisions
 
