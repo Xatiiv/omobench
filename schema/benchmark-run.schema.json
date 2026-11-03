@@ -396,11 +396,11 @@
           "type": "object",
           "additionalProperties": false,
           "required": ["metadata_declared_after_execution"],
-          "description": "Schema 1.1 only. Present when a completed run was packaged again later from its saved evidence, so a reader can tell metadata that was collected while the benchmark ran from metadata a person supplied afterwards.",
+          "description": "Schema 1.1 only. Present when a completed run was packaged again from saved evidence copied out of another directory, which is how a run that could not be packaged when it finished is recovered. It records what that derived bundle came from.",
           "properties": {
             "metadata_declared_after_execution": {
               "type": "boolean",
-              "description": "true when the serving metadata was supplied after the run finished. Nothing declared then is recorded as detected, because no probe was running at the time to detect it."
+              "description": "true when this bundle was built from evidence saved earlier, rather than packaged from the run's own directory. A hardware probe is refused on that path, because a probe taken then describes the machine as it is now and not as it was while the benchmark ran; everything supplied is recorded as declared."
             },
             "derived_from_run_id": { "type": ["string", "null"], "minLength": 1 },
             "evidence_sha256": {
@@ -561,7 +561,7 @@
   "$defs": {
     "provenance": {
       "enum": ["detected", "server-reported", "contributor-declared", "unknown"],
-      "description": "How this one fact was established. 'detected': a probe running on the machine that owns the fact read it. 'server-reported': the inference server itself reported it over its own API. 'contributor-declared': a person typed it. 'unknown': nobody established it, and the value is then null. A fact is never upgraded between these, however plausible it looks."
+      "description": "How this one fact was established. 'detected': a probe running on the machine that owns the fact read it -- which, for a serving host that is not the runner, means a probe run when the result was packaged rather than while the benchmark was running. 'server-reported': the inference server itself reported it over its own API. 'contributor-declared': a person typed it. 'unknown': nobody established it, and the value is then null. A fact is never upgraded between these, however plausible it looks."
     },
     "fact_string": {
       "type": "object",

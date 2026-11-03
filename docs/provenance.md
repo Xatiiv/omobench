@@ -42,6 +42,13 @@ value would be laundered of where it came from. Both are rejected.
 A fact is never upgraded. A value a person typed stays `contributor-declared`
 however plausible it looks, and however well it agrees with something else.
 
+`detected` says who read the fact, not when. On a single host it is the
+runner's own snapshot, taken while the benchmark ran. For a serving host that
+is not the runner, it is the companion probe, which runs when you press the
+button rather than during the benchmark — the machine is the right one, the
+moment is afterwards. On the repackaging path, where the gap can be days or a
+different machine entirely, a probe is refused outright.
+
 **Detecting a device is not evidence that inference used it.** Each accelerator
 carries a separate `role`: `inference`, `present-not-used`, or `unknown`. A
 probe that found a card leaves the role unknown, because it watched nothing

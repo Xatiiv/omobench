@@ -147,7 +147,7 @@ class InvocationTests(unittest.TestCase):
             self.assertFalse((run / "result.json").exists())
             self.assertEqual(original, {p.name: p.read_bytes() for p in run.iterdir() if p.is_file()})
 
-    def test_panel_refuses_packaging_preparation_and_submission_but_exports(self):
+    def test_packaging_a_bridged_run_needs_its_serving_environment_described(self):
         import tempfile
         import shutil
         from test_local_export import SUMMARY
@@ -163,9 +163,20 @@ class InvocationTests(unittest.TestCase):
                        "summary": SUMMARY, "transport": provenance(1234)}
                 controller._directory(job["id"]).mkdir()
                 controller.jobs[job["id"]] = job
+                # A bridged run is no longer refused outright. What it owes is a
+                # description of the machine that served the model, which this
+                # panel is running in WSL and cannot see.
                 for action in ("packaging", "preparing", "submitting"):
-                    with self.assertRaisesRegex(ui.UIError, "local-only"):
-                        controller._begin_action(job["id"], action)
+                    controller._begin_action(job["id"], action)
+                    with controller.lock:
+                        controller.busy = False
+                        job["status"] = "completed"
+                requirements = controller.publication_requirements(job["id"], {})
+                serving = next(item for item in requirements["items"]
+                               if item["field"] == "serving")
+                self.assertIsNone(serving["ok"])
+                self.assertIn("not evidence about what served the model", serving["detail"])
+                self.assertFalse(requirements["ready"])
                 report = controller.local_report(job["id"])
                 self.assertEqual(report["transport"], provenance(1234))
                 self.assertFalse(report["publication"]["ready"])
@@ -190,8 +201,10 @@ class InvocationTests(unittest.TestCase):
 
     def test_provenance_contains_no_machine_path_or_token(self):
         data = provenance(1234)
-        self.assertEqual(data["publication"], "local-only")
+        # Publishable, but only as the two environments it was.
+        self.assertEqual(data["publication"], "requires a declared serving environment")
         self.assertEqual(data["runner_host"], "WSL2")
+        self.assertIn("not independently verified", data["serving_host"])
         self.assertNotIn("token", json.dumps(data))
 
 
