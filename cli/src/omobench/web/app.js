@@ -326,7 +326,7 @@ $("download-summary").addEventListener("click", () => action(async () => {
   download(new Blob([JSON.stringify(report, null, 2) + "\n"], {type: "application/json"}), `${selected}-local-report.json`);
 }));
 $("check-requirements").addEventListener("click", () => action(async () => {
-  const data = Object.fromEntries(new FormData($("package-form")));
+  const data = withProvenance(Object.fromEntries(new FormData($("package-form"))));
   renderRequirements(await api(`/api/runs/${selected}/requirements`, data));
 }));
 const TOKENIZER_CHECK_LABELS = {
@@ -347,9 +347,173 @@ $("check-tokenizer").addEventListener("click", () => action(async () => {
   if (!report.checks) $("tokenizer-result").textContent = report.message;
   $("tokenizer-result").classList.toggle("error", !report.ok);
 }));
+// --- The machine that served the model ---------------------------------
+// Where inference happened is not always where this panel is running, and on a
+// bridged run it definitely is not. None of this is filled in from the runner:
+// what WSL can see of its Windows host says nothing about what served the
+// model, so every field here is the contributor's own statement and is
+// recorded as one.
+const ACCELERATOR_ROLES = ["inference", "present-not-used", "unknown"];
+
+function parseAccelerators(value) {
+  return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+    const parts = line.split(",").map((part) => part.trim());
+    if (parts.length < 2) throw new Error(`Each accelerator needs at least a vendor and a model: "${line}"`);
+    const [vendor, model, memory, count, role] = parts;
+    const entry = {vendor: vendor.toLowerCase(), model, count: count ? Number(count) : 1,
+                   role: role || "unknown"};
+    entry.memory_gb = memory ? Number(memory) : null;
+    if (entry.memory_gb !== null && !(entry.memory_gb > 0)) throw new Error(`Accelerator memory must be a number of gigabytes: "${line}"`);
+    if (!Number.isInteger(entry.count) || entry.count < 1) throw new Error(`Accelerator count must be a whole number: "${line}"`);
+    if (!ACCELERATOR_ROLES.includes(entry.role)) throw new Error(`An accelerator's role is one of ${ACCELERATOR_ROLES.join(", ")}: "${line}"`);
+    return entry;
+  });
+}
+
+function parseSettings(value) {
+  return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+    const index = line.indexOf("=");
+    if (index < 1) throw new Error(`Each serving setting is "name = value": "${line}"`);
+    return {name: line.slice(0, index).trim(), value: line.slice(index + 1).trim()};
+  });
+}
+
+function servingDeclaration(data) {
+  const host = {};
+  if ($("serving-os").value.trim()) host.os = $("serving-os").value.trim();
+  if ($("serving-cpu").value.trim()) host.cpu = $("serving-cpu").value.trim();
+  if ($("serving-ram-gb").value) host.ram_gb = Number($("serving-ram-gb").value);
+  // The engine is what executed the weights. The framework above is how
+  // OmoBench classifies the server, and for an application that embeds an
+  // engine the two are different things -- LM Studio is not llama.cpp.
+  const engine = {name: $("serving-engine").value.trim() || data.framework,
+                  version: data.framework_version};
+  const serving = {host, accelerators: parseAccelerators($("serving-accelerators").value),
+                   runtime: {engine, settings: parseSettings($("serving-settings").value)}};
+  const placement = $("serving-placement").value;
+  if (placement !== "unknown") {
+    serving.placement = {mode: placement};
+    const detail = $("serving-placement-detail").value.trim();
+    if (detail) serving.placement.detail = detail;
+  }
+  if ($("serving-application").value.trim()) {
+    serving.runtime.application = {name: $("serving-application").value.trim(),
+                                   version: $("serving-application-version").value.trim()};
+  }
+  return serving;
+}
+
+function weightsDeclaration() {
+  const raw = $("weights-manifest").value.trim();
+  if (!raw) return null;
+  let manifest;
+  try { manifest = JSON.parse(raw); } catch { throw new Error("The weight manifest is not valid JSON. Paste what `omobench weights` printed, unchanged."); }
+  return {kind: "local-files", manifest};
+}
+
+function proposalDeclaration() {
+  if ($("model-proposal-section").hidden) return null;
+  return {
+    family: $("proposal-family").value.trim(),
+    parameter_class: $("proposal-parameter-class").value.trim(),
+    source: $("proposal-source").value.trim(),
+    licence: $("proposal-licence").value.trim(),
+    rationale: $("proposal-rationale").value.trim(),
+    weights_publicly_downloadable: $("proposal-public").checked,
+  };
+}
+
+// Everything the packager needs beyond the schema 1.0 fields, collected in one
+// place so the two forms cannot disagree about what was declared.
+function withProvenance(data) {
+  const enriched = {...data};
+  enriched.served_model_id = $("served-model-id").value.trim();
+  enriched.serving = servingDeclaration(data);
+  const weights = weightsDeclaration();
+  if (weights) enriched.weights = weights;
+  const proposal = proposalDeclaration();
+  if (proposal) { enriched.proposal = proposal; enriched.catalog_status = "proposed"; }
+  delete enriched.serving_os; delete enriched.serving_cpu; delete enriched.serving_ram_gb;
+  delete enriched.serving_placement; delete enriched.serving_placement_detail;
+  delete enriched.serving_accelerators; delete enriched.serving_application;
+  delete enriched.serving_engine;
+  delete enriched.serving_application_version; delete enriched.serving_settings;
+  delete enriched.weights_manifest; delete enriched.proposal_family;
+  delete enriched.proposal_parameter_class; delete enriched.proposal_source;
+  delete enriched.proposal_licence; delete enriched.proposal_rationale;
+  return enriched;
+}
+
+$("suggest-model").addEventListener("click", () => action(async () => {
+  const alias = $("served-model-id").value.trim() || $("model").value.trim();
+  const report = await api("/api/model-suggestions", {served_model_id: alias});
+  $("model-suggestions").hidden = false;
+  $("model-suggestion-message").textContent = report.message;
+  // Offered, never applied: a serving alias is not evidence of which weights
+  // were loaded, so the choice stays the contributor's.
+  $("model-suggestion-list").replaceChildren(...report.candidates.map((candidate) => {
+    const li = document.createElement("li"), reason = document.createElement("span");
+    const use = document.createElement("button");
+    use.type = "button"; use.className = "secondary"; use.textContent = `Use ${candidate.id}`;
+    use.addEventListener("click", () => {
+      $("package-model").value = candidate.id;
+      $("model-proposal-section").hidden = true;
+    });
+    li.textContent = candidate.id; reason.className = "sub-check";
+    reason.textContent = candidate.reason; li.append(reason, use); return li;
+  }));
+  $("model-proposal-section").hidden = report.candidates.length > 0
+    || report.catalog.includes($("package-model").value.trim());
+}));
+
+const PREFLIGHT_LABELS = {
+  syntax: "Usable identifier",
+  files: "Files where the loader looks",
+  loaded: "Loaded by the runner's own interpreter",
+  compatibility: "Matches the served weights",
+};
+
+function renderPreflight(report) {
+  $("tokenizer-preflight").hidden = false;
+  $("tokenizer-preflight").classList.toggle("error", !report.ok);
+  $("tokenizer-preflight-message").textContent = report.message;
+  $("tokenizer-preflight-checks").replaceChildren(...(report.checks || []).map((check) => {
+    const li = document.createElement("li"), detail = document.createElement("span");
+    li.textContent = `${PREFLIGHT_LABELS[check.id] || check.id}: ${check.state}`;
+    detail.className = "sub-check"; detail.textContent = check.detail;
+    li.append(detail); return li;
+  }));
+  $("tokenizer-suggestion").hidden = !report.suggestion;
+  if (report.suggestion) {
+    $("tokenizer-suggestion-reason").textContent = report.suggestion.reason;
+    $("tokenizer-use-suggestion").onclick = () => { $("tokenizer").value = report.suggestion.source; };
+  }
+  // A download is a separate, named act with a visible source and destination.
+  $("tokenizer-download").hidden = report.ok || report.kind === "invalid";
+}
+
+$("load-tokenizer").addEventListener("click", () => action(async () => {
+  $("tokenizer-preflight").hidden = false;
+  $("tokenizer-preflight-message").textContent = "Loading the tokenizer in the runner's interpreter. Closing the panel stops it.";
+  $("tokenizer-preflight-checks").replaceChildren();
+  renderPreflight(await api("/api/tokenizer-preflight", {
+    tokenizer: $("tokenizer").value, model: $("model").value, network: "metadata",
+  }));
+}));
+
+$("tokenizer-download-confirm").addEventListener("click", () => action(async () => {
+  const source = $("tokenizer").value.trim() || $("model").value.trim();
+  const plan = await api("/api/tokenizer-download-plan", {tokenizer: source});
+  $("tokenizer-download-plan").textContent =
+    `From ${plan.source} into ${plan.destination}. ${plan.downloads} ${plan.never_downloads}`;
+  renderPreflight(await api("/api/tokenizer-preflight", {
+    tokenizer: source, model: $("model").value, network: "download",
+  }));
+}));
+
 $("package-form").addEventListener("submit", (event) => {
   event.preventDefault(); action(async () => {
-    const data = Object.fromEntries(new FormData(event.target));
+    const data = withProvenance(Object.fromEntries(new FormData(event.target)));
     data.runtime_args = data.runtime_args.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
     const currentJob = jobs.find((job) => job.id === selected);
     data.gpu_memory_gb = data.gpu_memory_gb && currentJob?.execution_device !== "cpu" ? Number(data.gpu_memory_gb) : null;

@@ -929,6 +929,93 @@ class Controller:
             served_model=text_field(data, "model", optional=True) or None,
         )
 
+    def tokenizer_preflight(self, data: dict) -> dict:
+        """Actually load the tokenizer, in the interpreter the benchmark uses.
+
+        The offline check above answers whether the files are where the loader
+        will look. This answers whether the loader can build a tokenizer from
+        them, which is the question a run dies on. It is a separate action
+        because it can take time and, above the lowest level, can reach the
+        network; the level is chosen here and reported back.
+        """
+        from . import tokenizer_preflight as preflight
+
+        network = data.get("network", preflight.NETWORK_NONE)
+        if network not in preflight.NETWORK_LEVELS:
+            raise UIError("Choose a supported tokenizer check level.")
+        source = text_field(data, "tokenizer", optional=True) or text_field(
+            data, "model", optional=True)
+        if not source:
+            raise UIError("Enter a tokenizer source, or the identifier your server answers to.")
+        with self.lock:
+            if self.busy or self.closing:
+                raise UIError("Wait for the active operation before checking the tokenizer.", 409)
+            self.busy = True
+        try:
+            report = preflight.preflight(source, network=network, timeout=300.0,
+                                         cancel=lambda: self.closing)
+        finally:
+            with self.lock:
+                self.busy = False
+        return report.as_dict()
+
+    def tokenizer_download_plan(self, data: dict) -> dict:
+        """What an authorized tokenizer-only download would fetch, and where to.
+
+        Shown before anything is fetched. A download is a deliberate act with a
+        visible source and a visible destination, not something a check does on
+        the way past.
+        """
+        from . import tokenizer_preflight as preflight
+
+        source = text_field(data, "tokenizer")
+        try:
+            return preflight.download_plan(source)
+        except ValueError as error:
+            raise UIError(str(error)) from error
+
+    def model_suggestions(self, data: dict) -> dict:
+        """Catalog entries a served alias may mean. It never picks one."""
+        from .model_identity import suggest_catalog_models
+
+        catalog = self.catalog_models()
+        suggestion = suggest_catalog_models(
+            text_field(data, "served_model_id", optional=True) or "", catalog)
+        suggestion["catalog"] = catalog
+        suggestion["proposal_available"] = not suggestion["candidates"]
+        return suggestion
+
+    def weight_identity(self, data: dict) -> dict:
+        """Hash the weight files the contributor named, after listing them.
+
+        Listing reads no file contents. Hashing happens only once a person has
+        named the files, because a filename is not an identity and OmoBench
+        will not decide which bytes somebody ran.
+        """
+        from .model_identity import ModelIdentityError, manifest_revision, weight_files_in, weight_manifest
+
+        directory = Path(text_field(data, "directory")).expanduser()
+        names = data.get("files")
+        try:
+            if not names:
+                return {"directory": str(directory), "hashed": False,
+                        "candidates": [{"name": path.name, "bytes": path.stat().st_size}
+                                       for path in weight_files_in(directory)],
+                        "message": ("Nothing has been read yet. Select every file this model is "
+                                    "made of; a sharded model needs all of its shards, because "
+                                    "the identity covers the whole set.")}
+            if not isinstance(names, list) or len(names) > 128 or any(
+                    not isinstance(name, str) or not name or "/" in name or "\\" in name
+                    for name in names):
+                raise UIError("Select weight files by name, inside the folder you chose.")
+            manifest = weight_manifest([directory / name for name in names], root=directory)
+        except ModelIdentityError as error:
+            raise UIError(str(error)) from error
+        return {"directory": str(directory), "hashed": True, "manifest": manifest,
+                "revision": manifest_revision(manifest),
+                "message": (f"Hashed {len(manifest['files'])} file(s). Record this revision; it "
+                            "identifies these exact bytes, not their names.")}
+
     def listing(self) -> list[dict]:
         with self.lock:
             return [dict(j) for j in sorted(self.jobs.values(), key=lambda j: j["created_at"], reverse=True)]
@@ -971,7 +1058,10 @@ class Controller:
             if status not in {"catalogued", "proposed"}:
                 raise UIError("Catalog status must be 'catalogued' or 'proposed'.")
             declaration["catalog_status"] = status
-        if not declaration and not job.get("transport"):
+        if not declaration:
+            # Nothing was declared at all. A direct run keeps its existing
+            # schema 1.0 output; a bridged one reaches the packager without a
+            # declaration, which refuses it and says what it needs and why.
             return None
         if job.get("transport"):
             declaration.setdefault("serving", {})
@@ -1287,6 +1377,14 @@ class UIHandler(BaseHTTPRequestHandler):
                 return self._json(controller.connection(data))
             if self.path == "/api/tokenizer-check":
                 return self._json(controller.tokenizer_check(data))
+            if self.path == "/api/tokenizer-preflight":
+                return self._json(controller.tokenizer_preflight(data))
+            if self.path == "/api/tokenizer-download-plan":
+                return self._json(controller.tokenizer_download_plan(data))
+            if self.path == "/api/model-suggestions":
+                return self._json(controller.model_suggestions(data))
+            if self.path == "/api/weight-identity":
+                return self._json(controller.weight_identity(data))
             if self.path == "/api/server-check":
                 return self._json(controller.server_check(data))
             if self.path == "/api/runs":
