@@ -303,3 +303,19 @@ without a configured ID reports sign-in unavailable and offers the complete ZIP
 instead. The currently released installer
 does not gain this feature until a new release is built and published.
 See [community submissions](community-submissions.md).
+
+## Managed runner dependency policy
+
+New managed environments install `torch==2.15.0+cpu` from PyTorch's CPU wheel
+index before installing the application. The application installation uses the
+shipped `runner-constraints.txt` to retain that CPU build and GuideLLM 0.7.3.
+An incompatible Python/platform combination fails with a named prerequisite;
+setup does not silently compile Torch or substitute a CUDA build. `pip check`
+must pass before the environment can be marked ready.
+
+This changes the HTTP benchmark client's dependencies, not the execution device
+of your model server. GPU inference in LM Studio or another server remains
+possible. Existing discovered environments are reused without modification;
+setup does not remove old NVIDIA packages or repair someone else's environment.
+The two pins are not a complete transitive dependency lock. Dependencies still
+require an internet connection, and package availability is platform-specific.

@@ -478,9 +478,19 @@ namespace OmoBench.Installer.Tests
                 string.Join(" ", install.ToArray()).Contains("/mnt/c/x/cli[ui,runner]"));
             Check("pip is not allowed to prompt",
                 install.Contains("--no-input"));
+            Check("the application resolver retains the CPU-only tensor constraint",
+                install.Contains("--constraint") && install.Contains("/mnt/c/x/cli/src/omobench/runner-constraints.txt"));
+            List<string> cpu = ManagedEnvironment.BuildCpuInstallProgram("/venv/bin/python");
+            Check("CPU tensor install is pinned, binary only, from the CPU index",
+                cpu[0] == "/venv/bin/python" && cpu.Contains("torch==2.15.0+cpu")
+                && cpu.Contains("--only-binary=:all:") && cpu.Contains("https://download.pytorch.org/whl/cpu")
+                && !cpu.Contains("--extra-index-url"));
+            Check("dependency consistency is checked before readiness",
+                string.Join(" ", ManagedEnvironment.BuildDependencyCheckProgram("/venv/bin/python").ToArray())
+                    == "/venv/bin/python -m pip check");
 
             // No shell, anywhere -- the same rule the companion follows.
-            foreach (List<string> program in new[] { extract, venv, install })
+            foreach (List<string> program in new[] { extract, venv, install, cpu })
             {
                 string arguments = Wsl.BuildRunArguments("Ubuntu", null, program);
                 Check("runs directly with no shell: " + program[0],
@@ -728,6 +738,21 @@ namespace OmoBench.Installer.Tests
                     unverified.Stages[4].State == StageState.Failed);
 
                 ManagedEnvironment.Validator = configuration => new EnvironmentCheckResult { Ok = true, Summary = "ok" };
+
+                FakeWsl noCpuWheel = new FakeWsl { FailOn = "torch==2.15.0+cpu", UnpackInto = unpacked };
+                ManagedEnvironment.WslRunner = noCpuWheel.Run;
+                PreparationResult cpuFailed = ManagedEnvironment.Prepare("Ubuntu", build, null, null);
+                Check("a CPU-wheel failure cannot fall back to unrestricted installation",
+                    !cpuFailed.Ok && cpuFailed.Stages[3].State == StageState.Failed
+                    && cpuFailed.Stages[4].State == StageState.Pending
+                    && !Ran(noCpuWheel.Commands, "cli[ui,runner]"));
+
+                FakeWsl inconsistent = new FakeWsl { FailOn = "-m pip check", UnpackInto = unpacked };
+                ManagedEnvironment.WslRunner = inconsistent.Run;
+                PreparationResult inconsistentResult = ManagedEnvironment.Prepare("Ubuntu", build, null, null);
+                Check("inconsistent dependencies cannot reach final validation or readiness",
+                    !inconsistentResult.Ok && inconsistentResult.Configuration == null
+                    && inconsistentResult.Stages[4].State == StageState.Pending);
 
                 // A missing python3 is explained rather than retried blindly.
                 FakeWsl noPython = new FakeWsl { SystemPython = null, UnpackInto = unpacked };

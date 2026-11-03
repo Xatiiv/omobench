@@ -213,8 +213,28 @@ namespace OmoBench.Installer
             {
                 environmentInterpreter, "-m", "pip", "install",
                 "--disable-pip-version-check", "--no-input",
+                "--constraint", sourceWslPath.TrimEnd('/') + "/cli/src/omobench/runner-constraints.txt",
                 "-e", sourceWslPath.TrimEnd('/') + "/cli[ui,runner]",
             };
+        }
+
+        // The runner is an HTTP client. Its tensor library does not need CUDA,
+        // even when the model server performs GPU inference. A second pip
+        // operation is deliberate: do not mix PyPI and the CPU wheel index.
+        public static List<string> BuildCpuInstallProgram(string environmentInterpreter)
+        {
+            return new List<string>
+            {
+                environmentInterpreter, "-m", "pip", "install",
+                "--disable-pip-version-check", "--no-input", "--only-binary=:all:",
+                "--index-url", "https://download.pytorch.org/whl/cpu",
+                "torch==2.15.0+cpu",
+            };
+        }
+
+        public static List<string> BuildDependencyCheckProgram(string environmentInterpreter)
+        {
+            return new List<string> { environmentInterpreter, "-m", "pip", "check" };
         }
 
         public static List<string> BuildMakeDirectoryProgram(string wslPath)
@@ -386,6 +406,19 @@ namespace OmoBench.Installer
 
             // 4. Install, pinned.
             install.State = StageState.Running;
+            install.Message = "Installing the CPU-only runner tensor library (model-server GPU use is unchanged).";
+            Report(progress, result);
+            ProcessResult cpu = Run(distribution,
+                BuildCpuInstallProgram(EnvironmentInterpreter(home)), 2700000, cancel);
+            if (Stopped(cancel, result, install)) { return result; }
+            if (cpu == null || cpu.TimedOut || cpu.ExitCode != 0)
+            {
+                return Fail(result, install, "The CPU-only runner dependency could not be installed.",
+                    Describe(cpu) + "\r\n\r\nThis setup requires a compatible torch 2.15.0+cpu wheel. "
+                    + "Check your connection and Python/platform compatibility. No CUDA fallback "
+                    + "or source compilation was attempted; existing models were not changed.");
+            }
+            install.Message = "Installing OmoBench with constrained runner dependencies.";
             Report(progress, result);
             // The pinned runner pulls a large dependency set, and this is the
             // one step that is mostly waiting on a download. Fifteen minutes
@@ -404,6 +437,15 @@ namespace OmoBench.Installer
                           + "or interrupted connection this can run out of time; the work already done "
                           + "is kept, so trying again resumes from pip's cache rather than starting over."
                         : ""));
+            }
+            ProcessResult dependencies = Run(distribution,
+                BuildDependencyCheckProgram(EnvironmentInterpreter(home)), 60000, cancel);
+            if (Stopped(cancel, result, install)) { return result; }
+            if (dependencies == null || dependencies.TimedOut || dependencies.ExitCode != 0)
+            {
+                return Fail(result, install, "The installed dependencies are inconsistent.",
+                    Describe(dependencies) + "\r\n\r\nSetup has not marked this environment ready. "
+                    + "Existing packages have not been removed automatically.");
             }
             install.State = StageState.Done;
             install.Message = "Installed from the managed source with the pinned runner";
