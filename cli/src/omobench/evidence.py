@@ -79,6 +79,19 @@ LEGACY_NOTE = (
 )
 
 
+def _amount(value: Any) -> Any:
+    """Render a quantity the same way on both sides of this explanation.
+
+    64 gigabytes is "64 GB", not "64.0 GB". The website renders the same rows
+    from the same result, and a trailing zero one of them does not write is a
+    difference between two accounts of the same machine.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return value
+    number = float(value)
+    return int(number) if number.is_integer() else number
+
+
 def _row(label: str, value: Any, *, provenance: str | None = None, note: str = "") -> dict[str, Any]:
     """One labelled fact. A value of None is shown as not recorded, not hidden."""
     recorded = value is not None and value != ""
@@ -119,7 +132,7 @@ def _environments(result: dict[str, Any], environment: dict[str, Any] | None) ->
                 _row("Serving operating system", hardware.get("os"), provenance=detected),
                 _row("Serving processor", hardware.get("cpu"), provenance=detected),
                 _row("Serving memory",
-                     f"{hardware['ram_gb']} GB" if hardware.get("ram_gb") else None,
+                     f"{_amount(hardware['ram_gb'])} GB" if hardware.get("ram_gb") else None,
                      provenance=detected),
                 _row("Benchmark runner", None,
                      note="Not recorded separately from the serving machine."),
@@ -139,7 +152,7 @@ def _environments(result: dict[str, Any], environment: dict[str, Any] | None) ->
             _fact_row("Serving operating system", host.get("os")),
             _fact_row("Serving processor", host.get("cpu")),
             _row("Serving memory",
-                 f"{ram['value']} GB" if ram.get("value") is not None else None,
+                 f"{_amount(ram['value'])} GB" if ram.get("value") is not None else None,
                  provenance=ram.get("provenance")),
             _row("Benchmark runner",
                  f"{runner.get('os')} ({runner.get('kind')})" if runner.get("os") else None,
@@ -165,7 +178,7 @@ def _accelerators(result: dict[str, Any], environment: dict[str, Any] | None) ->
             rows.append(_row(
                 "Accelerator",
                 f"{gpu.get('count', 1)} × {gpu.get('model')}"
-                + (f", {gpu['memory_gb']} GB each" if gpu.get("memory_gb") else ""),
+                + (f", {_amount(gpu['memory_gb'])} GB each" if gpu.get("memory_gb") else ""),
                 provenance=detected,
                 note="Schema 1.0 recorded no role for this device. It is listed because the "
                      "result declares GPU execution, not because anything observed it serve."))
@@ -186,7 +199,7 @@ def _accelerators(result: dict[str, Any], environment: dict[str, Any] | None) ->
         rows.append(_row(
             "Accelerator",
             f"{entry.get('count', 1)} × {entry.get('vendor')} {entry.get('model')}"
-            + (f", {memory} GB each" if memory else ", memory not recorded"),
+            + (f", {_amount(memory)} GB each" if memory else ", memory not recorded"),
             provenance=entry.get("provenance"),
             note=ROLE_LABELS.get(entry.get("role"), ROLE_LABELS["unknown"])
                  + ". Finding a device establishes the device, not that inference touched it.",

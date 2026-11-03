@@ -6,7 +6,7 @@ import { SiteHeader } from "@/components/product/site-header";
 import { registryResults } from "@/app/data/registry-results";
 import { comparisonExamples } from "@/app/data/comparison-examples";
 import { readResultRecord } from "@/app/lib/result-record";
-import { barPercent, eligibleLeaderboard, formatMetric, incompatibilities, metricDifference, metrics, placementLabel, rankRuns, servingLabel, tokenizerLabel, transportLabel, type ComparisonEntry, type MetricKey } from "@/app/lib/comparison";
+import { assess, barPercent, comparisonQuestions, eligibleLeaderboard, formatMetric, incompatibilities, metricDifference, metrics, placementLabel, rankRuns, servingLabel, suitabilityLabel, tokenizerLabel, transportLabel, type ComparisonAssessment, type ComparisonEntry, type ComparisonQuestion, type MetricKey } from "@/app/lib/comparison";
 import "./comparison.css";
 
 const published: ComparisonEntry[] = registryResults.map(result => ({ key: `registry:${result.id}`, origin: "registry", result }));
@@ -18,9 +18,22 @@ function subscribeToLocation(onChange: () => void) {
 const getLocationSearch = () => window.location.search;
 const getServerSearch = () => "";
 
-function initialPeers(entries: ComparisonEntry[], reference?: ComparisonEntry) {
+function initialPeers(entries: ComparisonEntry[], reference?: ComparisonEntry, question: ComparisonQuestion = "exact") {
   if (!reference) return [];
-  return entries.filter(entry => entry.key !== reference.key && !incompatibilities(reference.result, entry.result).length).slice(0, 3).map(entry => entry.key);
+  return entries.filter(entry => entry.key !== reference.key
+    && assess(reference.result, entry.result, question).suitability !== "unsuitable")
+    .slice(0, 3).map(entry => entry.key);
+}
+
+function WhyThisComparison({ assessment, title }: { assessment: ComparisonAssessment; title: string }) {
+  return <div className={`why-comparison why-${assessment.suitability}`}>
+    <p className="comparison-kicker">{title} · {suitabilityLabel(assessment)}</p>
+    <ul>
+      {assessment.reasons.map(reason => <li key={reason} className="why-reason">{reason}</li>)}
+      {assessment.differences.map(text => <li key={text} className="why-difference"><strong>Differs:</strong> {text}</li>)}
+      {assessment.missing.map(text => <li key={text} className="why-missing"><strong>Not recorded:</strong> {text}</li>)}
+    </ul>
+  </div>;
 }
 
 function SetupIcon({ gpu = false }: { gpu?: boolean }) {
@@ -68,6 +81,7 @@ export default function ComparePage() {
   const [latency, setLatency] = useState<"p50" | "p95">("p50");
   const [sortMetric, setSortMetric] = useState<MetricKey>("outputTokensPerSecond");
   const [device, setDevice] = useState("all");
+  const [question, setQuestion] = useState<ComparisonQuestion>("exact");
   const [transport, setTransport] = useState("all");
   const [placement, setPlacement] = useState("all");
   const [query, setQuery] = useState("");
@@ -83,10 +97,13 @@ export default function ComparePage() {
 
   const entries = mode === "example" ? comparisonExamples : local ? [local, ...published] : published;
   const reference = entries.find(entry => entry.key === referenceKey) ?? (mode === "registry" ? published.find(entry => entry.result.id === requested) : undefined) ?? entries[0];
-  const selectedPeerKeys = peerKeys ?? initialPeers(entries, reference);
-  const peers = reference ? entries.filter(entry => entry.key !== reference.key && !incompatibilities(reference.result, entry.result).length) : [];
+  const selectedPeerKeys = peerKeys ?? initialPeers(entries, reference, question);
+  // Usable for the question being asked, which is not the same as rankable.
+  const peers = reference ? entries.filter(entry => entry.key !== reference.key
+    && assess(reference.result, entry.result, question).suitability !== "unsuitable") : [];
   const selected = reference ? [reference, ...peers.filter(entry => selectedPeerKeys.includes(entry.key)).slice(0, 3)] : [];
-  const unmatched = reference ? entries.filter(entry => entry.key !== reference.key && incompatibilities(reference.result, entry.result).length > 0) : [];
+  const unmatched = reference ? entries.filter(entry => entry.key !== reference.key
+    && assess(reference.result, entry.result, question).suitability === "unsuitable") : [];
   const leaderboard = reference ? rankRuns(eligibleLeaderboard(entries, reference.result, mode)
     .filter(entry => device === "all" || entry.result.executionDevice === device)
     .filter(entry => transport === "all" || entry.result.transport.kind === transport)
@@ -95,7 +112,7 @@ export default function ComparePage() {
 
   function chooseReference(key: string) {
     const next = entries.find(entry => entry.key === key);
-    setReferenceKey(key); setPeerKeys(initialPeers(entries, next)); setQuery(""); setDevice("all"); setTransport("all"); setPlacement("all");
+    setReferenceKey(key); setPeerKeys(initialPeers(entries, next, question)); setQuery(""); setDevice("all"); setTransport("all"); setPlacement("all");
   }
 
   function changeMode(next: "registry" | "example") {
@@ -163,16 +180,30 @@ export default function ComparePage() {
       {!reference ? <section className="comparison-empty"><div className="empty-compare-icon" aria-hidden="true"><SetupIcon /><span>↔</span><SetupIcon gpu /></div><p className="comparison-kicker">THE BOARD IS READY</p><h2>Great comparisons start<br />with real results.</h2><p>No community runs are included in this build yet. Open your packaged result to see its charts, or explore the clearly labelled example.</p><div className="hero-actions"><button className="product-button" onClick={() => fileInput.current?.click()}>Open your result.json</button><button className="product-button secondary-button" onClick={() => changeMode("example")}>Explore the example ↗</button></div><details><summary>Where do I get result.json?</summary><p>In the local panel, finish a run, choose Prepare submission, Package &amp; validate, then Review submission files. Download result.json there, or extract it from Download complete bundle. Opening it here does not submit it.</p></details></section> : <>
         <section className="comparison-selection" aria-label="Choose runs">
           <div className="reference-picker"><label htmlFor="reference-run">01 / Choose your reference</label><select id="reference-run" value={reference.key} onChange={event => chooseReference(event.target.value)}>{entries.map(entry => <option value={entry.key} key={entry.key}>{entry.origin === "local" ? "Your file · " : ""}{entry.result.hardware.display} · {entry.result.submitter} · {entry.result.id}</option>)}</select><p>All differences are measured against this run.</p></div>
+          <div className="question-picker"><label htmlFor="comparison-question">What are you comparing?</label>
+            <select id="comparison-question" value={question} onChange={event => {
+              const next = event.target.value as ComparisonQuestion;
+              setQuestion(next); setPeerKeys(initialPeers(entries, reference, next));
+            }}>{Object.entries(comparisonQuestions).map(([key, value]) => <option key={key} value={key}>{value.title}</option>)}</select>
+            <p>{comparisonQuestions[question].detail}</p>
+            <p className="question-note">Ranking is stricter than looking. The leaderboard below only ever ranks runs of the same declared workload, whatever is chosen here.</p>
+          </div>
           <div className="workload-contract"><span className="comparison-kicker">MATCHING WORKLOAD</span><h2>{reference.result.model}</h2><p>{reference.result.quantization ?? "Quantization not recorded"} <span>·</span> {reference.result.profile}</p><details><summary>What makes a comparison compatible?</summary><p>Model, weights source, immutable revision, quantization, profile ID and checksum, and GuideLLM version must match. So must the transport, the serving arrangement, whether the weights were split across CPU and GPU, and the tokenizer that counted the tokens: a run measured through the Windows–WSL bridge carries that bridge&apos;s latency inside every number, and token counts are the counts of whichever tokenizer produced them. Hardware, operating systems and runtime settings may differ. This compares complete setups, not the effect of one isolated component, and token rates across different models do not describe the same semantic work.</p><dl><div><dt>Weights source</dt><dd>{reference.result.modelSource ?? "Canonical model repository (legacy record)"}</dd></div><div><dt>Weights revision</dt><dd>{reference.result.modelRevision}</dd></div><div><dt>Profile checksum</dt><dd>{reference.result.profileSha256}</dd></div><div><dt>GuideLLM</dt><dd>{reference.result.runnerVersion}</dd></div><div><dt>Transport</dt><dd>{transportLabel(reference.result)}</dd></div><div><dt>Tokenizer</dt><dd>{tokenizerLabel(reference.result)}</dd></div></dl></details></div>
         </section>
 
         <section className="peer-section"><div className="comparison-section-heading"><div><p className="comparison-kicker">02 / BUILD YOUR COMPARISON</p><h2>{peers.length ? "Choose up to three other runs." : "Your reference is ready."}</h2></div><span>{peers.length} compatible {peers.length === 1 ? "run" : "runs"}</span></div>
           {peers.length ? <><label className="peer-search">Find a setup<input type="search" placeholder="Hardware, runtime or submitter" value={query} onChange={event => setQuery(event.target.value)} /></label><div className="peer-choices">{choices.map(entry => { const checked = selectedPeerKeys.includes(entry.key); return <label className={`peer-choice${checked ? " selected" : ""}`} key={entry.key}><input type="checkbox" checked={checked} disabled={!checked && selectedPeerKeys.length >= 3} onChange={() => setPeerKeys(keys => checked ? (keys ?? selectedPeerKeys).filter(key => key !== entry.key) : [...(keys ?? selectedPeerKeys), entry.key].slice(0, 3))} /><span><strong>{entry.result.hardware.display}</strong><small>{entry.result.framework} · {entry.result.submitter} · {entry.result.id}</small></span></label>; })}{choices.length === 0 && <p>No compatible runs match your search.</p>}</div></> : <p className="comparison-muted">{mode === "registry" ? "No other compatible runs are available in this build. Your measurements are shown below. Community comparisons appear after matching evidence is submitted, reviewed and included in a website build." : "Choose a different reference to explore the example."}</p>}
-          {unmatched.length > 0 && <details className="unmatched-runs"><summary>{unmatched.length} {unmatched.length === 1 ? "run excluded" : "runs excluded"} from direct comparison</summary><ul>{unmatched.map(entry => <li key={entry.key}><strong>{entry.result.hardware.display}</strong><span>{incompatibilities(reference.result, entry.result).join(" · ")}</span></li>)}</ul></details>}
-          {incompatibilities(reference.result, reference.result).length > 0 && <p className="comparison-notice">This record is missing comparison metadata. Its values remain visible, but it cannot join a ranking or percentage comparison.</p>}
+          {unmatched.length > 0 && <details className="unmatched-runs"><summary>{unmatched.length} {unmatched.length === 1 ? "run excluded" : "runs excluded"} from direct comparison</summary><ul>{unmatched.map(entry => <li key={entry.key}><strong>{entry.result.hardware.display}</strong><span>{assess(reference.result, entry.result, question).blockers.join(" · ")}</span></li>)}</ul></details>}
+          {incompatibilities(reference.result, reference.result).length > 0 && <p className="comparison-notice">This record is missing comparison metadata: {incompatibilities(reference.result, reference.result).join(" · ")}. Its values remain visible, but it cannot join a ranking or percentage comparison.</p>}
         </section>
 
         <div className="selected-setups" style={{ "--setup-count": selected.length } as React.CSSProperties}>{selected.map((entry, index) => <SetupCard key={entry.key} entry={entry} index={index} reference={index === 0} />)}</div>
+        {selected.length > 1 && <section className="why-section" aria-label="Why this comparison">
+          <div className="comparison-section-heading"><div><p className="comparison-kicker">WHY THIS COMPARISON?</p><h2>What these runs share, and what they do not.</h2></div></div>
+          {selected.slice(1).map(entry => <WhyThisComparison key={entry.key}
+            title={entry.result.hardware.display}
+            assessment={assess(reference.result, entry.result, question)} />)}
+        </section>}
         <div className="comparison-charts"><MetricChart entries={selected} metric="outputTokensPerSecond" featured /><div className="latency-heading"><div><p className="comparison-kicker">HOW RESPONSIVE DOES IT FEEL?</p><h2>A closer look at latency.</h2></div><div className="mode-switch" role="group" aria-label="Latency statistic"><button aria-pressed={latency === "p50"} onClick={() => setLatency("p50")}>Median · p50</button><button aria-pressed={latency === "p95"} onClick={() => setLatency("p95")}>Tail · p95</button></div><p>p50 is the median. p95 describes the slower end of observed latencies.</p></div><MetricChart entries={selected} metric={latency === "p50" ? "ttftP50" : "ttftP95"} /><MetricChart entries={selected} metric={latency === "p50" ? "itlP50" : "itlP95"} /></div>
 
         <section className="comparison-leaderboard"><div className="comparison-section-heading"><div><p className="comparison-kicker">{mode === "example" ? "FICTIONAL EXAMPLES ONLY" : "SAME DECLARED WORKLOAD"}</p><h2>{mode === "example" ? "Example ordering" : "Community run leaderboard"}</h2></div><span>{leaderboard.length} {mode === "example" ? "examples" : "matching runs"}</span></div><p className="comparison-muted">{mode === "example" ? "This ordering uses simulated measurements and is not a hardware ranking." : "Ranks apply only to the matching runs and device filter below. Repeat runs count separately, this is not a ranking of unique machines or people. Private files are excluded."}</p><div className="leaderboard-controls"><label>Order by<select value={sortMetric} onChange={event => setSortMetric(event.target.value as MetricKey)}>{Object.entries(metrics).map(([key, metric]) => <option key={key} value={key}>{metric.title}, {metric.higher ? "higher" : "lower"} first</option>)}</select></label><label>Execution device<select value={device} onChange={event => setDevice(event.target.value)}><option value="all">All devices</option><option value="cpu">CPU</option><option value="gpu">GPU</option></select></label><label>Transport<select value={transport} onChange={event => setTransport(event.target.value)}><option value="all">Any transport</option><option value="direct">Direct to the server</option><option value="windows-wsl-stdio-bridge">Through the Windows–WSL bridge</option></select></label><label>Weight placement<select value={placement} onChange={event => setPlacement(event.target.value)}><option value="all">Any placement</option><option value="gpu-only">GPU only</option><option value="cpu-only">CPU only</option><option value="cpu-gpu-offload">Split CPU/GPU</option><option value="unknown">Not recorded</option></select></label></div>

@@ -24,13 +24,14 @@ export type ServingAccelerator = {
 
 export type ServingEnvironment = {
   accelerators: ServingAccelerator[];
-  application: { name: string; version: string } | null;
-  engine: { name: string; version: string | null };
+  application: { name: string; provenance: Provenance; version: string } | null;
+  engine: { name: string; provenance: Provenance; version: string | null };
   host: { cpu: Fact; os: Fact; ramGb: NumericFact };
   placement: { detail: string | null; mode: PlacementMode };
+  placementProvenance: Provenance;
   relationship: ServingRelationship;
   runner: { cpu: string | null; kind: "native" | "wsl2"; os: string; ramGb: number | null };
-  settings: Array<{ name: string; value: string }>;
+  settings: Array<{ name: string; provenance: Provenance; value: string }>;
 };
 
 export type Fact = { provenance: Provenance; value: string | null };
@@ -79,6 +80,10 @@ export type ResultRecord = {
   // without being catalogued, because the registry refused anything else, so
   // this states what that gate established rather than inventing a fact.
   catalogStatus: "catalogued" | "proposed";
+  // Schema 1.0 recorded one coarse detection state for the whole hardware
+  // block. It is the only thing a 1.0 result says about where its facts came
+  // from, so it is kept rather than discarded.
+  hardwareDetection: string | null;
   metadataDeclaredAfterExecution: boolean;
   model: string;
   modelRevision: string;
@@ -262,9 +267,15 @@ function readServing(environment: JsonObject, sourcePath: string): ServingEnviro
       };
     }),
     application: isObject(application)
-      ? { name: textField(application, "name", sourcePath), version: textField(application, "version", sourcePath) }
+      ? { name: textField(application, "name", sourcePath),
+          provenance: enumField(application.provenance, PROVENANCE, "application provenance", sourcePath),
+          version: textField(application, "version", sourcePath) }
       : null,
-    engine: { name: textField(engine, "name", sourcePath), version: optionalTextField(engine, "version", sourcePath) },
+    engine: {
+      name: textField(engine, "name", sourcePath),
+      provenance: enumField(engine.provenance, PROVENANCE, "engine provenance", sourcePath),
+      version: optionalTextField(engine, "version", sourcePath),
+    },
     host: {
       cpu: readFact(host.cpu, "serving cpu", sourcePath),
       os: readFact(host.os, "serving os", sourcePath),
@@ -274,6 +285,7 @@ function readServing(environment: JsonObject, sourcePath: string): ServingEnviro
       detail: optionalTextField(placement, "detail", sourcePath),
       mode: enumField(placement.mode, ["cpu-only", "gpu-only", "cpu-gpu-offload", "unknown"] as const, "placement mode", sourcePath),
     },
+    placementProvenance: enumField(placement.provenance, PROVENANCE, "placement provenance", sourcePath),
     relationship: enumField(environment.relationship, ["same-host", "windows-host-wsl-runner"] as const, "relationship", sourcePath),
     runner: {
       cpu: optionalTextField(runner, "cpu", sourcePath),
@@ -283,7 +295,11 @@ function readServing(environment: JsonObject, sourcePath: string): ServingEnviro
     },
     settings: (settings ?? []).map((entry) => {
       if (!isObject(entry)) throw new Error(`Local result ${sourcePath} has an invalid serving setting.`);
-      return { name: textField(entry, "name", sourcePath), value: typeof entry.value === "string" ? entry.value : "" };
+      return {
+        name: textField(entry, "name", sourcePath),
+        provenance: enumField(entry.provenance, PROVENANCE, "setting provenance", sourcePath),
+        value: typeof entry.value === "string" ? entry.value : "",
+      };
     }),
   };
 }
@@ -415,6 +431,8 @@ export function readResultRecord(sourcePath: string, value: unknown): ResultReco
 
   const record: ResultRecord = {
     catalogStatus: model.catalog_status === "proposed" ? "proposed" : "catalogued",
+    hardwareDetection: isObject(hardware.detection)
+      ? optionalTextField(hardware.detection, "hardware", sourcePath) : null,
     metadataDeclaredAfterExecution:
       isObject(packaging) && packaging.metadata_declared_after_execution === true,
     schemaVersion,

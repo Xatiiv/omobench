@@ -35,6 +35,7 @@ export const comparisonExamples: ComparisonEntry[] = scenarios.map((s, index) =>
     // environment either: they are shaped like a schema 1.0 record, where none
     // of this was collected, rather than inventing a machine.
     schemaVersion: "1.0", catalogStatus: "catalogued", metadataDeclaredAfterExecution: false,
+    hardwareDetection: null,
     serving: null, servedModelId: null, tokenizer: null, weights: null,
     transportRecorded: false,
     transport: { bridgeVersion: null, kind: "direct", overheadIncluded: false, protocol: "Not recorded" },

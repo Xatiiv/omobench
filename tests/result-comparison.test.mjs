@@ -10,7 +10,7 @@ async function loadModule(path) {
   return import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`);
 }
 const { readResultRecord } = await loadModule("../app/lib/result-record.ts");
-const { incompatibilities, metricDifference, rankRuns, eligibleLeaderboard, barPercent, comparisonHref, formatMetric, transportLabel, servingLabel, placementLabel, tokenizerLabel } = await loadModule("../app/lib/comparison.ts");
+const { assess, comparisonQuestions, suitabilityLabel, incompatibilities, metricDifference, rankRuns, eligibleLeaderboard, barPercent, comparisonHref, formatMetric, transportLabel, servingLabel, placementLabel, tokenizerLabel } = await loadModule("../app/lib/comparison.ts");
 
 function fixture() {
   const checksum = `sha256:${"a".repeat(64)}`;
@@ -354,4 +354,145 @@ test("serving labels say which arrangement produced the numbers", () => {
   assert.match(servingLabel(record()), /not recorded/i);
   assert.match(placementLabel(record()), /Not recorded/);
   assert.match(tokenizerLabel(record()), /Not recorded/);
+});
+
+
+// --- Comparable for which question? ----------------------------------------
+//
+// "Comparable" is a property of two runs and a question. Asking which of two
+// machines is faster requires the hardware to differ; refusing that pair
+// because their hardware differs answers a question nobody asked.
+
+function withServing(overrides = {}) {
+  const base = bridgedFixture();
+  base.environment.relationship = "same-host";
+  base.environment.runner.kind = "native";
+  base.environment.transport = { kind: "direct", protocol: "HTTP/1.1", bridge_version: null,
+                                 overhead: "none-direct" };
+  base.hardware.gpus = [{ vendor: "amd", model: "AMD Radeon RX 9070", memory_gb: 16, count: 1 }];
+  return readResultRecord("question fixture", { ...base, ...overrides });
+}
+
+test("a repeat of the same setup ranks, and says the workload is what matched", () => {
+  const assessment = assess(withServing(), withServing(), "exact");
+  assert.equal(assessment.suitability, "ranking");
+  assert.deepEqual(assessment.blockers, []);
+  assert.match(assessment.reasons.join(" "), /declared workload matches/);
+  assert.equal(suitabilityLabel(assessment), "Directly comparable");
+});
+
+test("hardware and engine build differing never stops a comparison", () => {
+  const other = { ...withServing(), hardware: { ...withServing().hardware, display: "Another box" },
+                  framework: "vllm", frameworkVersion: "0.11.0", executionDevice: "cpu" };
+  for (const question of ["exact", "hardware", "runtime", "model"]) {
+    const assessment = assess(withServing(), other, question);
+    assert.equal(assessment.suitability, "ranking", question);
+    assert.match(assessment.differences.join(" "), /Serving hardware|Runtime build|Execution device/);
+  }
+});
+
+test("a different model is unsuitable unless that is the question", () => {
+  const other = { ...withServing(), model: "Qwen/Qwen3-4B" };
+  assert.equal(assess(withServing(), other, "exact").suitability, "unsuitable");
+  assert.equal(assess(withServing(), other, "hardware").suitability, "unsuitable");
+  const asked = assess(withServing(), other, "model");
+  assert.equal(asked.suitability, "qualified");
+  assert.match(asked.differences.join(" "), /^Model: /);
+  assert.match(asked.reasons.join(" "), /not comparable across models as a measure of work done/);
+});
+
+test("a split placement is a difference when the question is about hardware", () => {
+  // The base fixture runs gpu-only; this one splits the weights across both.
+  const document = bridgedFixture();
+  document.environment.relationship = "same-host";
+  document.environment.runner.kind = "native";
+  document.environment.transport = { kind: "direct", protocol: "HTTP/1.1", bridge_version: null, overhead: "none-direct" };
+  document.hardware.gpus = [{ vendor: "amd", model: "AMD Radeon RX 9070", memory_gb: 16, count: 1 }];
+  document.environment.serving.placement = { mode: "cpu-gpu-offload", detail: "32 of 49 layers on GPU", provenance: "contributor-declared" };
+  const split = readResultRecord("split", document);
+  assert.equal(assess(withServing(), split, "exact").suitability, "unsuitable");
+  assert.ok(assess(withServing(), split, "exact").blockers.includes("Different weight placement"));
+  // Two machines place the weights differently; that is the point of asking.
+  assert.equal(assess(withServing(), split, "hardware").suitability, "qualified");
+  assert.equal(assess(withServing(), split, "runtime").suitability, "qualified");
+  assert.equal(assess(withServing(), split, "model").suitability, "unsuitable");
+});
+
+test("a bridged run is never comparable with a direct one, whatever is asked", () => {
+  const relayed = readResultRecord("bridged", bridgedFixture());
+  for (const question of ["exact", "hardware", "runtime", "model"]) {
+    const assessment = assess(withServing(), relayed, question);
+    assert.equal(assessment.suitability, "unsuitable", question);
+    assert.match(assessment.reasons.join(" "), /never subtracted/);
+    assert.ok(assessment.blockers.includes("Different transport"), question);
+  }
+});
+
+test("serving on one machine and measuring on another is never set aside either", () => {
+  const relayed = bridgedFixture();
+  relayed.environment.transport = { kind: "direct", protocol: "HTTP/1.1", bridge_version: null, overhead: "none-direct" };
+  relayed.environment.runner.kind = "native";
+  // relationship stays windows-host-wsl-runner, which the reader is told about
+  assert.throws(() => readResultRecord("mismatch", relayed), /different setups/);
+});
+
+test("information nobody recorded is stated rather than assumed away", () => {
+  const legacy = record();
+  const full = withServing();
+  const assessment = assess(legacy, full, "hardware");
+  assert.notEqual(assessment.suitability, "ranking");
+  assert.match(assessment.missing.join(" "), /not recorded on/);
+});
+
+test("two runs that both omit the same thing agree rather than differ", () => {
+  assert.deepEqual(assess(record(), record(), "exact").blockers, []);
+  assert.deepEqual(assess(record(), record(), "exact").missing, []);
+});
+
+test("quantization is the exception: both omitting it still blocks a ranking", () => {
+  const unknown = { ...record(), quantization: null };
+  const assessment = assess(unknown, unknown, "exact");
+  assert.equal(assessment.suitability, "qualified");
+  assert.deepEqual(assessment.blockers, ["Quantization not recorded"]);
+  assert.match(assessment.missing.join(" "), /not recorded on either run/);
+});
+
+test("a proposed model can be looked at but never ranked", () => {
+  const proposed = withServing({ model: { ...bridgedFixture().model, catalog_status: "proposed" } });
+  const assessment = assess(withServing(), proposed, "exact");
+  assert.equal(assessment.suitability, "unsuitable");
+  assert.match(assessment.reasons.join(" "), /measurements are real; its identity is still a request/);
+  assert.equal(assess(withServing(), proposed, "model").suitability, "qualified");
+});
+
+test("ranking eligibility is exactly what it was, expressed through one rule", () => {
+  assert.deepEqual(incompatibilities(withServing(), withServing()), []);
+  const other = { ...withServing(), model: "Other/Model" };
+  assert.deepEqual(incompatibilities(withServing(), other), assess(withServing(), other, "exact").blockers);
+  assert.deepEqual(eligibleLeaderboard(
+    [{ key: "p", origin: "registry", result: other }], withServing(), "registry"), []);
+});
+
+test("the leaderboard stays strict however exploratory the question is", () => {
+  const other = { ...withServing(), model: "Other/Model" };
+  // assess() would allow this pair for a model question; the ranking does not.
+  assert.equal(assess(withServing(), other, "model").suitability, "qualified");
+  assert.deepEqual(eligibleLeaderboard(
+    [{ key: "p", origin: "registry", result: other }], withServing(), "registry"), []);
+});
+
+test("every question explains itself before it is chosen", () => {
+  for (const [key, value] of Object.entries(comparisonQuestions)) {
+    assert.ok(value.title.length > 5, key);
+    assert.ok(value.detail.length > 40, key);
+  }
+  assert.match(comparisonQuestions.model.detail, /do not measure the same semantic work/);
+});
+
+test("no composite score and no universal threshold is produced", () => {
+  const assessment = assess(withServing(), withServing(), "hardware");
+  for (const value of Object.values(assessment)) {
+    assert.notEqual(typeof value, "number");
+  }
+  assert.ok(["ranking", "qualified", "unsuitable"].includes(assessment.suitability));
 });

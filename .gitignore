@@ -50,3 +50,6 @@ next-env.d.ts
 
 # Windows installer build output (built from windows/installer/src)
 /windows/installer/build/
+
+# TypeScript incremental build state, produced by a local typecheck.
+tsconfig.tsbuildinfo

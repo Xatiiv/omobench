@@ -14,7 +14,28 @@ import unittest
 
 from omobench import evidence
 
+# Enough of a complete result that both readers accept it: the evidence summary
+# ignores the measurements, and the website's reader checks their arithmetic
+# before it will describe anything.
+MEASUREMENTS = {
+    "requests": {"attempted": 50, "succeeded": 50, "failed": 0},
+    "latency_ms": {"ttft": {"p50": 180.0, "p95": 260.0},
+                   "inter_token": {"p50": 20.0, "p95": 30.0}},
+    "output_tokens_per_second": 30.0, "total_tokens_per_second": 48.0,
+    "requests_per_second": 0.5, "error_rate_percent": 0.0,
+}
+ARTIFACTS = {name: {"path": path, "sha256": "sha256:" + "f" * 64} for name, path in (
+    ("raw_runner_output", "guidellm-benchmarks.json.gz"),
+    ("runner_stdout_log", "guidellm.stdout.log"),
+    ("environment_snapshot", "environment.json"),
+    ("reproduce_markdown", "reproduce.md"))}
+
 LEGACY = {
+    "run_id": "run-legacy-000001",
+    "started_at": "2026-01-01T00:00:00Z",
+    "configuration_fingerprint": "sha256:" + "1" * 64,
+    "results": MEASUREMENTS,
+    "artifacts": ARTIFACTS,
     "schema_version": "1.0",
     "execution_device": "gpu",
     "model": {"id": "Qwen/Qwen3-4B", "revision": "a" * 40, "quantization": "Q4_K_M"},
@@ -36,6 +57,11 @@ def fact(value, provenance="contributor-declared"):
 
 
 BRIDGED = {
+    "run_id": "run-bridged-00001",
+    "started_at": "2026-11-01T10:00:00Z",
+    "configuration_fingerprint": "sha256:" + "2" * 64,
+    "results": MEASUREMENTS,
+    "artifacts": ARTIFACTS,
     "schema_version": "1.1",
     "execution_device": "gpu",
     "model": {
