@@ -48,6 +48,12 @@
           <div class="actions"><button id="test-connection" type="button" class="secondary">Check this server</button><button id="check-tokenizer" type="button" class="secondary">Check tokenizer</button><button id="load-tokenizer" type="button" class="secondary">Load tokenizer now</button><button id="start-run" type="submit">Run benchmark <span aria-hidden="true">↗</span></button></div>
           <p class="hint"><strong>Check tokenizer</strong> stays offline and only looks at the shape of the identifier and whether its files are already here. <strong>Load tokenizer now</strong> actually loads it in the interpreter the benchmark uses — which is where a run otherwise dies, before it sends a single request. It may contact huggingface.co to read the repository, and will tell you before it fetches anything. Model weights are never downloaded by either.</p>
           <ul class="status-checklist" id="server-check"></ul>
+          <details id="publication-outlook">
+            <summary>What a public submission will also need</summary>
+            <p class="hint">Running and publishing are two different things. Nothing here stops the benchmark; it is what the registry will additionally ask for, listed now so you can find it before spending the time rather than afterwards.</p>
+            <ul class="status-checklist" id="publication-outlook-items"></ul>
+            <p id="publication-outlook-summary" class="hint"></p>
+          </details>
           <p id="connection-result" class="hint" role="status"></p>
           <p id="tokenizer-result" class="hint" role="status"></p>
           <div id="tokenizer-preflight" class="notice" hidden>

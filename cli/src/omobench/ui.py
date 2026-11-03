@@ -977,6 +977,96 @@ class Controller:
         except ValueError as error:
             raise UIError(str(error)) from error
 
+    def publication_outlook(self, data: dict) -> dict:
+        """What a public submission will need, said before the run rather than after.
+
+        Running and publishing are two different things with two different
+        requirement lists, and the second one used to appear only once the
+        benchmark had finished -- which is how somebody spends an hour
+        measuring a model and then learns there is no route for it.
+
+        This blocks nothing. A local-only run needs none of it, and that is the
+        first thing it says.
+        """
+        from .model_identity import suggest_catalog_models
+
+        served = text_field(data, "model", optional=True) or ""
+        tokenizer = text_field(data, "tokenizer", optional=True)
+        bridged = bool(data.get("windows_bridge"))
+        if type(data.get("windows_bridge", False)) is not bool:
+            raise UIError("Windows bridge selection must be a boolean.")
+        catalog = self.catalog_models()
+        suggestion = suggest_catalog_models(served, catalog)
+
+        items = [{
+            "id": "local",
+            "label": "Saving a local report needs none of this",
+            "state": "ok",
+            "detail": ("Any model, any hardware, no sign-in. It records the measurements this "
+                       "machine made along with the workload, model and execution configuration "
+                       "that produced them. Everything below is about the public registry only."),
+        }, {
+            "id": "model",
+            "label": "A catalogued model, or a proposal for one",
+            "state": ("ok" if served in catalog else
+                      "attention" if suggestion["candidates"] else "action"),
+            "detail": (f"{served} is catalogued." if served in catalog else
+                       (f"{served!r} is the identifier your server answers to, which is a serving "
+                        "alias rather than a catalog identity. " + suggestion["message"])
+                       if suggestion["candidates"] else
+                       (f"No catalog entry matches {served!r}. You can still run this benchmark, "
+                        "and submit it with a proposal asking for the model to be reviewed for "
+                        "the catalog. A proposal needs its family, parameter class, publisher "
+                        "page and licence." if served else
+                        "Enter the identifier your server answers to.")),
+        }, {
+            "id": "revision",
+            "label": "An immutable revision of the weights you actually ran",
+            "state": "action",
+            "detail": ("A commit of the repository the weights really came from. 'main' and "
+                       "'latest' move, so they identify nothing. Weights with no public immutable "
+                       "revision can be identified by their bytes instead: `omobench weights` "
+                       "hashes the files you name. Find this before you start, not afterwards."),
+        }, {
+            "id": "runtime",
+            "label": "The serving runtime's own build",
+            "state": "action",
+            "detail": ("The inference engine's version, such as llama.cpp b10621. An application "
+                       "release -- the LM Studio version, say -- is a different thing, and both "
+                       "are recorded separately."),
+        }, {
+            "id": "tokenizer",
+            "label": "A tokenizer the runner can load",
+            "state": "attention" if not tokenizer else "ok",
+            "detail": ("The workload's prompts are built and counted with this, and the runner "
+                       "resolves it before sending a single request -- so a tokenizer it cannot "
+                       "load ends the run with nothing measured. A GGUF repository is the usual "
+                       "case: it serves perfectly well and contains no Transformers tokenizer. "
+                       "Use 'Load tokenizer now' before starting."
+                       if not tokenizer else
+                       f"{tokenizer} will be used. 'Load tokenizer now' confirms the runner can "
+                       "actually load it.")},
+        ]
+        if bridged:
+            items.append({
+                "id": "serving",
+                "label": "A description of the machine that served the model",
+                "state": "action",
+                "detail": ("Your server runs on Windows and this runner is in WSL, so they are "
+                           "two environments and the result records them separately. You will be "
+                           "asked for the serving machine's operating system, processor, memory, "
+                           "accelerators and runtime: nothing WSL can see of the Windows host "
+                           "counts as evidence about it. The companion can read them for you. "
+                           "The bridge's own latency is inside every measurement and is never "
+                           "subtracted."),
+            })
+        return {
+            "served_model_id": served, "catalog": catalog, "catalogued": served in catalog,
+            "suggestion": suggestion, "items": items,
+            "summary": ("Nothing here stops the benchmark. It is what a public submission will "
+                        "additionally need, so you can gather it now rather than after the run."),
+        }
+
     def serving_probe(self, data: dict) -> dict:
         """Read the Windows serving machine's hardware, on that machine.
 
@@ -1182,8 +1272,16 @@ class Controller:
                 path = run / "provenance.json"
                 path.write_text(json.dumps(declaration, indent=2) + "\n", encoding="utf-8")
                 arguments.append(f"--provenance={path}")
-                optional = {key: value for key, value in optional.items() if key != "cpu"}
-                memory = None
+                # These describe the machine the runner's snapshot came from.
+                # Under a declaration the serving machine is described there
+                # instead, so accepting both would leave two answers to one
+                # question; refuse rather than quietly drop one.
+                if optional.get("cpu") or memory is not None:
+                    raise UIError(
+                        "CPU description and GPU memory under 'Hardware details' describe the "
+                        "machine this panel detected. You are describing the serving machine "
+                        "above, so put its processor and accelerator memory there and leave "
+                        "these blank.")
             arguments.extend(f"--{key.replace('_', '-')}={value}" for key, value in {**values, **optional}.items() if value)
             arguments.extend(f"--runtime-arg={value}" for value in runtime_args)
             if memory is not None:
@@ -1453,6 +1551,8 @@ class UIHandler(BaseHTTPRequestHandler):
                 return self._json(controller.model_suggestions(data))
             if self.path == "/api/serving-probe":
                 return self._json(controller.serving_probe(data))
+            if self.path == "/api/publication-outlook":
+                return self._json(controller.publication_outlook(data))
             if self.path == "/api/weight-identity":
                 return self._json(controller.weight_identity(data))
             if self.path == "/api/server-check":

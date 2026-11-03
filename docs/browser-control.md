@@ -180,6 +180,15 @@ may reach the profile's time limit; the UI does not shorten or alter the workloa
 CPU and GPU results are both eligible for packaging and submission through the
 panel, and so is a run measured through the Windows–WSL bridge, provided its
 serving machine is described. See [provenance.md](provenance.md).
+
+Running and publishing are two different things with two different requirement
+lists, and the second one used to appear only once the benchmark had finished.
+**What a public submission will also need**, beside the server check, says it
+beforehand: whether the identifier your server answers to is a catalogued
+model or a serving alias, that an immutable weights revision and the serving
+runtime's own build will be asked for, that the runner has to be able to load
+the tokenizer, and — for a bridged run — that the serving machine has to be
+described separately. It blocks nothing, and a local report needs none of it.
 The [CPU demo walkthrough](local-demo.md) gives the two-terminal launch sequence
 and exact form values. [Troubleshooting](troubleshooting.md) covers connection
 failures, missing commands, and slow runs.

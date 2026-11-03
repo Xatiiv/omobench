@@ -175,6 +175,15 @@ class BridgedPackagingTests(PanelFixture):
         self.assertEqual(result["model"]["served_model_id"], "deepseek-r1-distill-qwen-14b")
         self.assertEqual(result["model"]["id"], "Qwen/Qwen3-4B")
 
+    def test_describing_the_serving_machine_twice_is_refused(self) -> None:
+        """Two answers to one question is worse than being asked once."""
+        job_id = self.completed_job(bridged=True)
+        for extra in ({"cpu": "Some Other CPU"}, {"gpu_memory_gb": 24}):
+            with self.subTest(extra=extra):
+                with self.assertRaises(UIError) as raised:
+                    self.package(job_id, serving=SERVING, **extra)
+                self.assertIn("describing the serving machine above", str(raised.exception))
+
     def test_a_direct_run_still_packages_as_schema_1_0(self) -> None:
         job_id = self.completed_job(bridged=False)
         detail = self.controller.package(job_id, dict(PACKAGE_FORM, framework="vllm",
@@ -202,6 +211,78 @@ class BridgedPackagingTests(PanelFixture):
         self.assertIn("windows-wsl-stdio-bridge", body)
         self.assertIn("has not been subtracted", body)
         self.assertIn("LM Studio 0.3.31", body)
+
+
+class PublicationOutlookTests(PanelFixture):
+    """What a public submission will need, said before the benchmark runs.
+
+    The requirements used to appear only after a run finished, which is how
+    somebody spends an hour measuring a model and then learns there is no route
+    for it.
+    """
+
+    def outlook(self, **data) -> dict:
+        return self.controller.publication_outlook(data)
+
+    def states(self, report: dict) -> dict:
+        return {item["id"]: item["state"] for item in report["items"]}
+
+    def test_a_local_report_is_the_first_thing_it_says_needs_none_of_this(self) -> None:
+        report = self.outlook(model="Qwen/Qwen3-4B")
+        first = report["items"][0]
+        self.assertEqual(first["id"], "local")
+        self.assertEqual(first["state"], "ok")
+        self.assertIn("Any model, any hardware, no sign-in", first["detail"])
+
+    def test_it_blocks_nothing(self) -> None:
+        report = self.outlook(model="acme/unknown-model")
+        self.assertIn("Nothing here stops the benchmark", report["summary"])
+
+    def test_a_catalogued_model_is_already_satisfied(self) -> None:
+        report = self.outlook(model="Qwen/Qwen3-4B")
+        self.assertEqual(self.states(report)["model"], "ok")
+        self.assertTrue(report["catalogued"])
+
+    def test_a_serving_alias_is_flagged_before_the_run_with_its_candidate(self) -> None:
+        report = self.outlook(model="deepseek-r1-distill-qwen-14b")
+        model = next(item for item in report["items"] if item["id"] == "model")
+        self.assertEqual(model["state"], "attention")
+        self.assertIn("serving alias rather than a catalog identity", model["detail"])
+        self.assertIn("deepseek-ai/DeepSeek-R1-Distill-Qwen-14B", model["detail"])
+
+    def test_an_uncatalogued_model_is_pointed_at_the_proposal_route(self) -> None:
+        model = next(item for item in self.outlook(model="acme/private-v9")["items"]
+                     if item["id"] == "model")
+        self.assertEqual(model["state"], "action")
+        self.assertIn("submit it with a proposal", model["detail"])
+
+    def test_the_tokenizer_warning_names_the_gguf_case_before_the_run(self) -> None:
+        tokenizer = next(item for item in self.outlook(model="unsloth/Model-GGUF")["items"]
+                         if item["id"] == "tokenizer")
+        self.assertEqual(tokenizer["state"], "attention")
+        self.assertIn("contains no Transformers tokenizer", tokenizer["detail"])
+
+    def test_an_explicit_tokenizer_is_already_satisfied(self) -> None:
+        report = self.outlook(model="unsloth/Model-GGUF", tokenizer="Qwen/Qwen3-4B")
+        self.assertEqual(self.states(report)["tokenizer"], "ok")
+
+    def test_the_bridge_adds_the_serving_description_before_the_run(self) -> None:
+        report = self.outlook(model="Qwen/Qwen3-4B", windows_bridge=True)
+        serving = next(item for item in report["items"] if item["id"] == "serving")
+        self.assertIn("two environments", serving["detail"])
+        self.assertIn("never subtracted", serving["detail"])
+
+    def test_a_direct_run_is_not_asked_for_a_serving_description(self) -> None:
+        self.assertNotIn("serving", self.states(self.outlook(model="Qwen/Qwen3-4B")))
+
+    def test_the_revision_and_runtime_requirements_are_always_named(self) -> None:
+        states = self.states(self.outlook(model="Qwen/Qwen3-4B"))
+        self.assertEqual(states["revision"], "action")
+        self.assertEqual(states["runtime"], "action")
+
+    def test_an_invalid_bridge_selection_is_refused(self) -> None:
+        with self.assertRaises(UIError):
+            self.outlook(model="Qwen/Qwen3-4B", windows_bridge="yes")
 
 
 class ModelSuggestionEndpointTests(PanelFixture):

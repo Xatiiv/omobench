@@ -117,8 +117,16 @@ report["repository_listed"] = True
 report["files"] = sorted(
     sibling.rfilename for sibling in (getattr(info, "siblings", None) or [])
     if "/" not in sibling.rfilename)[:400]
-card = getattr(info, "cardData", None) or {}
-base = card.get("base_model") if isinstance(card, dict) else None
+# cardData is a ModelCardData object, not a plain dict, so reach the
+# publisher's declaration through whichever of the two this version gives.
+card = getattr(info, "cardData", None)
+if card is not None and hasattr(card, "to_dict"):
+    card = card.to_dict()
+if isinstance(card, dict):
+    base = card.get("base_model")
+else:
+    base = getattr(card, "base_model", None)
+# Several base models is an ambiguous declaration, not a suggestion.
 if isinstance(base, list):
     base = base[0] if len(base) == 1 else None
 report["base_model"] = base if isinstance(base, str) and base.strip() else None

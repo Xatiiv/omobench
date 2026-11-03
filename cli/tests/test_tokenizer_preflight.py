@@ -29,6 +29,19 @@ from omobench.tokenizer_preflight import (
 )
 
 
+MODEL_CARD_DATA = """
+# A stand-in shaped like huggingface_hub's ModelCardData: an object with
+# attributes and a to_dict(), not a mapping.
+class _ModelCardData:
+    def __init__(self):
+        self.base_model = "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
+
+    def to_dict(self):
+        return {"base_model": self.base_model}
+
+"""
+
+
 def fake_interpreter(directory: Path, body: str) -> list[str]:
     """A stand-in for the runner's interpreter.
 
@@ -342,6 +355,140 @@ class RealRunnerTests(unittest.TestCase):
         self.assertTrue(report.ok, report.message + "\n" + report.detail)
         self.assertEqual(report.identity["vocabulary_size"], len(vocabulary))
 
+
+class ProbeSourceTests(PreflightFixture):
+    """Run the real probe source against stand-in libraries.
+
+    The tests above drive the probe's *answers*. These drive the probe itself,
+    which is where a bug actually lived: `cardData` is a ModelCardData object
+    rather than a plain dict, so reading the publisher's declared base model
+    through `isinstance(card, dict)` silently found nothing and offered no
+    suggestion for exactly the repositories that most need one.
+    """
+
+    def interpreter_with(self, modules: dict[str, str]) -> list[str]:
+        """An interpreter that can see `modules`, then runs the real probe.
+
+        The probe is launched with -I, which deliberately ignores PYTHONPATH,
+        so the stand-ins are put on the path by a launcher that then executes
+        the source it was handed -- the shipped source, not a copy.
+        """
+        library = self.directory / f"library_{len(modules)}_{abs(hash(tuple(sorted(modules))))%10**8}"
+        library.mkdir(parents=True, exist_ok=True)
+        for name, body in modules.items():
+            (library / f"{name}.py").write_text(textwrap.dedent(body), encoding="utf-8")
+        launcher = library / "launcher.py"
+        launcher.write_text(textwrap.dedent(f"""
+            import sys
+            sys.path.insert(0, {str(library)!r})
+            # argv is [this launcher, "-I", "-c", <the shipped probe source>]
+            source = sys.argv[sys.argv.index("-c") + 1]
+            exec(compile(source, "probe", "exec"), {{"__name__": "__main__"}})
+        """), encoding="utf-8")
+        return [sys.executable, str(launcher)]
+
+    FAILING_TOKENIZER = """
+        class AutoTokenizer:
+            @staticmethod
+            def from_pretrained(source, **kwargs):
+                raise OSError(
+                    "%s does not appear to have a file named tokenizer.json" % source)
+    """
+
+    @staticmethod
+    def hub_module(card_expression: str, files: str) -> str:
+        # Dedented here, because the stand-in is concatenated with a block that
+        # already starts at column zero and a later dedent would then find no
+        # common prefix to remove.
+        return MODEL_CARD_DATA + textwrap.dedent(f"""
+            class _Sibling:
+                def __init__(self, name):
+                    self.rfilename = name
+
+            class _Info:
+                def __init__(self):
+                    self.siblings = [_Sibling(name) for name in {files}]
+                    self.cardData = {card_expression}
+
+            class HfApi:
+                def model_info(self, source, **kwargs):
+                    return _Info()
+        """)
+
+    GGUF_FILES = '["README.md", "model-Q4_K_M.gguf"]'
+
+    def run_probe(self, card_expression: str, files: str = GGUF_FILES):
+        return preflight("unsloth/Some-Model-GGUF", network=NETWORK_METADATA, timeout=120,
+                         interpreter=self.interpreter_with({
+                             "transformers": self.FAILING_TOKENIZER,
+                             "huggingface_hub": self.hub_module(card_expression, files)}))
+
+    def test_a_card_object_rather_than_a_dict_still_yields_the_base_model(self) -> None:
+        """What the real library returns, and what the first version missed."""
+        report = self.run_probe("""_ModelCardData()""")
+        self.assertEqual(report.kind, "gguf-only")
+        self.assertIsNotNone(report.suggestion)
+        self.assertEqual(report.suggestion["source"], "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B")
+
+    def test_a_plain_dict_card_still_works(self) -> None:
+        report = self.run_probe(
+            '{"base_model": "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"}')
+        self.assertEqual(report.suggestion["source"], "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B")
+
+    def test_a_single_item_list_is_the_publisher_naming_one_model(self) -> None:
+        report = self.run_probe('{"base_model": ["Qwen/Qwen3-4B"]}')
+        self.assertEqual(report.suggestion["source"], "Qwen/Qwen3-4B")
+
+    def test_several_base_models_are_ambiguous_and_suggest_nothing(self) -> None:
+        report = self.run_probe('{"base_model": ["Qwen/Qwen3-4B", "Qwen/Qwen3-8B"]}')
+        self.assertIsNone(report.suggestion)
+
+    def test_a_card_with_no_declaration_suggests_nothing(self) -> None:
+        self.assertIsNone(self.run_probe("{}").suggestion)
+        self.assertIsNone(self.run_probe("None").suggestion)
+
+    def test_a_repository_listing_reaches_the_gguf_rule(self) -> None:
+        report = self.run_probe("{}", files='["tokenizer.json", "model.gguf"]')
+        self.assertEqual(report.kind, "load-failed")
+        self.assertIn("tokenizer.json", report.repository_files)
+
+    def test_a_tokenizer_that_loads_reports_its_real_class_and_vocabulary(self) -> None:
+        report = preflight("Qwen/Qwen3-4B", network=NETWORK_NONE, timeout=120,
+                           interpreter=self.interpreter_with({"transformers": """
+            class Qwen2TokenizerFast:
+                vocab_size = 151936
+                vocab_file = "/fixture/vocab.json"
+
+            class AutoTokenizer:
+                @staticmethod
+                def from_pretrained(source, **kwargs):
+                    assert kwargs["trust_remote_code"] is False, kwargs
+                    return Qwen2TokenizerFast()
+        """}))
+        self.assertTrue(report.ok, report.message + report.detail)
+        self.assertEqual(report.identity, {"class": "Qwen2TokenizerFast",
+                                           "vocabulary_size": 151936})
+
+    def test_the_probe_refuses_repository_code_in_the_call_it_really_makes(self) -> None:
+        """Asserted inside the stand-in, on the arguments it is handed."""
+        report = preflight("acme/custom", network=NETWORK_NONE, timeout=120,
+                           interpreter=self.interpreter_with({"transformers": """
+            class AutoTokenizer:
+                @staticmethod
+                def from_pretrained(source, **kwargs):
+                    if kwargs.get("trust_remote_code") is not False:
+                        raise AssertionError("repository code was not refused")
+                    raise ValueError("Loading acme/custom requires you to execute custom code")
+        """}))
+        self.assertEqual(report.kind, "not-cached")
+
+    def test_a_runner_without_transformers_is_named_as_the_problem(self) -> None:
+        """Shadow the library rather than relying on it being absent here."""
+        report = preflight("Qwen/Qwen3-4B", network=NETWORK_NONE, timeout=120,
+                           interpreter=self.interpreter_with({
+                               "transformers": "raise ImportError('no transformers here')"}))
+        self.assertEqual(report.kind, "runner-unusable")
+        self.assertIn("runner installation", report.message)
 
 if __name__ == "__main__":
     unittest.main()

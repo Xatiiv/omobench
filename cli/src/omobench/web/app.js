@@ -301,12 +301,38 @@ function renderServerCheck(report) {
   $("server-check-limits").hidden = false;
 }
 
+// What a public submission will need, shown before the run rather than after
+// it. It gates nothing: a local report needs none of it.
+async function refreshPublicationOutlook() {
+  const outlook = await api("/api/publication-outlook", {
+    model: $("model").value, tokenizer: $("tokenizer").value,
+    windows_bridge: $("windows-bridge").checked,
+  });
+  // The same checklist shape the server check uses. "ok" is already satisfied;
+  // everything else is pending, because none of it blocks the benchmark.
+  $("publication-outlook-items").replaceChildren(...outlook.items.map((item) => {
+    const li = document.createElement("li");
+    li.className = `status-item ${item.state === "ok" ? "ok" : "pending"}`;
+    const strong = document.createElement("strong"), detail = document.createElement("span");
+    strong.textContent = item.label;
+    detail.textContent = item.detail;
+    li.append(strong, detail);
+    return li;
+  }));
+  $("publication-outlook-summary").textContent = outlook.summary;
+}
+
+$("publication-outlook").addEventListener("toggle", () => {
+  if ($("publication-outlook").open) action(refreshPublicationOutlook);
+});
+
 $("test-connection").addEventListener("click", () => action(async () => {
   $("connection-result").textContent = "Checking the address, this environment, the server, its model list and one streaming request…";
   renderServerCheck(await api("/api/server-check", {
     endpoint: $("endpoint").value, model: $("model").value, tokenizer: $("tokenizer").value,
     windows_bridge: $("windows-bridge").checked,
   }));
+  if ($("publication-outlook").open) await refreshPublicationOutlook();
 }));
 $("run-form").addEventListener("submit", (event) => {
   event.preventDefault(); action(async () => {
