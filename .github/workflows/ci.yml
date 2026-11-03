@@ -47,7 +47,7 @@ jobs:
       - name: Install the managed CPU runner dependency policy
         run: |
           python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --index-url https://download.pytorch.org/whl/cpu torch==2.15.0+cpu
-          python -m pip install --disable-pip-version-check --no-input --constraint cli/src/omobench/runner-constraints.txt -e './cli[ui,runner]'
+          python -m pip install --disable-pip-version-check --no-input --constraint cli/src/omobench/runner-constraints.txt -e './cli[ui,runner,bridge]'
           python -m pip check
       - name: Verify the actual runner and absence of CUDA dependencies
         run: |
@@ -68,7 +68,7 @@ jobs:
           TRANSFORMERS_OFFLINE: "1"
           PYTHONPATH: cli/tests
         run: |
-          python -m unittest -v test_chat_small_v2 test_measured_window_identity test_measured_window_semantics test_redirect_destination test_request_timeout
+          python -m unittest -v test_chat_small_v2 test_measured_window_identity test_measured_window_semantics test_redirect_destination test_request_timeout test_bridge_http
 
   website:
     runs-on: ubuntu-latest
