@@ -20,7 +20,8 @@ first-class, publishable OmoBench results, provided the model is in the
   prepare a submission, with no server address, model revision, runtime argument,
   or shell command to type. See [Guided CPU setup](docs/guided-launcher.md).
 - **Already run your own model server?** Open `/advanced` in the same panel, or
-  see the [Browser control guide](docs/browser-control.md) and
+  see the [Browser control guide](docs/browser-control.md), the
+  [guided workflow](docs/guided-workflow.md) and
   [CPU demo walkthrough](docs/local-demo.md) for that workflow.
 - **On Windows, prefer not to use a terminal?** The
   [Windows installer](docs/windows-installer.md) installs OmoBench, finds or
@@ -288,6 +289,7 @@ than substituting `next build`.
 | [docs/quickstart.md](docs/quickstart.md) | Installation, updates, and direct CLI commands |
 | [docs/model-server.md](docs/model-server.md) | Starting a server, model identifiers, CPU/GPU settings |
 | [docs/browser-control.md](docs/browser-control.md) | Panel controls, recovery, packaging, and submission |
+| [docs/guided-workflow.md](docs/guided-workflow.md) | The six stages, what may stop a run against what may stop a submission, and which comparisons answer which question |
 | [docs/local-demo.md](docs/local-demo.md) | CPU demonstration and website-only demo |
 | [docs/guided-launcher.md](docs/guided-launcher.md) | Reviewed, managed CPU setup, run, and submission review, the panel's default page |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Common setup and runtime failures |
