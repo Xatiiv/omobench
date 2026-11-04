@@ -764,8 +764,15 @@ $("package-form").addEventListener("submit", (event) => {
     if (data.framework !== "openai-compatible-other") data.server_description = "";
     preview = null; $("submission-preview").hidden = true; $("submit-confirmed").checked = false;
     renderRequirements(await api(`/api/runs/${selected}/requirements`, data));
-    if (!requirements.ready) {
-      throw new Error("This run is not ready for a community submission. The checklist above lists every missing requirement. Your measurements are kept either way.");
+    // Packaging is gated on what packaging needs, and nothing else. A model
+    // awaiting catalog review, or a submitter nobody has typed yet, belongs to
+    // the registry's gate: the bundle built from this evidence is just as
+    // valid without them, and refusing to build it would throw the run away
+    // over a decision somebody else has to make.
+    if (requirements.blocks_packaging.length) {
+      throw new Error("This evidence cannot be packaged yet: "
+        + requirements.blocks_packaging.join("; ")
+        + ". The checklist above says what each one needs. Your measurements are kept either way.");
     }
     renderRun(await api(`/api/runs/${selected}/package`, data));
     await refreshWorkflow();

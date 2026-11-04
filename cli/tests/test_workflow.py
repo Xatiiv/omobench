@@ -271,9 +271,9 @@ class StageTests(unittest.TestCase):
 
 
 class CompletionTests(unittest.TestCase):
-    def states(self, job, *, submit_blocked=False):
-        return {step["id"]: step["state"]
-                for step in workflow.completion(job, submit_blocked=submit_blocked)}
+    def states(self, job, *, submit_blocked=False, package_blocked=False):
+        return {step["id"]: step["state"] for step in workflow.completion(
+            job, submit_blocked=submit_blocked, package_blocked=package_blocked)}
 
     def test_the_six_states_are_reported_separately(self) -> None:
         self.assertEqual([step["id"] for step in workflow.completion({}, submit_blocked=True)],
@@ -320,9 +320,20 @@ class CompletionTests(unittest.TestCase):
         self.assertEqual(self.states(job)["evidence"], "done")
         self.assertEqual(self.states(job)["package"], "done")
 
-    def test_a_refused_bundle_is_reported_as_refused_not_pending(self) -> None:
+    def test_a_bundle_the_registry_refuses_is_still_a_bundle(self) -> None:
+        """Acceptance is the registry's gate, not the bundle's."""
         job = {**COMPLETED_JOB, "validation": {"valid": False, "errors": ["x: acceptance: no"]}}
-        self.assertEqual(self.states(job)["package"], "failed")
+        states = self.states(job, submit_blocked=True)
+        self.assertEqual(states["package"], "done")
+        self.assertEqual(states["ready"], "blocked")
+
+    def test_evidence_that_cannot_be_packaged_is_reported_as_refused(self) -> None:
+        job = {**COMPLETED_JOB, "validation": {"valid": False, "errors": ["x: model.revision"]}}
+        step = next(entry for entry in
+                    workflow.completion(job, submit_blocked=True, package_blocked=True)
+                    if entry["id"] == "package")
+        self.assertEqual(step["state"], "failed")
+        self.assertIn("measurements are untouched", step["detail"])
 
     def test_a_cancelled_run_is_not_a_completed_benchmark(self) -> None:
         self.assertEqual(self.states({"status": "cancelled"})["benchmark"], "failed")

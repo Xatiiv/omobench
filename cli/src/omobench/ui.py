@@ -945,7 +945,8 @@ class Controller:
                          for gate in workflow.GATES},
             "proposal": proposal,
             "completion": workflow.completion(
-                job, submit_blocked=bool(workflow.blocking(checks, "submit"))) if job else [],
+                job, submit_blocked=bool(workflow.blocking(checks, "submit")),
+                package_blocked=bool(workflow.blocking(checks, "package"))) if job else [],
             "gates": {
                 "run": "What stands between this configuration and a benchmark that measures "
                        "something.",
@@ -1053,7 +1054,8 @@ class Controller:
             "blocks_packaging": [item["label"] for item in workflow.blocking(checks, "package")],
             "blocks_submission": [item["label"] for item in workflow.blocking(checks, "submit")],
             "completion": workflow.completion(
-                job, submit_blocked=bool(workflow.blocking(checks, "submit"))),
+                job, submit_blocked=bool(workflow.blocking(checks, "submit")),
+                package_blocked=bool(workflow.blocking(checks, "package"))),
             "local_export_available": bool(job.get("summary")),
         }
 

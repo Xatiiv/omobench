@@ -633,6 +633,25 @@ class CompletionAndRecoveryTests(PanelFixture):
                           "transport"])
         self.assertTrue(summary["qualifications"])
 
+    def test_an_uncatalogued_model_never_stops_the_evidence_being_packaged(self) -> None:
+        """The decision is somebody else's; the bundle does not wait for it."""
+        job_id = self.completed_job(bridged=False)
+        form = dict(PACKAGE_FORM, framework="vllm", framework_version="0.11.0",
+                    model="acme/private-model-v9")
+        report = self.controller.publication_requirements(job_id, form)
+        self.assertEqual(report["blocks_packaging"], [])
+        self.assertIn("Canonical model ID is in the OmoBench catalog",
+                      report["blocks_submission"])
+        detail = self.controller.package(job_id, form)
+        # The bundle exists; the registry refuses it, which is a later state.
+        self.assertFalse(detail["validation"]["valid"])
+        states = self.completion(job_id, **form)
+        self.assertEqual(states["package"]["state"], "done")
+        self.assertEqual(states["ready"]["state"], "blocked")
+        self.assertIn("does not affect the measurements",
+                      states["ready"]["detail"].replace("Nothing about that affects",
+                                                        "does not affect"))
+
     def test_a_cancelled_run_is_not_reported_as_a_completed_benchmark(self) -> None:
         job_id = self.completed_job(bridged=False)
         with self.controller.lock:

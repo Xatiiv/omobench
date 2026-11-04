@@ -472,7 +472,8 @@ COMPLETION_STEPS = (
 )
 
 
-def completion(job: dict[str, Any], *, submit_blocked: bool) -> list[dict[str, Any]]:
+def completion(job: dict[str, Any], *, submit_blocked: bool,
+               package_blocked: bool = False) -> list[dict[str, Any]]:
     """Six states, each reported only once something confirms it.
 
     Nothing here is inferred forwards. A pull request that exists is submitted
@@ -480,19 +481,23 @@ def completion(job: dict[str, Any], *, submit_blocked: bool) -> list[dict[str, A
     merge and a site build, and this panel never observes it -- so it is shown
     as outstanding rather than assumed, however long ago the submission went in.
     """
-    validation = job.get("validation") or {}
+    validation = job.get("validation")
     submission = job.get("submission") or {}
     measured = bool(job.get("summary"))
     saved = bool(job.get("run_path")) and measured
-    validated = validation.get("valid") is True
+    # Packaging wrote a bundle and nothing about the bundle itself is wrong.
+    # Whether the registry will take it is the next state's question, not this
+    # one's: a model awaiting review has a perfectly valid bundle.
+    packaged = validation is not None and not package_blocked
+    validated = bool(validation) and validation.get("valid") is True
     state = {
         "benchmark": "done" if measured else (
             "failed" if job.get("status") in {"failed", "cancelled"} else "pending"),
         "evidence": "done" if saved else "pending",
-        "package": "done" if validated else (
-            "failed" if validation.get("valid") is False else "pending"),
+        "package": "done" if packaged else (
+            "failed" if validation is not None else "pending"),
         "ready": "done" if validated and not submit_blocked else (
-            "blocked" if validated else "pending"),
+            "blocked" if validation is not None else "pending"),
         "submitted": "done" if submission.get("pull_request_url") else (
             "failed" if submission.get("started") and not submission.get("pull_request_url")
             else "pending"),
@@ -504,11 +509,13 @@ def completion(job: dict[str, Any], *, submit_blocked: bool) -> list[dict[str, A
                      "Not finished yet.",
         "evidence": f"Kept at {job.get('run_path')}." if saved else
                     "The run's own files are written when it finishes.",
-        "package": "The registry validator accepted this bundle." if validated else
-                   "The registry validator refused this bundle; its reasons are listed above."
+        "package": "A schema-valid bundle was written from this evidence." if packaged else
+                   "The bundle could not be built from this evidence; its reasons are listed "
+                   "above. The measurements are untouched."
                    if state["package"] == "failed" else "Not packaged yet.",
         "ready": "Nothing is standing in the way of submitting this." if state["ready"] == "done"
-                 else "The bundle is valid; the registry still needs something above."
+                 else "The bundle exists; the public registry still needs something above. "
+                      "Nothing about that affects the measurements or the saved evidence."
                  if state["ready"] == "blocked" else "Package the run first.",
         "submitted": f"Pull request open: {submission.get('pull_request_url')}"
                      if submission.get("pull_request_url") else
