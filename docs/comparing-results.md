@@ -10,6 +10,21 @@ differences describe the metric value relative to the chosen reference, not a
 composite score. Each chart starts at zero and has its own scale. A zero reference
 does not produce a percentage or an infinite improvement claim.
 
+## What are you comparing?
+
+Choose the question first. "Comparable" is a property of two runs **and a
+question**: asking which of two machines is faster requires the hardware to
+differ, and refusing that pair because it differs would answer a question
+nobody asked. The four questions, what each one means to vary, and the three
+outcomes are set out in [guided-workflow.md](guided-workflow.md).
+
+**Why this comparison?** explains every run placed beside the reference: the
+reasons behind the verdict, the information nobody recorded, and the
+differences that remain.
+
+Ranking is stricter than looking, and the leaderboard is unchanged whatever
+question is chosen above it.
+
 ## What counts as compatible
 
 Direct comparisons and the run leaderboard require exact matches for:
@@ -21,6 +36,19 @@ Direct comparisons and the run leaderboard require exact matches for:
 - Recorded quantization. Missing quantization cannot establish a match.
 - Profile ID and the SHA-256 of its contents.
 - GuideLLM version.
+- Transport. A run measured through the Windows–WSL bridge carries that
+  bridge's latency inside every number it reports, and it was never
+  subtracted, so it is comparable with other bridged runs and not with direct
+  ones. This holds under every question.
+- Serving arrangement: serving on one machine while measuring on another is an
+  arrangement rather than a setting.
+- Weight placement, where recorded. Splitting the weights across CPU and GPU is
+  the arrangement that would otherwise hide inside "GPU".
+- Tokenizer source, where recorded. Token counts are whichever tokenizer
+  produced them. Two results that both omit it agree about it; one recording it
+  and one not is a difference.
+- Catalog status. A model proposed for review has real measurements and an
+  identity that is still a request, so it is readable but not rankable.
 
 Hardware, execution device, operating system, runtime version and runtime
 arguments may differ. They remain visible in the setup cards. These are

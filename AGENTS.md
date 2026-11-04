@@ -76,6 +76,44 @@ See [guided-launcher.md](docs/guided-launcher.md).
 
 See [provenance.md](docs/provenance.md).
 
+### Three gates, and what may stop a run
+
+- Every check a surface shows belongs to exactly one gate: `run` (a benchmark
+  can start and would measure something), `package` (the evidence can become a
+  schema-valid bundle), or `submit` (the registry will take that bundle). One
+  definition in `cli/src/omobench/workflow.py`; the panel's checklists are
+  views over it, never a second computation.
+- **Only an actual runner constraint may stop a run.** A model awaiting catalog
+  review blocks submission alone: the measurements are real, the evidence is
+  complete and the bundle validates, because none of that depends on a pending
+  decision. Never refuse a benchmark for a publication requirement.
+- Never describe an ineligible result as ready for the registry. A validated
+  bundle is not an accepted one, and an open pull request is not a published
+  result -- acceptance follows review, a merge and a site build, none of which
+  the panel observes, so it is never reported as done.
+- A check nobody has run is not a pass. Distinguish present-and-wrong (a
+  failure) from not-supplied-yet (what will be needed) from nobody-checked.
+- Stage progress is derived from state, never from navigation, and moving
+  between stages never clears what was entered.
+- Anything after the benchmark must be retryable without re-running it. A
+  refused bundle or a failed submission leaves every evidence file untouched.
+
+### Explaining evidence and comparisons
+
+- The evidence summary (`cli/src/omobench/evidence.py` and
+  `app/lib/evidence.ts`) shows a fact nobody recorded as "Not recorded" rather
+  than omitting it, scores nothing, and never equates detection with
+  verification. The two implementations are held to identical output by
+  `cli/tests/test_evidence_parity.py`; change them together.
+- Comparison suitability depends on the question being asked, and lives in one
+  place (`app/lib/comparison.ts`). Do not duplicate slightly different rules in
+  filters, tables and detail pages. Strict ranking eligibility is unchanged and
+  separate from exploratory side-by-side inspection.
+- A bridged run is never comparable with a direct one under any question. Do
+  not invent a composite score or a universal threshold.
+
+See [guided-workflow.md](docs/guided-workflow.md).
+
 ## Evidence and result integrity
 
 Treat `results/` as append-only public evidence.
@@ -114,7 +152,7 @@ Keep localhost/token/origin protections and the one-panel-per-checkout lock.
 | `app/` | Results website |
 | `windows/companion/` | Windows companion that opens the existing panel from the website's `omobench://` link; see [windows-companion.md](docs/windows-companion.md) |
 | `windows/installer/` | Downloadable Windows installer that installs the companion and prepares an environment; see [windows-installer.md](docs/windows-installer.md) |
-| `docs/` | Contributor and submission documentation |
+| `docs/` | Contributor and submission documentation; see [guided-workflow.md](docs/guided-workflow.md) and [provenance.md](docs/provenance.md) |
 
 ## Safe change workflow
 

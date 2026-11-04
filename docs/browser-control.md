@@ -183,12 +183,15 @@ serving machine is described. See [provenance.md](provenance.md).
 
 Running and publishing are two different things with two different requirement
 lists, and the second one used to appear only once the benchmark had finished.
-**What a public submission will also need**, beside the server check, says it
-beforehand: whether the identifier your server answers to is a catalogued
-model or a serving alias, that an immutable weights revision and the serving
-runtime's own build will be asked for, that the runner has to be able to load
-the tokenizer, and — for a bridged run — that the serving machine has to be
-described separately. It blocks nothing, and a local report needs none of it.
+**Before you start**, beside the server check, groups every check by what it
+would stop: running this benchmark, packaging the evidence, or submitting to
+the public registry. Each says what was looked at, what was seen, where that
+came from and one thing to do about it. Only an actual runner constraint stops
+a run, and a local report needs none of it.
+
+The panel's stages — Connect, Identify, Check, Run, Review, Submit — are
+derived from what is true rather than from what was clicked, so going back to
+fix something clears nothing. See [guided-workflow.md](guided-workflow.md).
 The [CPU demo walkthrough](local-demo.md) gives the two-terminal launch sequence
 and exact form values. [Troubleshooting](troubleshooting.md) covers connection
 failures, missing commands, and slow runs.
