@@ -89,6 +89,7 @@ class PanelFixture(unittest.TestCase):
         job = {"id": job_id, "status": "completed", "profile": "chat-small-v1",
                "execution_device": "gpu", "model": "qwen3-4b", "endpoint": "http://127.0.0.1:1234",
                "created_at": "2026-11-03T09:00:00+00:00", "run_id": "run-fixture-1234",
+               "run_path": str(run),
                "summary": {"requests": {"succeeded": 50}}, "tokenizer": None,
                "transport": dict(BRIDGE_TRANSPORT) if bridged else None,
                "validation": None, "submission": None, "error": None, "log": ""}
@@ -521,6 +522,126 @@ class ServingProbeTests(PanelFixture):
         finally:
             with self.controller.lock:
                 self.controller.busy = False
+
+class CompletionAndRecoveryTests(PanelFixture):
+    """Six states, and getting back on the path after something fails.
+
+    A benchmark is expensive and its evidence is the only part that cannot be
+    produced again cheaply. Everything after it -- packaging, validating,
+    submitting -- has to be retryable without touching that evidence, and none
+    of it may report success before something confirms it.
+    """
+
+    def completion(self, job_id: str, **data) -> dict:
+        report = self.controller.publication_requirements(job_id, {**PACKAGE_FORM, **data})
+        return {step["id"]: step for step in report["completion"]}
+
+    def evidence_hashes(self, job_id: str) -> dict:
+        from omobench.cli import sha256_file
+        run = self.controller.run_directory(job_id)
+        return {path.name: sha256_file(path) for path in sorted(run.iterdir())
+                if path.name != "result.json" and path.is_file()}
+
+    def test_a_finished_benchmark_is_not_a_validated_bundle(self) -> None:
+        job_id = self.completed_job(bridged=False)
+        states = self.completion(job_id)
+        self.assertEqual(states["benchmark"]["state"], "done")
+        self.assertEqual(states["evidence"]["state"], "done")
+        self.assertEqual(states["package"]["state"], "pending")
+        self.assertEqual(states["submitted"]["state"], "pending")
+
+    def test_publication_is_never_reported_as_done(self) -> None:
+        job_id = self.completed_job(bridged=False)
+        self.controller.package(job_id, dict(PACKAGE_FORM, framework="vllm",
+                                             framework_version="0.11.0"))
+        with self.controller.lock:
+            self.controller.jobs[job_id]["submission"] = {
+                "pull_request_url": "https://github.com/Xatiiv/omobench/pull/99",
+                "pull_request_state": "merged"}
+        states = self.completion(job_id)
+        self.assertEqual(states["submitted"]["state"], "done")
+        self.assertEqual(states["published"]["state"], "pending")
+        self.assertIn("does not observe it", states["published"]["detail"])
+
+    def test_a_refused_bundle_keeps_every_byte_of_the_evidence(self) -> None:
+        """Packaging is a separate step and failing it costs no measurements."""
+        job_id = self.completed_job(bridged=False)
+        before = self.evidence_hashes(job_id)
+        # A mutable revision: the registry refuses it, the benchmark is untouched.
+        self.controller.package(job_id, dict(PACKAGE_FORM, framework="vllm",
+                                             framework_version="0.11.0",
+                                             model_revision="main"))
+        states = self.completion(job_id, model_revision="main")
+        self.assertEqual(states["package"]["state"], "failed")
+        self.assertEqual(states["benchmark"]["state"], "done")
+        self.assertEqual(states["evidence"]["state"], "done")
+        self.assertEqual(self.evidence_hashes(job_id), before)
+
+    def test_a_refused_bundle_can_be_packaged_again_without_rerunning(self) -> None:
+        job_id = self.completed_job(bridged=False)
+        before = self.evidence_hashes(job_id)
+        self.controller.package(job_id, dict(PACKAGE_FORM, framework="vllm",
+                                             framework_version="0.11.0",
+                                             model_revision="main"))
+        detail = self.controller.package(job_id, dict(PACKAGE_FORM, framework="vllm",
+                                                      framework_version="0.11.0"))
+        self.assertEqual(detail["validation"]["errors"], [])
+        self.assertEqual(self.completion(job_id)["package"]["state"], "done")
+        self.assertEqual(self.evidence_hashes(job_id), before)
+
+    def test_a_submission_that_started_and_produced_no_pull_request_offers_a_retry(self) -> None:
+        job_id = self.completed_job(bridged=False)
+        self.controller.package(job_id, dict(PACKAGE_FORM, framework="vllm",
+                                             framework_version="0.11.0"))
+        with self.controller.lock:
+            self.controller.jobs[job_id]["submission"] = {"started": True}
+        step = self.completion(job_id)["submitted"]
+        self.assertEqual(step["state"], "failed")
+        self.assertIn("without re-running anything", step["detail"])
+        # And the bundle is still there to submit.
+        self.assertEqual(self.completion(job_id)["package"]["state"], "done")
+
+    def test_a_bundle_the_registry_will_refuse_is_not_called_ready(self) -> None:
+        job_id = self.completed_job(bridged=False)
+        self.controller.package(job_id, dict(PACKAGE_FORM, framework="vllm",
+                                             framework_version="0.11.0"))
+        # Valid bundle, no submitter entered: ready is not yet true.
+        states = self.completion(job_id, submitter="")
+        self.assertEqual(states["package"]["state"], "done")
+        self.assertEqual(states["ready"]["state"], "blocked")
+        self.assertIn("registry still needs something", states["ready"]["detail"])
+
+    def test_the_preview_lists_exactly_the_files_that_would_be_shared(self) -> None:
+        from omobench.ui_submission import bundle_snapshot
+        job_id = self.completed_job(bridged=False)
+        self.controller.package(job_id, dict(PACKAGE_FORM, framework="vllm",
+                                             framework_version="0.11.0"))
+        _, contents, _ = bundle_snapshot(self.root, self.controller.run_directory(job_id))
+        self.assertEqual(sorted(contents), [
+            "environment.json", "guidellm-benchmarks.json.gz", "guidellm.stdout.log",
+            "reproduce.md", "result.json"])
+
+    def test_an_evidence_summary_is_available_once_the_run_is_packaged(self) -> None:
+        job_id = self.completed_job(bridged=False)
+        with self.assertRaises(UIError):
+            self.controller.evidence_summary(job_id)
+        self.controller.package(job_id, dict(PACKAGE_FORM, framework="vllm",
+                                             framework_version="0.11.0"))
+        summary = self.controller.evidence_summary(job_id)
+        self.assertEqual([section["id"] for section in summary["sections"]],
+                         ["environments", "accelerators", "model", "runtime", "tokenizer",
+                          "transport"])
+        self.assertTrue(summary["qualifications"])
+
+    def test_a_cancelled_run_is_not_reported_as_a_completed_benchmark(self) -> None:
+        job_id = self.completed_job(bridged=False)
+        with self.controller.lock:
+            job = self.controller.jobs[job_id]
+            job["status"] = "cancelled"
+            job["summary"] = None
+        states = self.completion(job_id)
+        self.assertEqual(states["benchmark"]["state"], "failed")
+        self.assertIn("No measurements were produced", states["benchmark"]["detail"])
 
 if __name__ == "__main__":
     unittest.main()
