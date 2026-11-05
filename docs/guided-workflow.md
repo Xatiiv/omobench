@@ -127,14 +127,20 @@ output.
 | --- | --- |
 | Benchmark completed | measurements exist |
 | Evidence saved | the run's own files are on disk |
-| Bundle validated | the registry validator accepted it |
-| Ready to submit | nothing is outstanding on the submit gate |
+| Bundle validated | packaging wrote a bundle and no packaging check is failing |
+| Ready to submit | the validator accepted it and nothing is outstanding on the submit gate |
 | Submitted for review | a pull request exists |
 | Accepted and published | nothing this panel can observe |
 
 The last is never shown as done. Acceptance follows review, a merge and a
 website build, none of which the panel sees — so it reports the pull request
 and stops there.
+
+These describe what happened, not what the form currently says. Reopening a
+run clears the packaging fields, which puts every packaging check back to
+outstanding; outstanding is not refused, and a bundle that was built stays
+built. Only a check that is present and wrong — a revision that moves, a
+runtime version that is not one — reports the bundle as refused.
 
 A failure after the benchmark never costs the benchmark. A refused bundle
 leaves every evidence file untouched and can be packaged again; a submission
