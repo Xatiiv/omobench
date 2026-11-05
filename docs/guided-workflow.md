@@ -142,6 +142,25 @@ Measured on this project's own laptop CPU, a 4B model quantized to Q4_K_M took
 roughly 52 seconds per request. That does not fit `chat-small-v2`, and the
 consequence was not a slow result but an ineligible one.
 
+The same machine on `chat-small-extended-v1` is worth describing, because it
+failed differently and for a reason worth recognising. It produced 28
+successful measured requests with **no errors at all** and still fell short of
+the 40 the profile requires. Most of its requests took 43 to 77 seconds — but
+five of the thirty-three took 297, 436, 509, 718 and 1,621 seconds, and
+between those stalls the run went back to its usual speed. That is not a slow
+processor and it is not thermal decline, both of which are gradual. It is
+paging: the host had 0.26 GB of memory available with its swap entirely full,
+and the model server alone was resident at 6.9 GB of 7.85 GB, because the
+server and the benchmark runner were sharing one small virtual machine.
+
+So a host like that does not need a profile with weaker criteria; the numbers
+it produces are not describing the inference stack. This is why the panel
+reads out what the machine has left before the run, and why a host under
+memory pressure is told that a server and a runner competing for memory
+measure the paging. The check never stops a run — a contributor may know
+exactly why their machine looks like that — and no acceptance threshold moves
+because of it.
+
 The panel now says all of this on the page, before the run: what the profile
 executes, when it stops, how much time the budget allows per request, what
 qualifying takes, and what happens if the ceiling wins. None of it is a
