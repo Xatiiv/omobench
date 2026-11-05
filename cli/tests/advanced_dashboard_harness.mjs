@@ -390,8 +390,11 @@ results.localExport = {
   content: JSON.parse(await downloads[downloads.length - 1].blob.text()),
 };
 get("package-form").formValues = { model: "Qwen/Qwen3-VL-4B-Instruct", model_revision: "", framework: "llama.cpp", framework_version: "", submitter: "" };
+const checkRequestsBefore = requests.length;
 await get("check-requirements").trigger("click");
 await settle();
+results.checkRequirementsRequests = requests.slice(checkRequestsBefore)
+  .map((entry) => `${entry.method} ${entry.path.replace(/job-[a-f0-9]{16}/, "<job>")}`);
 results.checklist = {
   items: get("publication-checklist").children.map((item) => `${item.className.replace("status-item ", "")}:${item.children[0].textContent}`),
   summary: get("publication-summary").textContent,

@@ -25,7 +25,8 @@ def _render_states() -> dict:
     if node is None:
         raise unittest.SkipTest("Node is not available in this environment")
     completed = subprocess.run(
-        [node, str(HARNESS), str(APP_JS)], capture_output=True, text=True, timeout=120,
+        [node, str(HARNESS), str(APP_JS)], capture_output=True, text=True,
+        encoding="utf-8", timeout=120,
     )
     if completed.returncode != 0:
         raise AssertionError(f"app.js harness failed:\n{completed.stderr}")
@@ -36,6 +37,16 @@ class AdvancedDashboardTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.states = _render_states()
+
+    def test_checking_the_requirements_also_refreshes_the_preflight(self):
+        """The checks describe the form, so asking about the form asks them.
+
+        Without this the preflight sits there reporting a revision as missing
+        while it is on screen, which is the opposite of deriving progress from
+        real state.
+        """
+        self.assertEqual(self.states["checkRequirementsRequests"],
+                         ["POST /api/runs/<job>/requirements", "POST /api/workflow"])
 
     # -- one shared component --------------------------------------------------
 

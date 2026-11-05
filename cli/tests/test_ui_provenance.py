@@ -652,6 +652,26 @@ class CompletionAndRecoveryTests(PanelFixture):
                       states["ready"]["detail"].replace("Nothing about that affects",
                                                         "does not affect"))
 
+    def test_reopening_a_packaged_run_does_not_unbuild_its_bundle(self) -> None:
+        """The state describes the bundle on disk, not the form on screen.
+
+        Coming back to a finished run clears the packaging form, so every one
+        of its checks is outstanding again. Outstanding is not refused: the
+        bundle that was written is still a bundle that was written, and only a
+        check that is present and wrong says otherwise.
+        """
+        job_id = self.completed_job(bridged=False)
+        form = dict(PACKAGE_FORM, framework="vllm", framework_version="0.11.0")
+        self.controller.package(job_id, form)
+        self.assertEqual(self.completion(job_id, **form)["package"]["state"], "done")
+        # As the panel asks on reopening: nothing retyped yet.
+        blank = self.controller.publication_requirements(
+            job_id, {"model": PACKAGE_FORM["model"]})
+        states = {step["id"]: step for step in blank["completion"]}
+        self.assertTrue(blank["blocks_packaging"])
+        self.assertEqual(states["package"]["state"], "done")
+        self.assertEqual(states["evidence"]["state"], "done")
+
     def test_a_cancelled_run_is_not_reported_as_a_completed_benchmark(self) -> None:
         job_id = self.completed_job(bridged=False)
         with self.controller.lock:

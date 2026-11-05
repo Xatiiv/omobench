@@ -25,7 +25,7 @@ def _render_states() -> dict:
         raise unittest.SkipTest("Node is not available in this environment")
     completed = subprocess.run(
         [node, str(HARNESS), str(GUIDED_JS)],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True, encoding="utf-8", timeout=120,
     )
     if completed.returncode != 0:
         raise AssertionError(f"guided.js harness failed:\n{completed.stderr}")

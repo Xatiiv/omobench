@@ -25,7 +25,8 @@ def _states() -> dict:
     if node is None:
         raise unittest.SkipTest("Node is not available in this environment")
     completed = subprocess.run([node, str(HARNESS), str(APP_JS)],
-                               capture_output=True, text=True, timeout=120)
+                               capture_output=True, text=True,
+                               encoding="utf-8", timeout=120)
     if completed.returncode != 0:
         raise AssertionError(f"provenance form harness failed:\n{completed.stderr}")
     return json.loads(completed.stdout)

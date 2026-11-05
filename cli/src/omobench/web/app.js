@@ -406,6 +406,24 @@ async function refreshWorkflow() {
   renderWorkflow(await api("/api/workflow", workflowRequest()));
 }
 
+// The checks describe what is in the form, so they follow the form. Without
+// this the panel tells you a revision is missing while it is on screen, and
+// only catches up when something else happens to ask.
+let workflowTimer = null, workflowPending = false;
+function scheduleWorkflowRefresh() {
+  clearTimeout(workflowTimer);
+  workflowTimer = setTimeout(async () => {
+    if (workflowPending) return scheduleWorkflowRefresh();
+    workflowPending = true;
+    try { await refreshWorkflow(); } catch { /* the next edit asks again */ }
+    finally { workflowPending = false; }
+  }, 700);
+}
+["run-form", "package-form"].forEach((id) => {
+  $(id).addEventListener("input", scheduleWorkflowRefresh);
+  $(id).addEventListener("change", scheduleWorkflowRefresh);
+});
+
 // Moving between stages reveals, it never resets: every field stays exactly as
 // it was typed, so fixing something earlier costs nothing later.
 document.querySelectorAll(".step-tab").forEach((tab) => {
@@ -551,6 +569,7 @@ $("download-summary").addEventListener("click", () => action(async () => {
 $("check-requirements").addEventListener("click", () => action(async () => {
   const data = withProvenance(Object.fromEntries(new FormData($("package-form"))));
   renderRequirements(await api(`/api/runs/${selected}/requirements`, data));
+  await refreshWorkflow();
 }));
 const TOKENIZER_CHECK_LABELS = {
   syntax: "Identifier accepted",

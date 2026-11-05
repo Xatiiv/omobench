@@ -490,7 +490,10 @@ def completion(job: dict[str, Any], *, submit_blocked: bool,
     saved = bool(evidence) and measured
     # Packaging wrote a bundle and nothing about the bundle itself is wrong.
     # Whether the registry will take it is the next state's question, not this
-    # one's: a model awaiting review has a perfectly valid bundle.
+    # one's: a model awaiting review has a perfectly valid bundle. Only a
+    # packaging check that is present and wrong refuses a bundle -- a field
+    # nobody has retyped since reopening the run is not a refusal, and must not
+    # turn a bundle that was built into one that "could not be built".
     packaged = validation is not None and not package_blocked
     validated = bool(validation) and validation.get("valid") is True
     state = {
