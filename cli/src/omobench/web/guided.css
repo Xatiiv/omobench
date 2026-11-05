@@ -44,7 +44,7 @@
 /* Performance workspace */
 .guided-layout{max-width:1280px}.guided-layout main{max-width:none;padding:44px 36px}
 .workspace-heading{display:flex;justify-content:space-between;align-items:flex-end;gap:24px}.workspace-heading h1{font-size:42px;font-weight:600;letter-spacing:-1.7px}.workspace-heading .intro{font-size:15px;max-width:720px;margin-bottom:12px}.workspace-link{white-space:nowrap;font-size:12px;color:#c4d2e9;margin-bottom:16px}.workspace-link span{color:var(--accent);margin-left:8px}
-.stepper{gap:0;padding:0;margin:25px 0 28px;display:grid;grid-template-columns:repeat(4,1fr);border:1px solid var(--line);border-radius:10px;background:#0f192b;overflow:hidden}
+.stepper{gap:0;padding:0;margin:25px 0 28px;display:grid;grid-template-columns:repeat(6,1fr);border:1px solid var(--line);border-radius:10px;background:#0f192b;overflow:hidden}
 .step-tab{border:0;border-radius:0;padding:13px 12px;border-bottom:2px solid transparent;font-size:12px;font-weight:550}.step-tab.current{background:#f7bd5510;color:var(--accent);border-bottom-color:var(--accent)}.step-tab:hover:not(:disabled){background:#1c2a40;transform:none}
 .choice-grid{grid-template-columns:repeat(2,1fr);gap:18px}
 .recipe-grid{grid-template-columns:repeat(2,1fr);gap:18px}.recipe-card{padding:24px;background:linear-gradient(150deg,#1b2b44,#121d2f);border-radius:12px}.recipe-card h3{font-size:20px;font-weight:600;letter-spacing:-.4px;margin:12px 0}.recipe-card .badge{font-size:10px;padding:5px 9px}.recipe-card .muted{line-height:1.8}
@@ -52,6 +52,6 @@
 #progress-panel{padding:28px}
 #results-metrics{grid-template-columns:repeat(3,minmax(0,1fr))}#results-metrics .metric{padding:22px;border-radius:10px}#results-metrics .metric:nth-child(4){order:-1;grid-column:1/-1;background:radial-gradient(ellipse at 0 50%,#f7bd5514,transparent 65%),#0e1829;padding:28px}#results-metrics .metric:nth-child(4) dd{font-size:62px;letter-spacing:-2px;margin-top:10px}#results-metrics .metric:nth-child(4) dt{font-size:12px}#results-metrics .metric:nth-child(4) .metric-note{font-size:12px}
 @media(max-width:1050px){.workspace-link{display:none}.guided-layout main{padding:32px 24px}}
-@media(max-width:720px){.guided-layout main{padding:24px 16px}.workspace-heading h1{font-size:32px;letter-spacing:-1.1px}.desktop-break{display:none}.recipe-grid{grid-template-columns:1fr}.choice-grid{grid-template-columns:1fr}#progress-panel{padding:18px}.stepper{grid-template-columns:repeat(2,1fr)}.step-tab{padding:12px 8px}#summary-facts{grid-template-columns:repeat(2,1fr)}#results-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:720px){.guided-layout main{padding:24px 16px}.workspace-heading h1{font-size:32px;letter-spacing:-1.1px}.desktop-break{display:none}.recipe-grid{grid-template-columns:1fr}.choice-grid{grid-template-columns:1fr}#progress-panel{padding:18px}.stepper{grid-template-columns:repeat(3,1fr)}.step-tab{padding:12px 8px}#summary-facts{grid-template-columns:repeat(2,1fr)}#results-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .recipe-card .badge.legacy{border-color:#5d5346;background:#25211b;color:#d7c6a8}
 .legacy-note{margin-top:10px;color:#9db0cd}
