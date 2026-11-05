@@ -25,8 +25,8 @@ export function makeElement(id) {
     scrollHeight: 0,
     clientHeight: 0,
     classList: {
-      add: (name) => classes.add(name),
-      remove: (name) => classes.delete(name),
+      add: (...names) => names.forEach((name) => classes.add(name)),
+      remove: (...names) => names.forEach((name) => classes.delete(name)),
       toggle: (name, force) => (force === undefined ? (classes.has(name) ? classes.delete(name) : classes.add(name)) : force ? classes.add(name) : classes.delete(name)),
       contains: (name) => classes.has(name),
     },
@@ -41,8 +41,22 @@ export function makeElement(id) {
     focus: () => {},
     reset: () => {},
     querySelectorAll: () => [],
+    querySelector: () => null,
+    classes,
     attributes,
   };
+}
+
+// `.step-tab[data-stage="run"]` is how a page addresses one member of a
+// registered group. Resolving it here -- rather than making every harness
+// register each combination -- is what lets the stepper be exercised at all.
+function matching(selectors, selector) {
+  if (selectors[selector]) return selectors[selector];
+  const attribute = /^(.*)\[data-([a-z-]+)="([^"]*)"\]$/.exec(selector);
+  if (!attribute) return [];
+  const [, base, name, value] = attribute;
+  const key = name.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+  return (selectors[base] || []).filter((node) => node.dataset[key] === value);
 }
 
 export function makeDocument({ selectors = {} } = {}) {
@@ -54,10 +68,10 @@ export function makeDocument({ selectors = {} } = {}) {
       return elements.get(id);
     },
     createElement: (tag) => makeElement(`created:${tag}`),
-    querySelectorAll: (selector) => selectors[selector] || [],
+    querySelectorAll: (selector) => matching(selectors, selector),
     // Returns null for a selector nothing matches, exactly as a browser does,
     // so a page that guards on the result is exercised rather than crashing.
-    querySelector: (selector) => (selectors[selector] || [])[0] ?? null,
+    querySelector: (selector) => matching(selectors, selector)[0] ?? null,
     addEventListener: () => {},
   };
 }

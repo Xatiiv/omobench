@@ -66,6 +66,12 @@ context.HarnessDashboard = class {
   constructor() {}
   mount() {} update() {} reset() {} appendLog() {} setStages() {}
 };
+// The shared workflow view is the real one: this harness is about the form
+// the page builds, and the view only renders what the panel is told.
+context.WorkflowView = class {
+  constructor() {}
+  render() {} renderGates() {} renderStages() {} renderCompletion() {} renderEvidence() {}
+};
 context.CommunitySubmission = class {
   constructor() {} refresh() {} ticket() { return { mode: "community" }; }
   current() { return true; } destination() { return ""; } payload() { return {}; }

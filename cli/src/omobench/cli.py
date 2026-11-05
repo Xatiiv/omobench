@@ -1131,6 +1131,122 @@ def profile_measured_requests(root: Path, profile_id: str) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def memory_pressure() -> dict[str, Any] | None:
+    """What this host has left, read from the kernel rather than guessed.
+
+    A benchmark competing for memory measures the paging. The model server
+    holds the weights resident and the runner holds a tokenizer and its own
+    process tree, and on a small WSL virtual machine the two together can
+    exhaust it -- at which point per-request latency stops describing the
+    inference stack at all.
+
+    Returns None where there is nothing to read (anything but Linux), because
+    a number nobody measured is worse than no number.
+    """
+    try:
+        text = Path("/proc/meminfo").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    values: dict[str, int] = {}
+    for line in text.splitlines():
+        name, _, rest = line.partition(":")
+        amount = rest.strip().split(" ")[0]
+        if amount.isdigit():
+            values[name] = int(amount)
+    if "MemTotal" not in values or "MemAvailable" not in values:
+        return None
+    swap_total = values.get("SwapTotal", 0)
+    swap_free = values.get("SwapFree", 0)
+    return {
+        "total_gb": round(values["MemTotal"] / 1024 / 1024, 2),
+        "available_gb": round(values["MemAvailable"] / 1024 / 1024, 2),
+        "swap_total_gb": round(swap_total / 1024 / 1024, 2),
+        "swap_used_gb": round((swap_total - swap_free) / 1024 / 1024, 2),
+    }
+
+
+def profile_document(root: Path, profile_id: str) -> dict[str, Any]:
+    """The profile's own YAML, or an empty mapping when it cannot be read."""
+    try:
+        import yaml
+
+        document = yaml.safe_load(
+            (root / "benchmarks" / "profiles" / f"{profile_id}.yaml").read_text(encoding="utf-8"))
+    except (OSError, ValueError, ImportError):
+        return {}
+    return document if isinstance(document, dict) else {}
+
+
+def longer_alternative(profile_id: str) -> str | None:
+    """Another shipped profile with the same workload and more time.
+
+    Not a recommendation engine and not a list maintained by hand: it matches
+    on the whole runner mapping, so the answer is only ever the *same*
+    measurement with a larger ceiling. A host whose requests do not fit one
+    budget needs more clock, not a different workload, and two profiles that
+    differ in anything else are not interchangeable.
+    """
+    spec = PROFILE_SPECS.get(profile_id)
+    if spec is None:
+        return None
+
+    def workload(entry: dict[str, Any]) -> tuple:
+        return (entry["input_tokens"], entry["output_tokens"], entry["profile"], entry["max_requests"])
+
+    longer = sorted(
+        (other["max_duration_seconds"], name) for name, other in PROFILE_SPECS.items()
+        if name != profile_id and workload(other) == workload(spec)
+        and other["max_duration_seconds"] > spec["max_duration_seconds"])
+    return longer[0][1] if longer else None
+
+
+def profile_briefing(root: Path, profile_id: str) -> dict[str, Any]:
+    """What this profile will do, and what its result has to clear.
+
+    Everything here is read from the profile's own YAML and from the runner
+    mapping that executes it; nothing is estimated and nothing is predicted
+    about a particular machine. The one derived number,
+    `seconds_per_request_budget`, is division: the duration ceiling over the
+    request budget. It says what the profile allows on average, not how long
+    anybody's run will take.
+
+    The reason it is worth showing before a run: when the ceiling arrives
+    first, the request still streaming is cancelled, and a cancelled request
+    is attempted-but-not-successful in the measured window. So a run that ends
+    on the clock rather than on its request budget usually misses its own
+    error-rate threshold -- which is a scheduling fact a contributor can act
+    on beforehand, and an unpleasant surprise afterwards.
+    """
+    spec = PROFILE_SPECS.get(profile_id)
+    if spec is None:
+        return {}
+    document = profile_document(root, profile_id)
+    execution = document.get("execution", {}) if isinstance(document.get("execution"), dict) else {}
+    acceptance = document.get("acceptance", {}) if isinstance(document.get("acceptance"), dict) else {}
+    max_duration = spec.get("max_duration_seconds")
+    max_requests = spec.get("max_requests")
+    return {
+        "profile_id": profile_id,
+        "title": document.get("title"),
+        "summary": " ".join((document.get("description") or "").split()) or None,
+        "input_tokens": spec["input_tokens"],
+        "requested_output_tokens": spec["output_tokens"],
+        "concurrency": execution.get("concurrency"),
+        "streaming": True,
+        "warmup_requests": execution.get("warmup_requests"),
+        "measured_requests": execution.get("measured_requests"),
+        "cooldown_requests": execution.get("cooldown_requests"),
+        "total_requests": max_requests,
+        "maximum_duration_seconds": max_duration,
+        "request_timeout_seconds": execution.get("request_timeout_seconds"),
+        "seconds_per_request_budget": (
+            None if not max_duration or not max_requests else max_duration / max_requests),
+        "minimum_successful_requests": acceptance.get("minimum_successful_requests"),
+        "maximum_error_rate_percent": acceptance.get("maximum_error_rate_percent"),
+        "longer_alternative": longer_alternative(profile_id),
+    }
+
+
 # A benchmark that ran, but whose required evidence log could not be
 # finalized (flushed and closed): the measurements exist, but the bundle is
 # incomplete, so the run is not a completed result. Value borrowed from
@@ -1289,6 +1405,33 @@ def _run_guidellm_command(
 
 def redact_endpoint(text: str, endpoint: str) -> str:
     return text.replace(endpoint.rstrip("/"), "<LOCAL_ENDPOINT>")
+
+
+def redact_local_paths(text: str, run_directory: Path, root: Path) -> str:
+    """Take the contributor's own filesystem out of evidence meant to be public.
+
+    A staging path is `/home/<their name>/<their checkout>/.omobench-runs/...`.
+    It says nothing about the measurement and it names a person and the layout
+    of their machine, in a file that is about to be pushed to a public
+    repository. The run directory is replaced first because it sits inside the
+    checkout, so replacing the checkout first would leave half a path behind.
+    """
+    for actual, placeholder in ((run_directory, "<RUN_DIRECTORY>"), (root, "<CHECKOUT>")):
+        for form in {str(actual), str(actual.resolve()), actual.as_posix(),
+                     actual.resolve().as_posix()}:
+            if form:
+                text = text.replace(form, placeholder)
+    return text
+
+
+def redact_evidence(text: str, *, endpoint: str, run_directory: Path, root: Path) -> str:
+    """Everything evidence is redacted for, in one place.
+
+    The runner's own report, its log and the reproduce instructions are
+    redacted identically; an address the project judged worth hiding in one of
+    them is not public information in another.
+    """
+    return redact_local_paths(redact_endpoint(text, endpoint), run_directory, root)
 
 
 def compress_file(path: Path) -> Path:
@@ -1860,7 +2003,8 @@ def _write_local_run(args: argparse.Namespace) -> int:
     )
     if getattr(args, "_bridge_credentials", None):
         command[command.index("--backend") + 1] += ",http2=false"
-    safe_command = redact_endpoint(shlex.join(command), args.endpoint)
+    safe_command = redact_evidence(shlex.join(command), endpoint=args.endpoint,
+                                   run_directory=run_directory, root=root)
 
     if not args.execute:
         print("Dry run — this command has not contacted the endpoint:\n")
@@ -1887,7 +2031,8 @@ def _write_local_run(args: argparse.Namespace) -> int:
     returncode = outcome.returncode
 
     log_path.write_text(
-        redact_endpoint(log_path.read_text(encoding="utf-8"), args.endpoint),
+        redact_evidence(log_path.read_text(encoding="utf-8"), endpoint=args.endpoint,
+                        run_directory=run_directory, root=root),
         encoding="utf-8",
     )
     environment_path = run_directory / "environment.json"
@@ -1916,6 +2061,16 @@ def _write_local_run(args: argparse.Namespace) -> int:
     )
 
     if raw_output_path.exists():
+        # The runner writes its own report, and it writes the backend target and
+        # the output path into it. Redacted before it is compressed, and
+        # therefore before it is hashed, so the published file and its recorded
+        # hash agree. Only those strings change: every measurement in the
+        # report is untouched.
+        raw_output_path.write_text(
+            redact_evidence(raw_output_path.read_text(encoding="utf-8"), endpoint=args.endpoint,
+                            run_directory=run_directory, root=root),
+            encoding="utf-8",
+        )
         compress_file(raw_output_path)
 
     if not outcome.evidence_log_finalized:

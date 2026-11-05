@@ -5,6 +5,23 @@ Three ideas this document exists for: what the panel means by a stage, why
 "are these two results comparable?" cannot be answered without knowing what
 is being asked.
 
+## Two ways in, one workflow
+
+The panel's front page asks one question first: do you want OmoBench to set a
+model server up for you, or do you already run one?
+
+- **The managed setup** downloads one reviewed model and runtime, verifies both
+  against their pinned hashes, and starts the server itself. CPU only.
+- **A server you already run** is the `/advanced` panel: llama.cpp, vLLM, LM
+  Studio, a Windows server measured from WSL through the bridge. CPU or GPU.
+
+They differ in who starts the server and in nothing else. The same engine runs
+the same fixed profile, writes the same evidence, and is held to the same
+requirements — and both pages render the *same* six stages, three gates and six
+completion states, computed once in `cli/src/omobench/workflow.py` and drawn
+once by `cli/src/omobench/web/workflow.js`. Neither page decides for itself
+whether a run is ready.
+
 ## Six stages, derived from state
 
     Connect → Identify → Check → Run → Review → Submit
@@ -93,6 +110,50 @@ tokenizer at all.
 **Check tokenizer** stays offline and only looks at the shape of the
 identifier and whether its files are already here. Neither establishes that
 the tokenizer matches the served weights, and neither pretends to.
+
+## Check: a profile your hardware can finish
+
+Every profile stops on whichever comes first: its request budget, or its
+duration ceiling. Which one arrives first is the single most consequential
+thing about running one, and it is not obvious from either number.
+
+When the budget finishes first, the run ends having measured what it set out to
+measure. When the **ceiling** arrives first, the scheduler stops queuing,
+abandons what it has not started, and cancels the request still streaming. That
+cancelled request is attempted-but-not-successful inside the measured window —
+so a run that ends on the clock carries an error it did not earn. One
+cancellation in a thirteen-request sample is a 7.7% error rate against a
+threshold of 1%.
+
+The arithmetic worth knowing beforehand is the ceiling over the request budget:
+
+| Profile | Budget | Ceiling | Time per request |
+| --- | --- | --- | --- |
+| `chat-small-v2` | 60 requests | 15 min | 15 s |
+| `chat-small-extended-v1` | 60 requests | 90 min | 90 s |
+
+The two are the *same workload* — same prompt, same seed, same 1,024 input and
+256 requested output tokens, same phase counts, same acceptance thresholds of
+40 successful measured requests and at most 1% errors. The extended profile is
+not an easier profile. It is the same measurement with more clock, for hardware
+whose requests do not fit in fifteen seconds each.
+
+Measured on this project's own laptop CPU, a 4B model quantized to Q4_K_M took
+roughly 52 seconds per request. That does not fit `chat-small-v2`, and the
+consequence was not a slow result but an ineligible one.
+
+The panel now says all of this on the page, before the run: what the profile
+executes, when it stops, how much time the budget allows per request, what
+qualifying takes, and what happens if the ceiling wins. None of it is a
+prediction about your machine, and the panel never estimates how long your run
+will take.
+
+Stopping is bounded in both directions. A ceiling-driven stop cancels what is
+in flight rather than draining it: in the run measured here the scheduler had
+stopped queuing 20.6 seconds after the ceiling and had exited 20.9 seconds
+after it. A contributor-initiated cancel sends the whole process group a
+`SIGTERM`, gives it three seconds, and then kills it — so a runner that ignores
+the polite signal cannot hold a ninety-minute profile open.
 
 ## Review: what the evidence says
 

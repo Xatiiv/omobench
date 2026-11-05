@@ -438,6 +438,11 @@ class Controller:
                 # profile whose declaration its runner does not enforce.
                 "profile_contracts": {profile_id: cli.profile_phase_contract(self.root, profile_id)
                                       for profile_id in cli.PROFILE_SPECS},
+                # What each profile will do and what its result has to clear,
+                # so a contributor reads it before the run rather than
+                # discovering it in a validator message afterwards.
+                "profile_briefings": {profile_id: cli.profile_briefing(self.root, profile_id)
+                                      for profile_id in cli.PROFILE_SPECS},
                 "frameworks": cli.RUNTIME_FRAMEWORKS, "catalog": self.catalog_models(),
                 "can_execute": can_execute,
                 "runner_message": runner_message,
@@ -932,6 +937,7 @@ class Controller:
             setup_ok=readiness[0], setup_message=readiness[1],
             endpoint=endpoint, server_check=(served or {}).get("report"),
             tokenizer_report=loaded, tokenizer_source=tokenizer or model,
+            memory=cli.memory_pressure(),
         ) + self.requirement_checks(job or self._preview_job(model, values), values)
         proposal = self.proposal_status(values) if model else None
         identity_settled = bool(model) and (
@@ -1567,6 +1573,7 @@ class UIHandler(BaseHTTPRequestHandler):
                       "/guided.js": ("guided.js", "text/javascript; charset=utf-8"),
                       "/community.js": ("community.js", "text/javascript; charset=utf-8"),
                       "/dashboard.js": ("dashboard.js", "text/javascript; charset=utf-8"),
+                      "/workflow.js": ("workflow.js", "text/javascript; charset=utf-8"),
                       "/guided.css": ("guided.css", "text/css; charset=utf-8"),
                       "/dashboard.css": ("dashboard.css", "text/css; charset=utf-8"),
                       "/favicon.svg": ("favicon.svg", "image/svg+xml"),

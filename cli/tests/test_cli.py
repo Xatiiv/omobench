@@ -152,6 +152,74 @@ class GuideLLMCommandTests(unittest.TestCase):
         self.assertIn("kind=max_requests,count=60", command)
         self.assertIn("kind=max_duration,seconds=5400", command)
 
+    def test_memory_is_read_from_the_kernel_or_not_reported_at_all(self) -> None:
+        from omobench.cli import memory_pressure
+
+        reading = memory_pressure()
+        if reading is None:  # anything but Linux has nothing to read
+            self.assertNotEqual(sys.platform, "linux")
+            return
+        self.assertGreater(reading["total_gb"], 0)
+        self.assertGreaterEqual(reading["available_gb"], 0)
+        self.assertLessEqual(reading["available_gb"], reading["total_gb"])
+        self.assertGreaterEqual(reading["swap_used_gb"], 0)
+        self.assertLessEqual(reading["swap_used_gb"], reading["swap_total_gb"])
+
+    def test_the_profile_briefing_is_read_from_the_profile_itself(self) -> None:
+        """Workload, limits and acceptance, before the run rather than after.
+
+        Nothing here is estimated. The one derived number is division: the
+        duration ceiling over the request budget, which is what the profile
+        allows per request on average -- not a prediction about any machine.
+        """
+        from omobench.cli import profile_briefing
+
+        root = Path(__file__).resolve().parents[2]
+        brief = profile_briefing(root, "chat-small-v2")
+        self.assertEqual(brief["input_tokens"], 1024)
+        self.assertEqual(brief["requested_output_tokens"], 256)
+        self.assertEqual(brief["warmup_requests"], 5)
+        self.assertEqual(brief["measured_requests"], 50)
+        self.assertEqual(brief["cooldown_requests"], 5)
+        self.assertEqual(brief["total_requests"], 60)
+        self.assertEqual(brief["maximum_duration_seconds"], 900)
+        self.assertEqual(brief["request_timeout_seconds"], 300)
+        self.assertEqual(brief["seconds_per_request_budget"], 15)
+        self.assertEqual(brief["minimum_successful_requests"], 40)
+        self.assertEqual(brief["maximum_error_rate_percent"], 1)
+        self.assertEqual(brief["longer_alternative"], "chat-small-extended-v1")
+
+    def test_the_longer_alternative_is_the_same_workload_with_more_clock(self) -> None:
+        """Not a recommendation engine: only a profile that measures exactly
+        the same thing may be offered, because a host whose requests do not fit
+        one budget needs more time, not a different workload."""
+        from omobench.cli import PROFILE_SPECS, longer_alternative, profile_briefing
+
+        root = Path(__file__).resolve().parents[2]
+        extended = profile_briefing(root, "chat-small-extended-v1")
+        self.assertEqual(extended["maximum_duration_seconds"], 5400)
+        self.assertEqual(extended["seconds_per_request_budget"], 90)
+        # The same acceptance thresholds: more time is not a lower bar.
+        self.assertEqual(extended["minimum_successful_requests"], 40)
+        self.assertEqual(extended["maximum_error_rate_percent"], 1)
+        # The longest profile of a family has nowhere further to point.
+        self.assertIsNone(longer_alternative("chat-small-extended-v1"))
+        # A profile with a different workload is never offered as a substitute.
+        for profile_id in ("chat-long-v1", "throughput-v1"):
+            with self.subTest(profile=profile_id):
+                self.assertIsNone(longer_alternative(profile_id))
+        for profile_id, spec in PROFILE_SPECS.items():
+            alternative = longer_alternative(profile_id)
+            if alternative is None:
+                continue
+            with self.subTest(profile=profile_id):
+                other = PROFILE_SPECS[alternative]
+                self.assertEqual(other["input_tokens"], spec["input_tokens"])
+                self.assertEqual(other["output_tokens"], spec["output_tokens"])
+                self.assertEqual(other["profile"], spec["profile"])
+                self.assertEqual(other["max_requests"], spec["max_requests"])
+                self.assertGreater(other["max_duration_seconds"], spec["max_duration_seconds"])
+
     def test_local_endpoint_is_redacted_before_evidence_is_written(self) -> None:
         value = "server=http://localhost:8000/v1 and again http://localhost:8000/v1"
         self.assertEqual(

@@ -7,12 +7,20 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createContext, runInContext } from "node:vm";
-import { makeDocument } from "./dom_stub.mjs";
+import { makeDocument, makeElement } from "./dom_stub.mjs";
 
 const appPath = process.argv[2];
 const webDirectory = dirname(appPath);
 
-const document = makeDocument();
+// The six stages as index.html declares them, so the shared workflow view has
+// a real stepper to mark up rather than silently finding nothing.
+const stepTabs = ["connect", "identify", "check", "run", "review", "submit"].map((stage) => {
+  const tab = makeElement(`step-${stage}`);
+  tab.dataset.stage = stage;
+  tab.dataset.target = "configure";
+  return tab;
+});
+const document = makeDocument({ selectors: { ".step-tab": stepTabs } });
 const get = (id) => document.getElementById(id);
 
 // The package form, driven through values the harness sets directly.
@@ -42,6 +50,18 @@ const SETUP = {
   frameworks: ["llama.cpp", "vllm", "openai-compatible-other"],
   catalog: ["Qwen/Qwen3-4B"],
   can_execute: true, can_validate: true, runner_message: "GuideLLM 0.7.3 ready.",
+  // What the profile will do and what its result has to clear, as
+  // cli.profile_briefing() reads it from the profile's own YAML.
+  profile_briefings: {
+    "chat-small-v1": {
+      profile_id: "chat-small-v1", title: "Fixture chat latency", summary: "A fixture profile.",
+      input_tokens: 1024, requested_output_tokens: 256, concurrency: 1, streaming: true,
+      warmup_requests: 5, measured_requests: 40, cooldown_requests: 5, total_requests: 50,
+      maximum_duration_seconds: 900, request_timeout_seconds: 300,
+      seconds_per_request_budget: 18, minimum_successful_requests: 32,
+      maximum_error_rate_percent: 1, longer_alternative: "chat-small-extended-v1",
+    },
+  },
 };
 const WORKFLOW = {
   stages: [
@@ -138,6 +158,7 @@ const context = createContext({
 
 runInContext(readFileSync(join(webDirectory, "dashboard.js"), "utf8"), context);
 runInContext(readFileSync(join(webDirectory, "community.js"), "utf8"), context);
+runInContext(readFileSync(join(webDirectory, "workflow.js"), "utf8"), context);
 get("submission-mode").value = "community";
 runInContext(readFileSync(appPath, "utf8"), context, { filename: appPath });
 context.download = (blob, name) => downloads.push({ blob, name });
@@ -404,6 +425,18 @@ results.checklist = {
 await get("check-tokenizer").trigger("click");
 await settle();
 results.tokenizerCheck = get("tokenizer-result").textContent;
+
+// What the contributor is told about the profile before starting it.
+results.profileBriefing = {
+  line: get("profile-detail").textContent,
+  facts: get("profile-facts").children.map((node) => node.textContent),
+  qualifies: get("profile-qualifies").textContent,
+  ceiling: get("profile-ceiling").textContent,
+};
+
+// The stepper, marked up by the shared view from the same workflow answer.
+results.stepper = stepTabs.map((tab) => tab.dataset.stage + ":"
+  + ["done", "current", "todo", "blocked"].filter((state) => tab.classList.contains(`stage-${state}`)).join(","));
 
 results.allRequests = [...new Set(requests.map((entry) => `${entry.method} ${entry.path.replace(/job-[a-f0-9]{16}/, "<job>")}`))];
 console.log(JSON.stringify(results));

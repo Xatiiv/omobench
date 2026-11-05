@@ -80,9 +80,30 @@ def validate_bundle(root: Path, run: Path) -> list[str]:
         raise
 
 
-def bundle_snapshot(root: Path, run: Path) -> tuple[dict, dict[str, bytes], str]:
+# The validator marks its own publication-acceptance findings. A bundle whose
+# only findings are these is a complete, schema-valid, hash-correct bundle that
+# the registry will not take -- which is a different fact from a bundle that
+# could not be built, and the two must not be collapsed.
+ACCEPTANCE_MARKER = ": acceptance: "
+
+
+def acceptance_only(errors: list[str]) -> bool:
+    return bool(errors) and all(ACCEPTANCE_MARKER in error for error in errors)
+
+
+def bundle_snapshot(root: Path, run: Path, *,
+                    allow_unacceptable: bool = False) -> tuple[dict, dict[str, bytes], str]:
+    """The exact bytes that would be shared, and their digest.
+
+    `allow_unacceptable` lets a contributor look at and download their own
+    evidence when the registry's acceptance thresholds are the only thing
+    standing in the way. Reading your own files is not publishing them, and
+    refusing to show somebody the bundle they are being told not to submit
+    takes away the one view that would let them check it for secrets. It never
+    relaxes anything else, and submission never passes it.
+    """
     errors = validate_bundle(root, run)
-    if errors:
+    if errors and not (allow_unacceptable and acceptance_only(errors)):
         raise UIError("Bundle validation failed:\n" + "\n".join(errors))
     contents = {name: (run / name).read_bytes() for name in bundle_filenames(run)}
     result = json.loads(contents["result.json"])
@@ -207,13 +228,23 @@ class GitHub:
 
 
 def prepare_submission(root: Path, run: Path) -> dict:
-    result, contents, digest = bundle_snapshot(root, run)
+    result, contents, digest = bundle_snapshot(root, run, allow_unacceptable=True)
     prefix = destination(result)
     title, body = description(result, prefix)
+    unacceptable = [error for error in validate_bundle(root, run) if ACCEPTANCE_MARKER in error]
     preview = {"files": [{"path": f"{prefix}/{name}", "bytes": len(content),
                           "sha256": hashlib.sha256(content).hexdigest()} for name, content in contents.items()],
                "result": result, "title": title, "body": body, "bundle_digest": digest,
-               "repository": None, "can_submit": False, "message": ""}
+               "repository": None, "can_submit": False, "message": "",
+               "acceptance": unacceptable}
+    if unacceptable:
+        # Shown, not submitted: the files are here to inspect and download, and
+        # the registry's own answer is stated rather than hidden behind a
+        # refusal to render anything.
+        preview["message"] = ("This bundle is complete and schema-valid, and the public "
+                              "registry will not take it: " + " ".join(unacceptable)
+                              + " You can review and download it; submission stays closed.")
+        return preview
     try:
         repo = GitHub(root).repository()
         preview["repository"] = repo["full_name"]
@@ -227,7 +258,8 @@ def prepare_submission(root: Path, run: Path) -> dict:
 
 
 def bundle_archive(root: Path, run: Path) -> bytes:
-    result, contents, _ = bundle_snapshot(root, run)
+    # Your own evidence, on your own machine. Downloading it is not publishing.
+    result, contents, _ = bundle_snapshot(root, run, allow_unacceptable=True)
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name, content in contents.items():

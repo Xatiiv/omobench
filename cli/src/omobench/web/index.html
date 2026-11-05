@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/dashboard.css">
   <script src="/dashboard.js" defer></script>
   <script src="/community.js" defer></script>
+  <script src="/workflow.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -50,7 +51,12 @@
           <p class="hint">Enter the Windows server's IPv4 loopback address, for example http://127.0.0.1:1234. Requires the updated companion. No LAN listener or firewall change is needed. A bridged run <strong>can</strong> be submitted: because the server and this runner are different environments, you describe the serving machine yourself in step 03 — nothing WSL can see of the Windows host counts as evidence about it. The bridge's own latency is inside every measured number and is never subtracted, and every bridged result is labelled as such wherever it is shown.</p>
           <label>Tokenizer source <span class="muted small">optional</span><input id="tokenizer" name="tokenizer" placeholder="Hugging Face repository or local tokenizer folder" spellcheck="false">
             <span class="hint">Leave blank to use the server model identifier above. Set it when that identifier is a serving alias rather than a Hugging Face repository — an LM Studio alias such as <code>qwen/qwen3-vl-4b:3</code>, for example. The workload's prompts are built and counted with this tokenizer; it never changes which model your server serves, and it is not a claim about which weights are loaded.</span></label>
-          <p id="profile-detail" class="profile-detail"></p>
+          <section id="profile-brief" class="profile-detail" aria-label="What this profile does">
+            <p id="profile-detail"></p>
+            <dl class="kv" id="profile-facts"></dl>
+            <p id="profile-qualifies" class="hint"></p>
+            <p id="profile-ceiling" class="hint"></p>
+          </section>
           <section id="identity-block" class="identity">
             <h3>Which model is this?</h3>
             <p class="hint">Two different things, kept apart. Your server answers to whatever identifier it was configured with; the catalog has its own canonical identity for the model. Nothing maps one to the other without you choosing it, and a model the catalog does not have can still be benchmarked and saved — only submitting it publicly needs the catalog's answer.</p>

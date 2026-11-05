@@ -270,6 +270,45 @@ class StageTests(unittest.TestCase):
         self.assertEqual(self.stages(self.ready_checks(), job=job)["submit"], "done")
 
 
+class MemoryPressureTests(unittest.TestCase):
+    """What the host has left, said before an hour of CPU time is spent on it.
+
+    This is not a threshold anybody can defend in general -- how much a
+    benchmark needs depends on the weights, the context length and the
+    runtime. What is reported is the state the run would start from.
+    """
+
+    def checks(self, memory):
+        return {item["id"]: item for item in workflow.run_checks(
+            setup_ok=True, setup_message="ready", endpoint=None, server_check=None,
+            tokenizer_report=None, tokenizer_source=None, memory=memory)}
+
+    def test_a_host_with_room_says_so_quietly(self) -> None:
+        item = self.checks({"total_gb": 64.0, "available_gb": 48.0,
+                            "swap_total_gb": 8.0, "swap_used_gb": 0.0})["memory"]
+        self.assertEqual(item["state"], "ok")
+        self.assertEqual(item["recovery"], "")
+        self.assertIn("48.0 GB available of 64.0 GB", item["observed"])
+
+    def test_an_exhausted_host_is_reported_with_what_was_read(self) -> None:
+        item = self.checks({"total_gb": 7.85, "available_gb": 0.26,
+                            "swap_total_gb": 2.0, "swap_used_gb": 2.0})["memory"]
+        self.assertEqual(item["state"], "attention")
+        self.assertIn("0.26 GB available", item["observed"])
+        self.assertIn("2.0 GB of swap in use", item["observed"])
+        self.assertIn("measure the paging", item["recovery"])
+
+    def test_memory_pressure_never_stops_a_benchmark(self) -> None:
+        """A contributor may know exactly why their machine looks like this."""
+        strained = {"total_gb": 7.85, "available_gb": 0.1, "swap_total_gb": 2.0, "swap_used_gb": 2.0}
+        checks = list(self.checks(strained).values())
+        self.assertEqual([item["id"] for item in workflow.failing(checks, "run")], [])
+
+    def test_a_host_that_reports_nothing_contributes_no_check(self) -> None:
+        """A number nobody measured is worse than no number."""
+        self.assertNotIn("memory", self.checks(None))
+
+
 class CompletionTests(unittest.TestCase):
     def states(self, job, *, submit_blocked=False, package_blocked=False,
                evidence=".omobench-runs/run-1"):

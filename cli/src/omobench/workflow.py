@@ -137,6 +137,7 @@ def run_checks(
     server_check: dict[str, Any] | None,
     tokenizer_report: dict[str, Any] | None,
     tokenizer_source: str | None,
+    memory: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """What stands between this configuration and a benchmark that measures something.
 
@@ -155,6 +156,32 @@ def run_checks(
         recovery="" if setup_ok else setup_message,
         detail=setup_message,
     )]
+
+    if memory is not None:
+        # Not a threshold anybody can defend in general: how much a benchmark
+        # needs depends on the weights, the context length and the runtime. What
+        # is defensible is reporting that this host has already run out --
+        # swap in use with little left is not a prediction, it is the state the
+        # run would start from. It never stops a run: a contributor may know
+        # exactly why their machine looks like this.
+        strained = memory["available_gb"] < 1.0 or memory["swap_used_gb"] > 0.5
+        checks.append(check(
+            "memory",
+            "This machine has memory to spare",
+            state="attention" if strained else "ok",
+            observed=f"{memory['available_gb']} GB available of {memory['total_gb']} GB"
+                     + (f", {memory['swap_used_gb']} GB of swap in use"
+                        if memory["swap_used_gb"] else ""),
+            source=SOURCE_MACHINE,
+            blocks="run",
+            detail="Read on the machine running this panel. On a bridged run the model is "
+                   "served somewhere else, and nothing here describes that machine.",
+            recovery="" if not strained else
+                     "A server and a runner competing for memory measure the paging rather "
+                     "than the model, and a long profile gets slower as it goes. Give this "
+                     "environment more memory, serve a smaller model, or close what else is "
+                     "resident before starting.",
+        ))
 
     if not endpoint:
         checks.append(check(

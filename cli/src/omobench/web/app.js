@@ -103,15 +103,55 @@ function option(value, label = value) {
   return el;
 }
 
+function fact(list, term, description) {
+  const dt = document.createElement("dt"), dd = document.createElement("dd");
+  dt.textContent = term; dd.textContent = description;
+  list.append(dt, dd);
+}
+
+// What this profile will do, and what its result has to clear, before it runs
+// rather than in a validator message afterwards. Everything shown is read from
+// the profile's own declaration; nothing here predicts how long a particular
+// machine will take.
 function profileDetail() {
   if (!setup) return;
-  const spec = setup.profiles[$("profile").value];
+  const id = $("profile").value;
+  const spec = setup.profiles[id];
+  const brief = (setup.profile_briefings || {})[id] || {};
   const load = spec.profile.includes("streams=16") ? "16 streams" : "1 stream";
   // max_requests is the runner's total request budget, including warmup and
-  // cooldown -- never label it "measured requests" here. The profile's own
-  // declared measured-request target (execution.measured_requests) is not
-  // part of this setup payload; only show it once it is.
+  // cooldown -- never label it "measured requests" here.
   $("profile-detail").textContent = `${spec.input_tokens.toLocaleString()} input tokens · ${spec.output_tokens} requested output tokens · ${load} · maximum ${spec.max_requests} total requests, including warmup and cooldown · up to ${spec.max_duration_seconds / 60} min`;
+
+  const facts = $("profile-facts");
+  facts.replaceChildren();
+  if (brief.measured_requests) {
+    fact(facts, "What it executes", `${brief.warmup_requests} warmup + ${brief.measured_requests} measured`
+      + ` + ${brief.cooldown_requests} cooldown = ${brief.total_requests} requests.`
+      + " Warmup and cooldown are excluded from every number.");
+  }
+  fact(facts, "When it stops", `Whichever comes first: the ${spec.max_requests}-request budget,`
+    + ` or ${spec.max_duration_seconds / 60} minutes.`);
+  if (brief.seconds_per_request_budget) {
+    fact(facts, "Time the budget allows",
+      `${brief.seconds_per_request_budget.toFixed(0)} seconds per request on average.`
+      + " That is the ceiling divided by the request budget, not an estimate for your machine.");
+  }
+  if (brief.request_timeout_seconds) {
+    fact(facts, "Stalled request", `A request that goes ${brief.request_timeout_seconds} seconds`
+      + " without producing its next chunk fails. A slow but steady response is not a stall.");
+  }
+
+  $("profile-qualifies").textContent = brief.minimum_successful_requests
+    ? `To qualify for the public registry this profile needs at least ${brief.minimum_successful_requests}`
+      + ` successful measured requests and an error rate no higher than ${brief.maximum_error_rate_percent}%.`
+      + " A benchmark that finishes is not automatically a result the registry takes."
+    : "";
+  $("profile-ceiling").textContent = "If the ceiling arrives before the request budget is done, the"
+    + " request still streaming is cancelled, and a cancelled request counts as attempted and not"
+    + " successful — so a run that ends on the clock usually misses the error rate above."
+    + (brief.longer_alternative
+      ? ` ${brief.longer_alternative} is the same workload with a longer ceiling.` : "");
 }
 
 async function refreshSetup() {
@@ -330,10 +370,9 @@ function renderServerCheck(report) {
 // deciding for themselves whether a run is ready is three chances to disagree.
 let workflow = null;
 
-const GATE_IDS = ["run", "package", "submit"];
-const CHECK_CLASS = {ok: "ok", blocked: "fail", attention: "pending", unknown: "pending"};
-const STATE_WORD = {ok: "ready", blocked: "needs attention", attention: "worth checking",
-                    unknown: "not established"};
+// The shared stages, gates, completion states and evidence summary. The guided
+// page mounts the same component; the rules themselves live server-side.
+const workflowView = new WorkflowView();
 
 function workflowRequest() {
   const data = Object.fromEntries(new FormData($("package-form")));
@@ -346,60 +385,10 @@ function workflowRequest() {
   return enriched;
 }
 
-function renderCheck(item) {
-  const li = document.createElement("li");
-  li.className = `status-item ${CHECK_CLASS[item.state] || "pending"}`;
-  const strong = document.createElement("strong");
-  strong.textContent = item.label;
-  li.append(strong);
-  // What was looked at, and where the answer came from.
-  const observed = document.createElement("span");
-  observed.className = "sub-check";
-  observed.textContent = item.observed
-    ? `Seen: ${item.observed} — from ${item.source}`
-    : `${STATE_WORD[item.state] || item.state} — ${item.source}`;
-  li.append(observed);
-  if (item.detail) {
-    const detail = document.createElement("span");
-    detail.textContent = item.detail;
-    li.append(detail);
-  }
-  // A specific thing to do, rather than a restatement of the problem.
-  if (item.recovery) {
-    const recovery = document.createElement("span");
-    recovery.className = "recovery";
-    recovery.textContent = item.recovery;
-    li.append(recovery);
-  }
-  return li;
-}
-
 function renderWorkflow(report) {
   workflow = report;
-  $("preflight-local").textContent = report.local_report;
-  for (const gate of GATE_IDS) {
-    const items = report.checks.filter((item) => item.blocks === gate);
-    $(`gate-${gate}`).replaceChildren(...items.map(renderCheck));
-    $(`gate-note-${gate}`).textContent = report.gates[gate];
-    const waiting = report.blocking[gate].length;
-    $(`gate-count-${gate}`).textContent = waiting
-      ? `${waiting} outstanding` : items.length ? "nothing outstanding" : "";
-    $(`gate-count-${gate}`).className = `gate-count ${waiting ? "waiting" : "clear"}`;
-  }
-  // Checks that gate nothing get their own place. Listing them under a gate
-  // would suggest they stand in its way, which is the opposite of what they say.
-  const ungated = report.checks.filter((item) => item.blocks === null);
-  $("gate-none-block").hidden = !ungated.length;
-  $("gate-none").replaceChildren(...ungated.map(renderCheck));
-
-  report.stages.forEach((stage) => {
-    const tab = document.querySelector(`.step-tab[data-stage="${stage.id}"]`);
-    if (!tab) return;
-    tab.className = `step-tab stage-${stage.state}`;
-    tab.setAttribute("aria-current", stage.state === "current" ? "step" : "false");
-  });
+  workflowView.render(report);
   renderCatalogStatus(report.proposal);
-  renderCompletion(report.completion);
 }
 
 async function refreshWorkflow() {
@@ -488,57 +477,8 @@ $("check-proposal").addEventListener("click", () => action(async () => {
 }));
 
 // --- Six states, none of them assumed -------------------------------------
-const COMPLETION_CLASS = {done: "ok", failed: "fail", blocked: "fail", pending: "pending"};
-
-function renderCompletion(steps) {
-  $("completion").hidden = !steps || !steps.length;
-  if (!steps || !steps.length) return;
-  $("completion-steps").replaceChildren(...steps.map((step) => {
-    const li = document.createElement("li");
-    li.className = `status-item ${COMPLETION_CLASS[step.state] || "pending"}`;
-    const strong = document.createElement("strong"), span = document.createElement("span");
-    strong.textContent = step.label;
-    span.textContent = step.detail;
-    li.append(strong, span);
-    return li;
-  }));
-}
-
-// --- What the evidence says ------------------------------------------------
 async function refreshEvidence(jobId) {
-  const summary = await api(`/api/runs/${jobId}/evidence`).catch(() => null);
-  $("evidence-summary").hidden = !summary;
-  if (!summary) return;
-  $("evidence-qualifications").textContent = summary.qualifications.join(" ");
-  $("evidence-sections").replaceChildren(...summary.sections.map((section) => {
-    const block = document.createElement("section");
-    const heading = document.createElement("h4");
-    heading.textContent = section.title;
-    const list = document.createElement("dl");
-    list.className = "kv";
-    section.rows.forEach((row) => {
-      const dt = document.createElement("dt"), dd = document.createElement("dd");
-      dt.textContent = row.label;
-      dd.textContent = row.value;
-      if (!row.recorded) dd.classList.add("unrecorded");
-      // Where it came from, and what it still does not establish.
-      if (row.source) {
-        const source = document.createElement("span");
-        source.className = "sub-check";
-        source.textContent = row.source;
-        dd.append(source);
-      }
-      if (row.note) {
-        const note = document.createElement("span");
-        note.className = "sub-check";
-        note.textContent = row.note;
-        dd.append(note);
-      }
-      list.append(dt, dd);
-    });
-    block.append(heading, list);
-    return block;
-  }));
+  workflowView.renderEvidence(await api(`/api/runs/${jobId}/evidence`).catch(() => null));
 }
 
 $("test-connection").addEventListener("click", () => action(async () => {

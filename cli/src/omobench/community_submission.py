@@ -90,13 +90,24 @@ def check_previous(state, actor, digest):
 
 
 def prepare_community(root: Path, run: Path, session, state: dict):
-    result, contents, digest = bundle_snapshot(root, run)
+    # The same rule as the origin route: a bundle the registry will refuse on
+    # its acceptance thresholds can still be looked at by the person who made
+    # it. submit_community() below stays strict.
+    result, contents, digest = bundle_snapshot(root, run, allow_unacceptable=True)
     prefix = destination(result)
     title, body = description(result, prefix)
+    from .ui_submission import ACCEPTANCE_MARKER, validate_bundle
+    unacceptable = [error for error in validate_bundle(root, run) if ACCEPTANCE_MARKER in error]
     preview = {"mode": "community", "files": [
         {"path": f"{prefix}/{name}", "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
         for name, data in contents.items()], "result": result, "title": title, "body": body,
-        "bundle_digest": digest, "repository": UPSTREAM, "can_submit": False, "message": ""}
+        "bundle_digest": digest, "repository": UPSTREAM, "can_submit": False, "message": "",
+        "acceptance": unacceptable}
+    if unacceptable:
+        preview["message"] = ("This bundle is complete and schema-valid, and the public "
+                              "registry will not take it: " + " ".join(unacceptable)
+                              + " You can review and download it; submission stays closed.")
+        return preview, None
     try:
         api, actor, generation = session.client()
         if identity(api.api("user")) != actor:

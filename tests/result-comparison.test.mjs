@@ -10,6 +10,7 @@ async function loadModule(path) {
   return import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`);
 }
 const { readResultRecord } = await loadModule("../app/lib/result-record.ts");
+const { comparisonExamples } = await loadModule("../app/data/comparison-examples.ts");
 const { assess, comparisonQuestions, suitabilityLabel, incompatibilities, metricDifference, rankRuns, eligibleLeaderboard, barPercent, comparisonHref, formatMetric, transportLabel, servingLabel, placementLabel, tokenizerLabel } = await loadModule("../app/lib/comparison.ts");
 
 function fixture() {
@@ -495,4 +496,74 @@ test("no composite score and no universal threshold is produced", () => {
     assert.notEqual(typeof value, "number");
   }
   assert.ok(["ranking", "qualified", "unsuitable"].includes(assessment.suitability));
+});
+
+// The illustrative examples the comparison page offers before any real result
+// exists. They are fictional and labelled as such on the page; what they have
+// to do is demonstrate the explanations honestly, which means each one has to
+// land where it claims to land.
+const example = (key) => comparisonExamples.find((entry) => entry.key === key).result;
+const verdict = (key, question) => assess(example("example-reference"), example(key), question).suitability;
+
+test("the illustrative examples are not kept out of the public registry", () => {
+  for (const entry of comparisonExamples) {
+    assert.equal(entry.origin, "example");
+    assert.match(entry.result.id, /^example-/);
+    assert.equal(entry.result.submitter, "Illustrative setup");
+  }
+});
+
+test("an example pair that differs only in hardware stays directly comparable", () => {
+  for (const question of Object.keys(comparisonQuestions)) {
+    assert.equal(verdict("example-cpu-b", question), "ranking", question);
+  }
+  const assessment = assess(example("example-reference"), example("example-cpu-b"), "hardware");
+  assert.deepEqual(assessment.blockers, []);
+  assert.ok(assessment.differences.some((text) => text.startsWith("Serving hardware:")));
+});
+
+test("a confounded example is comparable only where the question allows it", () => {
+  // The weights are split across CPU and GPU and the engine is a different
+  // one. A question about hardware or runtime expects that; "the same setup
+  // again" does not.
+  assert.equal(verdict("example-runtime-b", "exact"), "unsuitable");
+  assert.equal(verdict("example-runtime-b", "hardware"), "qualified");
+  assert.equal(verdict("example-runtime-b", "runtime"), "qualified");
+  const strict = assess(example("example-reference"), example("example-runtime-b"), "exact");
+  assert.ok(strict.blockers.includes("Different weight placement"));
+  assert.ok(strict.reasons.some((text) => text.includes("Weight placement differs")));
+});
+
+test("an example with gaps reports what nobody recorded, by name", () => {
+  const assessment = assess(example("example-reference"), example("example-missing"), "model");
+  assert.ok(assessment.missing.some((text) => text.includes("Quantization is not recorded")));
+  assert.ok(assessment.missing.some((text) => text.includes("Weights source is not recorded")));
+  // Unrecorded is not the same as different: the gaps are listed separately
+  // from the differences, and nothing is invented to fill them.
+  assert.ok(!assessment.missing.some((text) => text.includes("against")));
+  assert.equal(verdict("example-missing", "exact"), "unsuitable");
+});
+
+test("a bridged example is comparable with a direct one under no question", () => {
+  for (const question of Object.keys(comparisonQuestions)) {
+    assert.equal(verdict("example-bridged", question), "unsuitable", question);
+  }
+  const assessment = assess(example("example-reference"), example("example-bridged"), "hardware");
+  assert.ok(assessment.blockers.includes("Different transport"));
+  assert.ok(assessment.reasons.some((text) => text.includes("never subtracted")));
+});
+
+test("a different-model example is comparable only when that is the question", () => {
+  assert.equal(verdict("example-model-b", "exact"), "unsuitable");
+  assert.equal(verdict("example-model-b", "hardware"), "unsuitable");
+  assert.equal(verdict("example-model-b", "model"), "qualified");
+  const assessment = assess(example("example-reference"), example("example-model-b"), "model");
+  assert.ok(assessment.reasons.some((text) => text.includes("token is not a unit of meaning")));
+  assert.ok(assessment.differences.some((text) => text.startsWith("Model:")));
+});
+
+test("only the directly comparable examples are offered for ranking", () => {
+  const ranked = eligibleLeaderboard(comparisonExamples, example("example-reference"), "example");
+  assert.deepEqual(ranked.map((entry) => entry.key).sort(),
+                   ["example-cpu-b", "example-gpu-a", "example-reference"]);
 });

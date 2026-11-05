@@ -36,6 +36,11 @@ const dashboard = new BenchmarkDashboard($("dashboard-mount"), {
   serverLog: true,
 });
 
+// The same stages, gates, completion states and evidence summary the advanced
+// panel mounts. The rules behind them are computed once, server-side, in
+// omobench/workflow.py -- this page renders them, it does not decide them.
+const workflowView = new WorkflowView({ ariaCurrent: false });
+
 function notice(message, error = false) {
   $("notice").textContent = message;
   $("notice").classList.toggle("error", error);
@@ -96,6 +101,22 @@ function showScreen(name) {
   });
 }
 
+// Two ways to start, and they differ only in who runs the model server: the
+// stages, the evidence and the requirements after that are the same ones.
+// Choosing a server you already run is the advanced panel, which keeps its own
+// URL -- the token travels with the session, so nothing is re-entered.
+const startChoice = $("choose-managed");
+if (startChoice) {
+  startChoice.addEventListener("click", () => {
+    startChoice.setAttribute("aria-pressed", "true");
+    const panel = $("recipe-panel");
+    if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+}
+
+// Six stages across four screens: two stages can share a screen, and a click
+// on either opens it. The stage's own state comes from the workflow; this only
+// decides what to show.
 document.querySelectorAll(".step-tab").forEach((tab) => tab.addEventListener("click", () => action(async () => {
   const target = tab.dataset.screen;
   if (target === "run") {
@@ -115,7 +136,7 @@ document.querySelectorAll(".step-tab").forEach((tab) => tab.addEventListener("cl
     await loadRecentRuns();
     return;
   }
-  if (target === "results") showResults(finishedManagedJob.result);
+  if (target === "results") { showResults(finishedManagedJob.result); await refreshWorkflow(); }
   if (target === "share") await enterShareScreen();
   showScreen(target);
 })));
@@ -477,6 +498,8 @@ function finishFlow(success, errorMessage, runJob) {
     benchmarkJobId = runJob.benchmark_job_id;
     showResults(runJob.result);
     showScreen("results");
+    // The stepper and the completion states describe a run that now exists.
+    refreshWorkflow().catch(() => {});
   }
   loadRecentRuns().catch(() => {});
 }
@@ -606,33 +629,19 @@ function showResults(summary) {
 
 // -- Screen 4: share results ----------------------------------------------------
 
-function statusChecklist(detail) {
-  const list = $("status-checklist");
-  list.replaceChildren();
-  const items = [];
-  items.push(["Execution completed", !!detail?.summary, detail?.summary ? "The benchmark finished and produced measurements." : "Not completed yet."]);
-  if (detail?.validation) {
-    const errors = detail.validation.errors || [];
-    const acceptanceErrors = errors.filter((message) => message.includes("acceptance:"));
-    const otherErrors = errors.filter((message) => !message.includes("acceptance:"));
-    items.push(["Profile acceptance", acceptanceErrors.length === 0,
-      acceptanceErrors.length ? acceptanceErrors.join(" ") : "Meets this profile's minimum successful requests and maximum error rate."]);
-    items.push(["Bundle validation", otherErrors.length === 0,
-      otherErrors.length ? otherErrors.join(" ") : "Schema, catalog, and artifact checks passed."]);
-  } else {
-    items.push(["Profile acceptance", null, "Package this run to check."]);
-    items.push(["Bundle validation", null, "Package this run to check."]);
-  }
-  const pr = detail?.submission?.pull_request_url;
-  items.push(["Submission created", !!pr, pr || "Not submitted yet."]);
-  list.replaceChildren(...items.map(([label, ok, message]) => {
-    const li = document.createElement("li");
-    li.className = `status-item ${ok === null ? "pending" : ok ? "ok" : "fail"}`;
-    const strong = document.createElement("strong"), span = document.createElement("span");
-    strong.textContent = label; span.textContent = message;
-    li.append(strong, span);
-    return li;
-  }));
+// Where this run has got to, and what each gate still wants: asked of the one
+// computation both pages read, rather than this page deciding for itself.
+// A fourth list of "is it done yet" is a fourth chance to disagree.
+async function refreshWorkflow() {
+  if (!benchmarkJobId) return null;
+  const report = await api("/api/workflow", {
+    job: benchmarkJobId,
+    submitter: $("submitter") ? $("submitter").value : undefined,
+  }).catch(() => null);
+  if (report) workflowView.render(report);
+  workflowView.renderEvidence(
+    await api(`/api/runs/${benchmarkJobId}/evidence`).catch(() => null));
+  return report;
 }
 
 function renderShareFacts(detail) {
@@ -682,7 +691,7 @@ async function enterShareScreen() {
   $("package-button").disabled = !guidedPackaging;
   $("advanced-package-note").hidden = guidedPackaging;
   renderShareFacts(detail);
-  statusChecklist(detail);
+  await refreshWorkflow();
   renderRequirements(await api(`/api/runs/${benchmarkJobId}/requirements`));
   $("validation-result").hidden = !detail.validation;
   $("prepare-review-button").hidden = !detail.validation?.valid;
@@ -752,7 +761,7 @@ $("submit-form").addEventListener("submit", (event) => {
     $("submit-confirmed").checked = false;
     const updated = await api(`/api/runs/${benchmarkJobId}/package`, data);
     renderValidation(updated);
-    statusChecklist(updated);
+    await refreshWorkflow();
   });
 });
 
@@ -806,7 +815,7 @@ $("submit-button").addEventListener("click", () => action(async () => {
     community.payload(preview, $("submit-confirmed").checked));
   notice(`Submission ${detail.submission?.pull_request_state || "available"}. Follow its checks and maintainer review on GitHub.`);
   $("submit-confirmed").checked = false;
-  statusChecklist(detail);
+  await refreshWorkflow();
   const pr = detail.submission?.pull_request_url;
   if (typeof pr === "string" && /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+$/.test(pr)) {
     const link = document.createElement("a");

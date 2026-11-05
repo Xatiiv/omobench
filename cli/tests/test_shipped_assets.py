@@ -62,6 +62,30 @@ class ShippedAssetTests(unittest.TestCase):
                 self.assertIn('href="/favicon.svg"', markup)
                 self.assertNotIn('href="data:', markup)
 
+    def test_every_package_module_is_required_of_an_installed_payload(self):
+        """Serving the panel is not the only way to 404.
+
+        The route table only names web assets, so a Python module the panel
+        imports could go missing from an installation without any route
+        noticing -- and the panel would then import-error on the request that
+        first needed it. Seven modules had already drifted off this list that
+        way. Listing the package by directory rather than by hand is what
+        keeps it honest.
+        """
+        required = set(required_paths())
+        for module in sorted((WEB.parent).glob("*.py")):
+            with self.subTest(module=module.name):
+                self.assertIn(f"cli/src/omobench/{module.name}", required,
+                              f"{module.name} is imported from the package but not required "
+                              "of an installed payload")
+
+    def test_every_shipped_profile_is_required_of_an_installed_payload(self):
+        """A profile the panel offers but cannot read is a run nobody can package."""
+        required = set(required_paths())
+        for profile in sorted((ROOT / "benchmarks" / "profiles").glob("*.yaml")):
+            with self.subTest(profile=profile.name):
+                self.assertIn(f"benchmarks/profiles/{profile.name}", required)
+
     def test_no_page_references_an_asset_the_panel_does_not_serve(self):
         routes = set(served_assets())
         for name in ("guided.html", "index.html"):

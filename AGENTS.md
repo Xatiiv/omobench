@@ -95,6 +95,16 @@ See [provenance.md](docs/provenance.md).
   failure) from not-supplied-yet (what will be needed) from nobody-checked.
 - Stage progress is derived from state, never from navigation, and moving
   between stages never clears what was entered.
+- Both panel routes mount one shared workflow view
+  (`cli/src/omobench/web/workflow.js`) for the stepper, the gate lists, the
+  completion states and the evidence summary, exactly as they already share one
+  dashboard. The guided page and the advanced panel are two ways to start the
+  same workflow, not two workflows.
+- A profile stops on its request budget or its duration ceiling, whichever
+  comes first, and a ceiling-driven stop cancels the request in flight -- which
+  counts against the error rate the registry checks. Say what a profile
+  executes, when it stops and what qualifying takes *before* the run. Never
+  estimate how long a particular machine will take.
 - Anything after the benchmark must be retryable without re-running it. A
   refused bundle or a failed submission leaves every evidence file untouched.
 

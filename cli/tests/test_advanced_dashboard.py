@@ -38,6 +38,34 @@ class AdvancedDashboardTests(unittest.TestCase):
     def setUpClass(cls):
         cls.states = _render_states()
 
+    def test_the_profile_is_explained_before_the_run_not_after_it(self):
+        """Workload, limits and what qualifying takes, from the profile itself.
+
+        The thing a contributor cannot discover afterwards is the arithmetic:
+        a ceiling divided by a request budget is how much time each request
+        gets, and a run that ends on the clock instead of on its budget loses
+        the request still streaming -- which counts against the error rate the
+        registry checks. Finding that out from a validator message after an
+        hour of CPU time is the failure this replaces.
+        """
+        brief = self.states["profileBriefing"]
+        facts = " | ".join(brief["facts"])
+        self.assertIn("5 warmup + 40 measured + 5 cooldown = 50 requests", facts)
+        self.assertIn("15 minutes", facts)
+        self.assertIn("18 seconds per request on average", facts)
+        self.assertIn("not an estimate for your machine", facts)
+        self.assertIn("300 seconds", facts)
+        self.assertIn("at least 32 successful measured requests", brief["qualifies"])
+        self.assertIn("no higher than 1%", brief["qualifies"])
+        self.assertIn("cancelled", brief["ceiling"])
+        self.assertIn("chat-small-extended-v1", brief["ceiling"])
+
+    def test_the_stepper_is_marked_up_from_the_workflow_answer(self):
+        """One computation, two pages: the shared view only renders it."""
+        self.assertEqual(self.states["stepper"], [
+            "connect:done", "identify:blocked", "check:done",
+            "run:done", "review:current", "submit:todo"])
+
     def test_checking_the_requirements_also_refreshes_the_preflight(self):
         """The checks describe the form, so asking about the form asks them.
 
