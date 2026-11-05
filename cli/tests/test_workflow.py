@@ -271,9 +271,11 @@ class StageTests(unittest.TestCase):
 
 
 class CompletionTests(unittest.TestCase):
-    def states(self, job, *, submit_blocked=False, package_blocked=False):
+    def states(self, job, *, submit_blocked=False, package_blocked=False,
+               evidence=".omobench-runs/run-1"):
         return {step["id"]: step["state"] for step in workflow.completion(
-            job, submit_blocked=submit_blocked, package_blocked=package_blocked)}
+            job, submit_blocked=submit_blocked, package_blocked=package_blocked,
+            evidence=evidence)}
 
     def test_the_six_states_are_reported_separately(self) -> None:
         self.assertEqual([step["id"] for step in workflow.completion({}, submit_blocked=True)],
@@ -284,6 +286,14 @@ class CompletionTests(unittest.TestCase):
         self.assertEqual(states["benchmark"], "done")
         self.assertEqual(states["evidence"], "done")
         self.assertEqual(states["package"], "pending")
+
+    def test_evidence_is_saved_only_where_it_is_actually_found(self) -> None:
+        """Looked up, not taken from a field the job may not be carrying."""
+        self.assertEqual(self.states(COMPLETED_JOB, evidence=None)["evidence"], "pending")
+        step = next(entry for entry in workflow.completion(
+            COMPLETED_JOB, submit_blocked=False, evidence=".omobench-runs/run-1")
+            if entry["id"] == "evidence")
+        self.assertIn(".omobench-runs/run-1", step["detail"])
 
     def test_a_validated_bundle_is_not_a_submission(self) -> None:
         job = {**COMPLETED_JOB, "validation": {"valid": True, "errors": []}}
@@ -313,7 +323,8 @@ class CompletionTests(unittest.TestCase):
     def test_a_failed_submission_keeps_the_evidence_and_offers_a_retry(self) -> None:
         job = {**COMPLETED_JOB, "validation": {"valid": True, "errors": []},
                "submission": {"started": True}}
-        step = next(entry for entry in workflow.completion(job, submit_blocked=False)
+        step = next(entry for entry in workflow.completion(
+                        job, submit_blocked=False, evidence=".omobench-runs/run-1")
                     if entry["id"] == "submitted")
         self.assertEqual(step["state"], "failed")
         self.assertIn("without re-running anything", step["detail"])

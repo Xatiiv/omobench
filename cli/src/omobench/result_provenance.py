@@ -178,6 +178,15 @@ def build(
         transport_provenance=transport_provenance,
         allow_probe=allow_probe,
     )
+    if execution_device == "cpu":
+        # The contributor has declared that no accelerator performed inference,
+        # and the schema enforces an empty hardware.gpus for a CPU run. A
+        # device a probe found is therefore one that did not serve -- which is
+        # read from that declaration, not guessed at, and is more use to a
+        # reader than leaving its role unresolved beside a CPU-only placement.
+        for device in environment["serving"]["accelerators"]:
+            if device["role"] == "unknown":
+                device["role"] = "present-not-used"
     hardware = serving_metadata.hardware_from_serving(
         environment, execution_device=execution_device)
 

@@ -919,7 +919,7 @@ class Controller:
         if type(values.get("windows_bridge", False)) is not bool:
             raise UIError("Windows bridge selection must be a boolean.")
         endpoint = text_field(values, "endpoint", optional=True)
-        tokenizer = text_field(values, "tokenizer", optional=True)
+        tokenizer = self.tokenizer_source_of(values.get("tokenizer"))
         model = text_field(values, "model", optional=True) or job.get("model")
         served = self.last_server_check if (
             self.last_server_check and self.last_server_check.get("endpoint") == endpoint) else None
@@ -946,7 +946,8 @@ class Controller:
             "proposal": proposal,
             "completion": workflow.completion(
                 job, submit_blocked=bool(workflow.blocking(checks, "submit")),
-                package_blocked=bool(workflow.blocking(checks, "package"))) if job else [],
+                package_blocked=bool(workflow.blocking(checks, "package")),
+                evidence=self.evidence_location(job.get("id"))) if job else [],
             "gates": {
                 "run": "What stands between this configuration and a benchmark that measures "
                        "something.",
@@ -1011,6 +1012,17 @@ class Controller:
             "proposal": self.proposal_status(values) if values.get("proposal") is not None else None,
         }
 
+    def evidence_location(self, job_id: str | None) -> str | None:
+        """Where this run's own files are, when they are there."""
+        if not job_id:
+            return None
+        try:
+            run = self.run_directory(job_id)
+        except UIError:
+            return None
+        return (run.relative_to(self.root).as_posix()
+                if run.is_dir() and (run / "guidellm.stdout.log").is_file() else None)
+
     def requirement_checks(self, job: dict, data: dict | None = None) -> list[dict]:
         """Every check that stands between this run and the public registry.
 
@@ -1055,7 +1067,8 @@ class Controller:
             "blocks_submission": [item["label"] for item in workflow.blocking(checks, "submit")],
             "completion": workflow.completion(
                 job, submit_blocked=bool(workflow.blocking(checks, "submit")),
-                package_blocked=bool(workflow.blocking(checks, "package"))),
+                package_blocked=bool(workflow.blocking(checks, "package")),
+                evidence=self.evidence_location(job.get("id"))),
             "local_export_available": bool(job.get("summary")),
         }
 
@@ -1229,6 +1242,24 @@ class Controller:
             self._save(job)
             return job
 
+    @staticmethod
+    def tokenizer_source_of(value) -> str | None:
+        """The tokenizer source, however the caller spelled it.
+
+        The connect form sends a plain string; a provenance declaration sends
+        the object that will be recorded in the result. One key meaning two
+        shapes is a trap for anyone driving these endpoints, so both are read
+        rather than one being refused.
+        """
+        if isinstance(value, str):
+            return value.strip() or None
+        if isinstance(value, dict):
+            source = value.get("source")
+            return source.strip() if isinstance(source, str) and source.strip() else None
+        if value is None:
+            return None
+        raise UIError("A tokenizer is either its source, or an object with a source.")
+
     def serving_declaration(self, job: dict, data: dict) -> dict | None:
         """Build the provenance declaration the packager reads, from the form.
 
@@ -1238,14 +1269,21 @@ class Controller:
         with this, and the packager says so if it is missing.
         """
         declaration: dict = {}
-        for name, checker in (("serving", dict), ("weights", dict), ("tokenizer", dict),
-                              ("proposal", dict)):
+        for name in ("serving", "weights", "proposal"):
             value = data.get(name)
             if value is None:
                 continue
-            if not isinstance(value, checker):
+            if not isinstance(value, dict):
                 raise UIError(f"{name} must be an object.")
             declaration[name] = value
+        tokenizer = data.get("tokenizer")
+        if isinstance(tokenizer, dict):
+            declaration["tokenizer"] = tokenizer
+        elif self.tokenizer_source_of(tokenizer):
+            # A bare source, as the connect form sends it. Nothing loaded it
+            # here, and the record says exactly that.
+            declaration["tokenizer"] = {"source": self.tokenizer_source_of(tokenizer),
+                                        "kind": "huggingface", "loaded": "not-checked"}
         served = text_field(data, "served_model_id", optional=True)
         if served:
             declaration["served_model_id"] = served
@@ -1545,6 +1583,9 @@ class UIHandler(BaseHTTPRequestHandler):
                 return self._json(controller.setup())
             if self.path == "/api/runs":
                 return self._json(controller.listing())
+            match = re.fullmatch(r"/api/runs/(job-[a-f0-9]{16}|saved-job-[a-f0-9]{16})/evidence", self.path)
+            if match:
+                return self._json(controller.evidence_summary(match[1]))
             match = re.fullmatch(r"/api/runs/(job-[a-f0-9]{16})(/bundle)?", self.path)
             if match:
                 if match[2]:
@@ -1620,9 +1661,6 @@ class UIHandler(BaseHTTPRequestHandler):
             match = re.fullmatch(r"/api/runs/(job-[a-f0-9]{16})/requirements", self.path)
             if match:
                 return self._json(controller.publication_requirements(match[1], data))
-            match = re.fullmatch(r"/api/runs/(job-[a-f0-9]{16}|saved-job-[a-f0-9]{16})/evidence", self.path)
-            if match:
-                return self._json(controller.evidence_summary(match[1]))
             match = re.fullmatch(r"/api/runs/(job-[a-f0-9]{16})/(cancel|package|prepare|submit)", self.path)
             if match:
                 job_id, action = match.groups()

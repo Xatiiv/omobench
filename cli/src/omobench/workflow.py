@@ -473,7 +473,8 @@ COMPLETION_STEPS = (
 
 
 def completion(job: dict[str, Any], *, submit_blocked: bool,
-               package_blocked: bool = False) -> list[dict[str, Any]]:
+               package_blocked: bool = False,
+               evidence: str | None = None) -> list[dict[str, Any]]:
     """Six states, each reported only once something confirms it.
 
     Nothing here is inferred forwards. A pull request that exists is submitted
@@ -484,7 +485,9 @@ def completion(job: dict[str, Any], *, submit_blocked: bool,
     validation = job.get("validation")
     submission = job.get("submission") or {}
     measured = bool(job.get("summary"))
-    saved = bool(job.get("run_path")) and measured
+    # Where the evidence actually is, looked up rather than taken from a field
+    # the job record only carries while the panel is rendering it.
+    saved = bool(evidence) and measured
     # Packaging wrote a bundle and nothing about the bundle itself is wrong.
     # Whether the registry will take it is the next state's question, not this
     # one's: a model awaiting review has a perfectly valid bundle.
@@ -507,7 +510,7 @@ def completion(job: dict[str, Any], *, submit_blocked: bool,
         "benchmark": "This run produced measurements." if measured else
                      "No measurements were produced." if state["benchmark"] == "failed" else
                      "Not finished yet.",
-        "evidence": f"Kept at {job.get('run_path')}." if saved else
+        "evidence": f"Kept at {evidence}." if saved else
                     "The run's own files are written when it finishes.",
         "package": "A schema-valid bundle was written from this evidence." if packaged else
                    "The bundle could not be built from this evidence; its reasons are listed "

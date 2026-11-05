@@ -201,6 +201,37 @@ class HardwareShapeTests(PackagingFixture):
                          "present-not-used")
         self.assertEqual(self.validate(run), [])
 
+    def test_a_detected_device_on_a_cpu_run_is_recorded_as_not_having_served(self) -> None:
+        """The CPU declaration resolves it; leaving it unknown would not."""
+        run = fixtures.single_host_run(self.root)
+        declaration = fixtures.single_host_declaration()
+        declaration["serving"].pop("accelerators")
+        declaration["serving"]["placement"] = {"mode": "cpu-only"}
+        code, result = self.package(
+            run, provenance=self.declaration(declaration),
+            framework="vllm", framework_version="0.11.0", execution_device="cpu")
+        self.assertEqual(code, 0)
+        self.assertEqual(result["hardware"]["gpus"], [])
+        device = result["environment"]["serving"]["accelerators"][0]
+        self.assertEqual(device["role"], "present-not-used")
+        self.assertEqual(device["provenance"], "detected")
+        self.assertEqual(self.validate(run), [])
+
+    def test_a_gpu_run_leaves_an_unclaimed_device_unresolved(self) -> None:
+        """Nothing in a GPU declaration says which of several did the work."""
+        run = fixtures.single_host_run(self.root)
+        declaration = fixtures.single_host_declaration()
+        declaration["serving"]["accelerators"] = [
+            {"vendor": "nvidia", "model": "NVIDIA GeForce RTX 4090", "memory_gb": 24.0,
+             "count": 1, "role": "inference"},
+            {"vendor": "intel", "model": "Intel Arc A770", "memory_gb": 16.0, "count": 1},
+        ]
+        code, result = self.package(run, provenance=self.declaration(declaration),
+                                    framework="vllm", framework_version="0.11.0")
+        self.assertEqual(code, 0)
+        roles = [device["role"] for device in result["environment"]["serving"]["accelerators"]]
+        self.assertIn("unknown", roles)
+
     def test_a_cpu_run_cannot_claim_a_gpu_performed_inference(self) -> None:
         _, (code, _) = self.package_serving({"placement": {"mode": "cpu-only"}},
                                             execution_device="cpu")
