@@ -64,19 +64,19 @@ families:
             weights_gb: 2.5
             estimated: false
             recipe: qwen3-4b-cpu-v2
-            expected_fit: { cpu_ram_gb: 8, gpu_vram_gb: 4 }
+            requires_gb: 4.0   # 2.5 GB weights + KV at 2048 + 1 GB overhead
           - label: Q8_0
             runtime: llama.cpp
             artefact: ggml-org/Qwen3-4B-GGUF
             weights_gb: 4.28
             estimated: false
-            expected_fit: { cpu_ram_gb: 8, gpu_vram_gb: 8 }
+            requires_gb: 5.8   # 4.28 GB weights + KV at 2048 + 1 GB overhead
           - label: F16
             runtime: llama.cpp
             artefact: ggml-org/Qwen3-4B-GGUF
             weights_gb: 8.05
             estimated: false
-            expected_fit: { cpu_ram_gb: 16, gpu_vram_gb: 12 }
+            requires_gb: 9.6   # 8.05 GB weights + KV at 2048 + 1 GB overhead
       - id: Qwen/Qwen3-8B
         parameter_class: 8B
         source: https://huggingface.co/Qwen/Qwen3-8B
@@ -86,12 +86,12 @@ families:
             runtime: llama.cpp
             weights_gb: 4.9
             estimated: true
-            expected_fit: { cpu_ram_gb: 8, gpu_vram_gb: 8 }
+            requires_gb: 6.4   # 4.9 GB weights + KV at 2048 + 1 GB overhead
           - label: BF16
             runtime: vllm
             weights_gb: 16.4
             estimated: true
-            expected_fit: { cpu_ram_gb: 32, gpu_vram_gb: 20 }
+            requires_gb: 17.9   # 16.4 GB weights + KV at 2048 + 1 GB overhead
 
   - family: Mistral
     publisher: Mistral AI
@@ -109,12 +109,12 @@ families:
             runtime: llama.cpp
             weights_gb: 4.4
             estimated: true
-            expected_fit: { cpu_ram_gb: 8, gpu_vram_gb: 8 }
+            requires_gb: 5.9   # 4.4 GB weights + KV at 2048 + 1 GB overhead
           - label: BF16
             runtime: vllm
             weights_gb: 14.5
             estimated: true
-            expected_fit: { cpu_ram_gb: 32, gpu_vram_gb: 16 }
+            requires_gb: 16.0   # 14.5 GB weights + KV at 2048 + 1 GB overhead
 
   - family: Phi
     publisher: Microsoft
@@ -134,12 +134,12 @@ families:
             runtime: llama.cpp
             weights_gb: 9.1
             estimated: true
-            expected_fit: { cpu_ram_gb: 16, gpu_vram_gb: 12 }
+            requires_gb: 11.1   # 9.1 GB weights + KV at 2048 + 1 GB overhead
           - label: BF16
             runtime: vllm
             weights_gb: 29.3
             estimated: true
-            expected_fit: { cpu_ram_gb: 64, gpu_vram_gb: 32 }
+            requires_gb: 31.3   # 29.3 GB weights + KV at 2048 + 1 GB overhead
 
   - family: Llama 3.1
     publisher: Meta
@@ -163,12 +163,12 @@ families:
             runtime: llama.cpp
             weights_gb: 4.9
             estimated: true
-            expected_fit: { cpu_ram_gb: 8, gpu_vram_gb: 8 }
+            requires_gb: 6.4   # 4.9 GB weights + KV at 2048 + 1 GB overhead
           - label: BF16
             runtime: vllm
             weights_gb: 16.1
             estimated: true
-            expected_fit: { cpu_ram_gb: 32, gpu_vram_gb: 20 }
+            requires_gb: 17.6   # 16.1 GB weights + KV at 2048 + 1 GB overhead
 
   - family: DeepSeek
     publisher: DeepSeek
@@ -191,7 +191,7 @@ families:
             runtime: llama.cpp
             weights_gb: 9.0
             estimated: true
-            expected_fit: { cpu_ram_gb: 16, gpu_vram_gb: 12 }
+            requires_gb: 11.0   # 9.0 GB weights + KV at 2048 + 1 GB overhead
 
 # Checked and deliberately excluded, so the reasoning is on the record rather
 # than looking like an oversight.

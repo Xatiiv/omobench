@@ -907,6 +907,57 @@ class Controller:
             status["summary"] = f"The proposal for {model} is not complete yet."
         return status
 
+    def workload_options(self, data: dict | None = None) -> dict:
+        """What this hardware can be asked to run.
+
+        Hardware first, because that is the question OmoBench answers: a model
+        here is the load you put on a machine, and the useful thing to know is
+        which loads this machine can take. Nothing in the answer ranks
+        anything, and "expected to fit" never becomes "benchmarked".
+
+        The memory it reads is the *serving* side. On a bridged run that is a
+        different computer, so it comes from what the companion read on that
+        machine, and from nothing this panel can see of it. Where no probe has
+        run, the sizes are unknown -- which is reported as unknown, not as a
+        model that will not fit.
+        """
+        from . import workloads
+
+        values = data or {}
+        if type(values.get("windows_bridge", False)) is not bool:
+            raise UIError("Windows bridge selection must be a boolean.")
+        bridged = bool(values.get("windows_bridge", False))
+        placement = text_field(values, "placement", optional=True) or "cpu-only"
+
+        ram_gb: float | None = None
+        vram_gb: float | None = None
+        source = "not established"
+        if bridged:
+            probe = self.last_serving_probe
+            if probe:
+                ram_gb = probe.get("ram_gb")
+                memories = [device.get("memory_gb") for device in probe.get("accelerators") or []
+                            if isinstance(device.get("memory_gb"), (int, float))]
+                vram_gb = max(memories) if memories else None
+                source = "read on the serving machine by the companion"
+            else:
+                source = ("the serving machine has not been read; nothing this panel can see of "
+                          "a Windows host is evidence about it")
+        else:
+            reading = cli.memory_pressure()
+            if reading:
+                ram_gb = reading["total_gb"]
+                source = f"this machine ({reading['total_means']}), which also serves the model"
+            memories = [device.get("memory_gb") for device in cli.detect_gpus()
+                        if isinstance(device.get("memory_gb"), (int, float))]
+            vram_gb = max(memories) if memories else None
+
+        answer = workloads.describe(self.root, serving_ram_gb=ram_gb,
+                                    serving_vram_gb=vram_gb, placement=placement)
+        answer["hardware"]["source"] = source
+        answer["hardware"]["bridged"] = bridged
+        return answer
+
     def workflow_state(self, data: dict | None = None) -> dict:
         """Where this contributor is, and what stands between them and each gate.
 
@@ -1565,13 +1616,18 @@ class UIHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             self._authorize()
-            # The guided experience is the default entry point; the original
-            # "connect to a server you already run yourself" panel stays fully
-            # available at /advanced (and every existing CLI command keeps working
-            # unchanged). /guided is kept as an alias to the same page so existing
-            # bookmarks/docs links and the previous default keep working.
-            static = {"/": ("guided.html", "text/html; charset=utf-8"),
-                      "/guided": ("guided.html", "text/html; charset=utf-8"),
+            # One panel, reachable by every name it has ever had. Two entry
+            # points meant two places to look for the same stage, and the
+            # split cut across the real question rather than along it: what a
+            # contributor is doing is measuring their hardware, whether the
+            # model server is one OmoBench prepared or one they already run.
+            #
+            # /advanced and /guided are served the same page rather than
+            # redirected to it, deliberately. The connection token lives in
+            # the URL fragment, which belongs to the browser and is not sent
+            # with a request -- so a redirect is the one way to lose it.
+            static = {"/": ("index.html", "text/html; charset=utf-8"),
+                      "/guided": ("index.html", "text/html; charset=utf-8"),
                       "/guided.js": ("guided.js", "text/javascript; charset=utf-8"),
                       "/community.js": ("community.js", "text/javascript; charset=utf-8"),
                       "/dashboard.js": ("dashboard.js", "text/javascript; charset=utf-8"),
@@ -1657,6 +1713,8 @@ class UIHandler(BaseHTTPRequestHandler):
                 return self._json(controller.model_suggestions(data))
             if self.path == "/api/serving-probe":
                 return self._json(controller.serving_probe(data))
+            if self.path == "/api/workloads":
+                return self._json(controller.workload_options(data))
             if self.path == "/api/workflow":
                 return self._json(controller.workflow_state(data))
             if self.path == "/api/model-proposal":
