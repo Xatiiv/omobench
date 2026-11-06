@@ -44,6 +44,14 @@ def website_summary(result: dict) -> dict:
     finally:
         Path(path).unlink(missing_ok=True)
     if completed.returncode != 0:
+        # The harness transpiles the website's TypeScript, so it needs the
+        # repository's node_modules. A contributor who has only set up the
+        # Python side is told that rather than shown a failure they did not
+        # cause -- and CI installs them, so there the check really runs.
+        if "ERR_MODULE_NOT_FOUND" in completed.stderr and "typescript" in completed.stderr:
+            raise unittest.SkipTest(
+                "The website's TypeScript toolchain is not installed here; run `npm ci` to "
+                "check panel/website parity locally.")
         raise AssertionError(f"website evidence harness failed:\n{completed.stderr}")
     return json.loads(completed.stdout)
 
