@@ -191,6 +191,86 @@ def safe_artifact_path(result_path: Path, artifact_path: str) -> Path | None:
     return candidate
 
 
+def eligibility_errors(
+    relative: Path, result: dict[str, Any], catalog_entry: dict[str, Any] | None
+) -> list[str]:
+    """May this model be published at all, and if not, exactly why not.
+
+    It used to be one question -- is it on the list -- and the answer named
+    the list rather than anything about the model. The list was doing two
+    jobs: recommending models worth trying, and deciding which may exist in
+    the registry. Only the first is what it is good at. What makes a result
+    publishable is the same set of facts whether or not somebody curated it,
+    so those facts are checked here and a refusal names the one that is
+    missing. See docs/model-eligibility.md.
+
+    Being curated is still worth something: the list already records the
+    licence and the modality, so a curated model needs no eligibility block
+    and a reviewer re-establishes nothing.
+    """
+    model = result["model"]
+    model_id = model["id"]
+    status = model.get("catalog_status")
+    eligibility = model.get("eligibility")
+
+    if catalog_entry is not None:
+        if status == "uncatalogued":
+            return [f"{relative}: model.catalog_status: '{model_id}' is on the curated list, so "
+                    "it is not uncatalogued; submit it as 'catalogued'"]
+        if catalog_entry.get("modality") != ELIGIBLE_MODALITY:
+            return [f"{relative}: model.id: '{model_id}' has catalog modality "
+                    f"'{catalog_entry.get('modality')}', not '{ELIGIBLE_MODALITY}'"]
+        return []
+
+    # Not curated. A proposal is one way to arrive -- still supported, and no
+    # longer the only one. Its own contents are checked in proposal_errors().
+    if status == "proposed":
+        return []
+
+    if status != "uncatalogued":
+        return [
+            f"{relative}: model.id: '{model_id}' is not on the curated list "
+            "(catalog/models/*.yaml), which is fine -- the list is a recommendation, not the set "
+            "of models allowed to exist. To submit it, package as schema 1.2 with "
+            "model.catalog_status 'uncatalogued' and a model.eligibility block stating the "
+            "licence, where to read it, whether anybody can download the weights, and the "
+            "modality. See docs/model-eligibility.md"
+        ]
+
+    if not isinstance(eligibility, dict):
+        return [f"{relative}: model.eligibility: required when model.catalog_status is "
+                "'uncatalogued'; without it nothing here says the model may be published"]
+
+    errors: list[str] = []
+    # Each of these is one documented requirement, refused by name. "Not in
+    # the catalog" told a contributor nothing they could act on.
+    if not str(eligibility.get("licence", "")).strip():
+        errors.append(f"{relative}: model.eligibility.licence: a published licence is required, "
+                      "named as its publisher states it")
+    if not str(eligibility.get("licence_url", "")).strip():
+        errors.append(f"{relative}: model.eligibility.licence_url: required, because a licence "
+                      "nobody can open is not a licence anybody can check")
+    if eligibility.get("weights_publicly_downloadable") is not True:
+        errors.append(
+            f"{relative}: model.eligibility.weights_publicly_downloadable: the weights must be "
+            "obtainable by anybody, accepting the publisher's terms if there are any. A gated "
+            "repository qualifies; a private fine-tune, an internal checkpoint, or a hosted API "
+            "with no weights behind it does not, and cannot be published here")
+    if eligibility.get("modality") != ELIGIBLE_MODALITY:
+        errors.append(
+            f"{relative}: model.eligibility.modality: "
+            f"'{eligibility.get('modality')}' is not '{ELIGIBLE_MODALITY}'. OmoBench's profiles "
+            "measure text generation; another modality is out of scope here however good the "
+            "model is")
+    # A fine-tune is its own model. Recording it under its base's identity
+    # would merge two different things in every filter and every comparison.
+    base = eligibility.get("base_model")
+    if base and base == model_id:
+        errors.append(f"{relative}: model.eligibility.base_model: names the model itself; a "
+                      "fine-tune's base is a different model")
+    return errors
+
+
 def execution_errors(relative: Path, result: dict[str, Any]) -> list[str]:
     """What a run's own execution record has to be consistent about.
 
@@ -286,10 +366,14 @@ def transport_errors(relative: Path, result: dict[str, Any], snapshot: dict[str,
     if not isinstance(recorded, dict) or not isinstance(recorded.get("kind"), str):
         return [f"{relative}: transport: the environment snapshot records a transport this "
                 "registry cannot interpret"]
-    if result.get("schema_version") != "1.1":
+    # 1.1 is where the serving host and the runner host became separate things,
+    # and every later version keeps them separate. Naming 1.1 exactly was right
+    # when it was the only version that could say it, and became a bug the
+    # moment 1.2 existed: it refused a bridged run for being too new.
+    if result.get("schema_version") in {None, "1.0"}:
         return [f"{relative}: transport: this run went through the Windows bridge, which schema "
-                f"{result.get('schema_version')} cannot represent; package it as schema 1.1, "
-                "which records the serving host and the runner host separately"]
+                f"{result.get('schema_version')} cannot represent; package it as schema 1.1 or "
+                "later, which records the serving host and the runner host separately"]
     if declared_kind != BRIDGE_TRANSPORT:
         return [f"{relative}: transport: the environment snapshot shows a bridged run, but the "
                 f"result declares transport {declared_kind!r}"]
@@ -496,22 +580,7 @@ def validate_result(
 
     model_id = result["model"]["id"]
     catalog_entry = catalog.get(model_id)
-    # An uncatalogued model is eligible to be *reviewed*, never to be published
-    # unreviewed: saying so requires schema 1.1 and a proposal in the bundle,
-    # both checked below. Everything else about the result is validated either
-    # way, so a reviewer reads a complete bundle rather than a rejection.
-    proposed = result["model"].get("catalog_status") == "proposed"
-    if catalog_entry is None and not proposed:
-        errors.append(
-            f"{relative}: model.id: '{model_id}' is not present in the model catalog "
-            "(catalog/models/*.yaml); only catalog-listed models are eligible for submission. "
-            "Package it as schema 1.1 with a model proposal to submit it for review instead"
-        )
-    elif catalog_entry is not None and catalog_entry.get("modality") != ELIGIBLE_MODALITY:
-        errors.append(
-            f"{relative}: model.id: '{model_id}' has catalog modality "
-            f"'{catalog_entry.get('modality')}', not '{ELIGIBLE_MODALITY}'"
-        )
+    errors.extend(eligibility_errors(relative, result, catalog_entry))
 
     revision = result["model"]["revision"]
     if revision.strip().lower() in MUTABLE_REVISION_LABELS:

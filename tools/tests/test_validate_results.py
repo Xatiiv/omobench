@@ -411,7 +411,8 @@ class ValidateResultsTests(RegistryFixture):
         )
         exit_code, _, stderr = self.run_main()
         self.assertEqual(exit_code, 1)
-        self.assertIn("is not present in the model catalog", stderr)
+        self.assertIn("is not on the curated list", stderr)
+        self.assertIn("model.eligibility", stderr)
 
     def test_non_text_generation_model_is_rejected(self) -> None:
         write_catalog(
@@ -1321,7 +1322,9 @@ class ModelProposalTests(RegistryFixture):
         self.assertEqual(exit_code, 0, stderr)
         self.assertIn("Validated 1", stdout)
 
-    def test_an_uncatalogued_model_without_a_proposal_is_still_refused(self) -> None:
+    def test_an_uncatalogued_model_with_neither_route_is_refused(self) -> None:
+        """Not a proposal and not an eligibility block: nothing says it may be
+        published, and the refusal names both ways out."""
         template = bridged_template()
         template["model"]["id"] = "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
         write_bundle(self.results_path / "deepseek" / "2026-08-30-run-fixture-1234",
@@ -1329,8 +1332,9 @@ class ModelProposalTests(RegistryFixture):
                      template=template)
         exit_code, _, stderr = self.run_main()
         self.assertEqual(exit_code, 1)
-        self.assertIn("not present in the model catalog", stderr)
-        self.assertIn("model proposal", stderr)
+        self.assertIn("is not on the curated list", stderr)
+        self.assertIn("model.eligibility", stderr)
+        self.assertIn("model.eligibility", stderr)
 
     def test_claiming_proposed_without_the_proposal_file_is_rejected(self) -> None:
         self.write()
@@ -1414,6 +1418,129 @@ class ModelProposalTests(RegistryFixture):
         exit_code, _, stderr = self.run_main()
         self.assertEqual(exit_code, 1)
         self.assertIn("not readable JSON", stderr)
+
+
+class UncataloguedEligibilityTests(RegistryFixture):
+    """A model nobody curated, judged by the requirements instead of by a list.
+
+    The curated list stops being the set of models allowed to exist and goes
+    back to being a recommendation. What makes a result publishable is the
+    same either way, so these check that each requirement is enforced and
+    that a refusal names the one that is missing.
+    """
+
+    ELIGIBLE = {
+        "licence": "apache-2.0",
+        "licence_url": "https://huggingface.co/someone/Model-7B/blob/main/LICENSE",
+        "weights_publicly_downloadable": True,
+        "modality": "text-generation",
+        "publisher": "someone",
+        "source": "https://huggingface.co/someone/Model-7B",
+        "family": "Model",
+        "parameter_class": "7B",
+    }
+
+    def write(self, *, model_id="someone/Model-7B", status="uncatalogued",
+              eligibility="default", version="1.2"):
+        result = bridged_template()
+        result["schema_version"] = version
+        result["model"]["id"] = model_id
+        result["model"]["catalog_status"] = status
+        if eligibility == "default":
+            eligibility = dict(self.ELIGIBLE)
+        if eligibility is not None:
+            result["model"]["eligibility"] = eligibility
+        write_bundle(self.results_path / "custom" / "2026-11-06-run-fixture-1234",
+                     artifact_contents={"environment_snapshot": BRIDGED_SNAPSHOT},
+                     template=result)
+
+    def test_a_complete_uncatalogued_model_is_accepted(self) -> None:
+        self.write()
+        exit_code, stdout, stderr = self.run_main()
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("Validated 1 OmoBench result bundle(s).", stdout)
+
+    def test_no_proposal_is_required(self) -> None:
+        """The point of the change: a proposal is a route, not a toll."""
+        self.write()
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertNotIn("model-proposal.json", stderr)
+
+    def test_a_missing_eligibility_block_is_refused_by_name(self) -> None:
+        self.write(eligibility=None)
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("model.eligibility: required when model.catalog_status is 'uncatalogued'",
+                      stderr)
+
+    def test_a_missing_licence_is_refused_by_name(self) -> None:
+        eligibility = dict(self.ELIGIBLE)
+        eligibility["licence"] = "  "
+        self.write(eligibility=eligibility)
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("model.eligibility.licence:", stderr)
+        self.assertIn("a published licence is required", stderr)
+
+    def test_a_licence_nobody_can_open_is_refused(self) -> None:
+        eligibility = dict(self.ELIGIBLE)
+        eligibility["licence_url"] = ""
+        self.write(eligibility=eligibility)
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("licence_url", stderr)
+
+    def test_weights_nobody_else_can_obtain_are_refused(self) -> None:
+        """A private fine-tune is a fine thing to benchmark and not to publish."""
+        eligibility = dict(self.ELIGIBLE)
+        eligibility["weights_publicly_downloadable"] = False
+        self.write(eligibility=eligibility)
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("obtainable by anybody", stderr)
+        self.assertIn("hosted API with no weights behind it", stderr)
+
+    def test_another_modality_is_refused(self) -> None:
+        eligibility = dict(self.ELIGIBLE)
+        eligibility["modality"] = "image-text-to-text"
+        self.write(eligibility=eligibility)
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("modality", stderr)
+
+    def test_a_fine_tune_may_not_claim_itself_as_its_base(self) -> None:
+        eligibility = dict(self.ELIGIBLE)
+        eligibility["base_model"] = "someone/Model-7B"
+        self.write(eligibility=eligibility)
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("a fine-tune's base is a different model", stderr)
+
+    def test_a_curated_model_needs_no_eligibility_block(self) -> None:
+        """Curation still buys something: the list already recorded this."""
+        self.write(model_id="Qwen/Qwen3-4B", status="catalogued", eligibility=None)
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 0, stderr)
+
+    def test_a_curated_model_cannot_call_itself_uncatalogued(self) -> None:
+        self.write(model_id="Qwen/Qwen3-4B", status="uncatalogued")
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("is on the curated list, so it is not uncatalogued", stderr)
+
+    def test_schema_1_1_cannot_say_uncatalogued(self) -> None:
+        """1.1 keeps the meaning it was written with."""
+        self.write(version="1.1", eligibility=None)
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("catalog_status", stderr)
+
+    def test_schema_1_1_cannot_carry_eligibility(self) -> None:
+        self.write(version="1.1", status="proposed")
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("eligibility", stderr)
 
 
 class InterruptedMeasurementTests(RegistryFixture):

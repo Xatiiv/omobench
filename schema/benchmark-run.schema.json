@@ -20,7 +20,7 @@
   ],
   "properties": {
     "schema_version": {
-      "enum": ["1.0", "1.1"],
+      "enum": ["1.0", "1.1", "1.2"],
       "description": "1.0 is the original contract. 1.1 adds environment (runner, serving, transport) and model.served_model_id / model.weights / model.tokenizer / model.catalog_status. A 1.0 result is never upgraded in place: an absent fact stays unknown rather than being reconstructed."
     },
     "run_id": {
@@ -275,8 +275,40 @@
           "description": "Schema 1.1 only. The identifier sent to the server's API, exactly as the server answers to it: an LM Studio alias such as 'deepseek-r1-distill-qwen-14b', for example. It is a serving alias, not an identity claim. model.id stays the canonical identity and is never derived from this string without a person choosing it."
         },
         "catalog_status": {
-          "enum": ["catalogued", "proposed"],
-          "description": "Schema 1.1 only. 'proposed' means model.id is not yet in catalog/models and this bundle carries a model proposal for review. A proposal never makes a model catalogued."
+          "enum": ["catalogued", "proposed", "uncatalogued"],
+          "description": "Schema 1.1 and later. Three different statements. 'catalogued': model.id is on the curated list in catalog/models, whose own record of the licence and modality applies. 'proposed': not on the list, and this bundle carries a proposal asking for it to be added — still supported, no longer required to submit. 'uncatalogued' (schema 1.2 only): not on the list and not asking to be, with eligibility resting on model.eligibility. A proposal never makes a model catalogued, and neither does submission: review, merge and a site build all still follow."
+        },
+        "eligibility": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["licence", "licence_url", "weights_publicly_downloadable", "modality"],
+          "description": "Schema 1.2 only. The facts that make a model publishable, carried by the result instead of by membership of a list, so a model nobody has curated can still be reviewed against the same requirements. Absent on 1.0 and 1.1, which never collected any of it. See docs/model-eligibility.md.",
+          "properties": {
+            "licence": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The licence as the model's own publisher states it, e.g. 'apache-2.0', 'mit', 'llama3.1'. Copied, not interpreted."
+            },
+            "licence_url": {
+              "type": "string",
+              "format": "uri",
+              "pattern": "^https://",
+              "description": "Where a reviewer reads that licence. Required, because a licence nobody can open is not a licence anybody can check."
+            },
+            "weights_publicly_downloadable": {
+              "type": "boolean",
+              "description": "True when anybody can obtain the weights, accepting the publisher's terms if there are any. A gated repository qualifies; a private fine-tune, an internal checkpoint and a hosted API with no weights behind it do not."
+            },
+            "modality": {
+              "const": "text-generation",
+              "description": "The only modality OmoBench's profiles measure. A multimodal model is out of scope here however good it is."
+            },
+            "publisher": { "type": ["string", "null"], "description": "Who published the weights, where that is not simply the first path segment of the source." },
+            "source": { "type": ["string", "null"], "pattern": "^https://|^$", "description": "Where the weights come from. Distinct from model.source, which records the exact artefact this run served." },
+            "family": { "type": ["string", "null"], "description": "The model family, for grouping in the panel and on the site." },
+            "parameter_class": { "type": ["string", "null"], "description": "Rounded parameter count as the publisher states it, e.g. '8B'. A label, never a measurement." },
+            "base_model": { "type": ["string", "null"], "description": "For a fine-tune, the model it was derived from. Kept separate from model.id, which is this model's own identity: a fine-tune is not its base and must not be merged with it." }
+          }
         },
         "weights": {
           "type": "object",
@@ -502,6 +534,23 @@
   "allOf": [
     {
       "if": {
+        "properties": { "schema_version": { "const": "1.1" } },
+        "required": ["schema_version"]
+      },
+      "then": {
+        "description": "1.1 keeps the meaning it was written with. It never collected eligibility facts, and 'uncatalogued' is a 1.2 statement, so a stored 1.1 bundle can acquire neither.",
+        "properties": {
+          "model": {
+            "allOf": [
+              { "not": { "required": ["eligibility"] } },
+              { "properties": { "catalog_status": { "enum": ["catalogued", "proposed"] } } }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
         "properties": { "schema_version": { "const": "1.0" } },
         "required": ["schema_version"]
       },
@@ -516,7 +565,8 @@
               { "not": { "required": ["served_model_id"] } },
               { "not": { "required": ["weights"] } },
               { "not": { "required": ["tokenizer"] } },
-              { "not": { "required": ["catalog_status"] } }
+              { "not": { "required": ["catalog_status"] } },
+              { "not": { "required": ["eligibility"] } }
             ]
           },
           "submission": { "not": { "required": ["packaging"] } }

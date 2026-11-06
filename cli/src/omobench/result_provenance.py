@@ -51,7 +51,7 @@ def read_declaration(path: Path) -> dict[str, Any]:
     if not isinstance(document, dict):
         raise ProvenanceError("The provenance declaration must be a JSON object.")
     unexpected = set(document) - {"serving", "served_model_id", "weights", "tokenizer",
-                                  "catalog_status", "proposal", "result"}
+                                  "catalog_status", "proposal", "eligibility", "result"}
     if unexpected:
         raise ProvenanceError(
             f"Unsupported provenance field(s): {', '.join(sorted(unexpected))}.")
@@ -195,19 +195,29 @@ def build(
                                         or not served_model_id.strip()):
         raise ProvenanceError("served_model_id must be the identifier your server answers to.")
 
+    # Three statuses, and the default is the honest one for each case. A model
+    # on the curated list is catalogued. One that is not used to be forced to
+    # be "proposed" -- asking to be added -- because membership was the only
+    # route to publication. It is not any more: a model can simply be
+    # uncatalogued, carrying the facts that make it publishable.
+    catalogued = model_id in set(catalog)
+    eligibility_declared = declaration.get("eligibility") is not None
     catalog_status = declaration.get("catalog_status")
     if catalog_status is None:
-        catalog_status = "catalogued" if model_id in set(catalog) else "proposed"
-    if catalog_status not in {"catalogued", "proposed"}:
-        raise ProvenanceError("catalog_status must be 'catalogued' or 'proposed'.")
-    if catalog_status == "catalogued" and model_id not in set(catalog):
+        catalog_status = ("catalogued" if catalogued
+                          else "proposed" if declaration.get("proposal") is not None
+                          else "uncatalogued")
+    if catalog_status not in {"catalogued", "proposed", "uncatalogued"}:
         raise ProvenanceError(
-            f"{model_id} is not in the OmoBench catalog. Submit a model proposal with this "
-            "result, or choose the catalogued model you actually ran. Never substitute a "
-            "different, catalogued model for the one you measured.")
-    if catalog_status == "proposed" and model_id in set(catalog):
+            "catalog_status must be 'catalogued', 'proposed' or 'uncatalogued'.")
+    if catalog_status == "catalogued" and not catalogued:
         raise ProvenanceError(
-            f"{model_id} is already catalogued, so it does not need a proposal.")
+            f"{model_id} is not on the OmoBench curated list. Submit it as 'uncatalogued' with "
+            "its licence and modality, propose it for the list, or choose the curated model you "
+            "actually ran. Never substitute a different model for the one you measured.")
+    if catalog_status != "catalogued" and catalogued:
+        raise ProvenanceError(
+            f"{model_id} is already on the curated list, so submit it as 'catalogued'.")
 
     proposal = None
     if catalog_status == "proposed":
@@ -216,13 +226,26 @@ def build(
             raise ProvenanceError(conflict)
         if declaration.get("proposal") is None:
             raise ProvenanceError(
-                f"{model_id} is not catalogued yet. Include a model proposal -- its family, "
+                f"{model_id} is marked as proposed, so include the proposal -- its family, "
                 "parameter class, publisher page, licence and why it belongs -- so a reviewer can "
-                "consider it alongside this result.")
+                "consider it alongside this result. Submitting the result alone needs no "
+                "proposal: use catalog_status 'uncatalogued' with an eligibility block.")
         proposal = model_proposal.build(declaration["proposal"], model_id=model_id,
                                         run_id=run_id, submitter=submitter)
 
+    eligibility = None
+    if catalog_status == "uncatalogued":
+        if not eligibility_declared:
+            raise ProvenanceError(
+                f"{model_id} is not on the curated list, which is fine. To submit it, state what "
+                "makes it publishable: its licence, a URL where that licence can be read, "
+                "whether anybody can download the weights, and its modality. See "
+                "docs/model-eligibility.md.")
+        eligibility = _eligibility(declaration["eligibility"], model_id=model_id)
+
     model_fields: dict[str, Any] = {"catalog_status": catalog_status}
+    if eligibility is not None:
+        model_fields["eligibility"] = eligibility
     if served_model_id:
         model_fields["served_model_id"] = served_model_id.strip()
     weights = _weights(declaration.get("weights"), revision=revision)
@@ -230,5 +253,65 @@ def build(
         model_fields["weights"] = weights
     model_fields["tokenizer"] = _tokenizer(declaration.get("tokenizer"),
                                            served_model_id=served_model_id or model_id)
-    return {"schema_version": SCHEMA_VERSION, "environment": environment,
+    # 1.2 is only reached by a result that needs it. A catalogued or proposed
+    # model records exactly what it recorded before, under the version it
+    # recorded it under, so nothing already published changes meaning and
+    # nothing acquires a field nobody collected.
+    schema_version = "1.2" if eligibility is not None else SCHEMA_VERSION
+    return {"schema_version": schema_version, "environment": environment,
             "hardware": hardware, "model_fields": model_fields, "proposal": proposal}
+
+
+# The facts docs/model-eligibility.md requires, checked here so a contributor
+# is told at packaging time rather than by the registry afterwards. Copied, not
+# interpreted: OmoBench does not decide what a licence permits.
+ELIGIBILITY_FIELDS = {"licence", "licence_url", "weights_publicly_downloadable", "modality",
+                      "publisher", "source", "family", "parameter_class", "base_model"}
+
+
+def _eligibility(declared: Any, *, model_id: str) -> dict[str, Any]:
+    if not isinstance(declared, dict):
+        raise ProvenanceError("eligibility must be an object describing the model.")
+    unexpected = set(declared) - ELIGIBILITY_FIELDS
+    if unexpected:
+        raise ProvenanceError(f"Unsupported eligibility field(s): {', '.join(sorted(unexpected))}.")
+
+    licence = str(declared.get("licence") or "").strip()
+    licence_url = str(declared.get("licence_url") or "").strip()
+    modality = str(declared.get("modality") or "text-generation").strip()
+    if not licence:
+        raise ProvenanceError(
+            "eligibility.licence: name the licence as its publisher states it, for example "
+            "'apache-2.0' or 'llama3.1'.")
+    if not licence_url.startswith("https://"):
+        raise ProvenanceError(
+            "eligibility.licence_url: an https URL where that licence can be read. A licence "
+            "nobody can open is not one anybody can check.")
+    if modality != "text-generation":
+        raise ProvenanceError(
+            f"eligibility.modality: {modality!r} is out of scope. OmoBench's profiles measure "
+            "text generation; a multimodal or embedding model cannot be published here.")
+    if declared.get("weights_publicly_downloadable") is not True:
+        raise ProvenanceError(
+            "eligibility.weights_publicly_downloadable: the weights have to be obtainable by "
+            "anybody, accepting the publisher's terms if there are any. A gated repository "
+            "qualifies. A private fine-tune or a hosted API with no weights behind it does not, "
+            "and can be benchmarked here but not published.")
+
+    base_model = str(declared.get("base_model") or "").strip()
+    if base_model and base_model == model_id:
+        raise ProvenanceError(
+            "eligibility.base_model: names the model itself. A fine-tune's base is a different "
+            "model, and keeping them apart is what stops the two being merged.")
+
+    eligibility: dict[str, Any] = {
+        "licence": licence,
+        "licence_url": licence_url,
+        "weights_publicly_downloadable": True,
+        "modality": modality,
+    }
+    for name in ("publisher", "source", "family", "parameter_class", "base_model"):
+        value = declared.get(name)
+        if value is not None and str(value).strip():
+            eligibility[name] = str(value).strip()
+    return eligibility

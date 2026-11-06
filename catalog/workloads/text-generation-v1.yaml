@@ -1,0 +1,205 @@
+catalog_version: 1
+# Workloads, not a leaderboard of models.
+#
+# OmoBench measures hardware. A model is the load you put on a machine to find
+# out what it does, the way a fixed dataset is the load you put on a database.
+# This file is the curated set of such loads: known-good, licence-checked,
+# pinned where a pinned artefact exists.
+#
+# It is a recommendation and nothing more. A model that is not here can still
+# be benchmarked and still be submitted, on exactly the requirements in
+# docs/model-eligibility.md. Being here means somebody has already checked the
+# licence and the modality so a reviewer does not have to.
+purpose: >-
+  Curated text-generation workloads for evaluating hardware. Membership is a
+  recommendation, never a condition of submission. See docs/model-eligibility.md.
+
+# How the fit tiers below were arrived at, so nobody reads them as measurements.
+#
+# `expected_fit` is ARITHMETIC, not a benchmark result. For a quantised GGUF
+# it is the weight file plus a working allowance:
+#
+#     weights + KV cache + runtime overhead
+#
+# with the KV cache taken at the profile's own context (chat-small-* serves at
+# 2048) and the overhead at 1 GB, which is what llama.cpp b10621 was observed
+# to need on this project's own laptop. Where the exact weight file is pinned
+# below, the weight figure is that file's real size. Where it is not, the
+# weight figure is `parameters x bits_per_weight / 8`, which is an estimate of
+# an estimate and is marked `estimated: true`.
+#
+# Two things this deliberately does not do. It does not promise the run will
+# qualify -- "expected to fit" and "successfully benchmarked" are different
+# claims, and only a result establishes the second. And it says nothing about
+# how good the answers are: a bigger or faster model is not a better one, and
+# this file ranks nothing.
+estimate_basis:
+  context_tokens: 2048
+  runtime_overhead_gb: 1.0
+  overhead_source: >-
+    llama.cpp b10621 serving a 4B Q4_K_M model measured at 4.30 GB resident
+    against a 2.5 GB weight file, on this project's own hardware. A different
+    engine, a longer context or a larger batch will differ.
+  caveat: >-
+    Expected to fit is arithmetic about memory. It is not a prediction of
+    speed, of acceptance, or of answer quality, and a machine that fits a
+    workload can still fail to finish the profile.
+
+families:
+  - family: Qwen3
+    publisher: Qwen
+    licence: apache-2.0
+    licence_url: https://www.apache.org/licenses/LICENSE-2.0
+    gated: false
+    source_verified: 2026-11-06
+    variants:
+      - id: Qwen/Qwen3-4B
+        parameter_class: 4B
+        source: https://huggingface.co/Qwen/Qwen3-4B
+        context_tokens: 32768
+        quantisations:
+          - label: Q4_K_M
+            runtime: llama.cpp
+            artefact: ggml-org/Qwen3-4B-GGUF
+            weights_gb: 2.5
+            estimated: false
+            recipe: qwen3-4b-cpu-v2
+            expected_fit: { cpu_ram_gb: 8, gpu_vram_gb: 4 }
+          - label: Q8_0
+            runtime: llama.cpp
+            artefact: ggml-org/Qwen3-4B-GGUF
+            weights_gb: 4.28
+            estimated: false
+            expected_fit: { cpu_ram_gb: 8, gpu_vram_gb: 8 }
+          - label: F16
+            runtime: llama.cpp
+            artefact: ggml-org/Qwen3-4B-GGUF
+            weights_gb: 8.05
+            estimated: false
+            expected_fit: { cpu_ram_gb: 16, gpu_vram_gb: 12 }
+      - id: Qwen/Qwen3-8B
+        parameter_class: 8B
+        source: https://huggingface.co/Qwen/Qwen3-8B
+        context_tokens: 32768
+        quantisations:
+          - label: Q4_K_M
+            runtime: llama.cpp
+            weights_gb: 4.9
+            estimated: true
+            expected_fit: { cpu_ram_gb: 8, gpu_vram_gb: 8 }
+          - label: BF16
+            runtime: vllm
+            weights_gb: 16.4
+            estimated: true
+            expected_fit: { cpu_ram_gb: 32, gpu_vram_gb: 20 }
+
+  - family: Mistral
+    publisher: Mistral AI
+    licence: apache-2.0
+    licence_url: https://www.apache.org/licenses/LICENSE-2.0
+    gated: false
+    source_verified: 2026-11-06
+    variants:
+      - id: mistralai/Mistral-7B-Instruct-v0.3
+        parameter_class: 7B
+        source: https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3
+        context_tokens: null        # the model card does not state one
+        quantisations:
+          - label: Q4_K_M
+            runtime: llama.cpp
+            weights_gb: 4.4
+            estimated: true
+            expected_fit: { cpu_ram_gb: 8, gpu_vram_gb: 8 }
+          - label: BF16
+            runtime: vllm
+            weights_gb: 14.5
+            estimated: true
+            expected_fit: { cpu_ram_gb: 32, gpu_vram_gb: 16 }
+
+  - family: Phi
+    publisher: Microsoft
+    licence: mit
+    licence_url: https://opensource.org/license/mit
+    gated: false
+    source_verified: 2026-11-06
+    variants:
+      - id: microsoft/phi-4
+        parameter_class: 14B
+        source: https://huggingface.co/microsoft/phi-4
+        context_tokens: 16384
+        # The card says 14B, the repository sidebar says 15B. Both are the
+        # publisher's, and neither is a measurement; the card is used.
+        quantisations:
+          - label: Q4_K_M
+            runtime: llama.cpp
+            weights_gb: 9.1
+            estimated: true
+            expected_fit: { cpu_ram_gb: 16, gpu_vram_gb: 12 }
+          - label: BF16
+            runtime: vllm
+            weights_gb: 29.3
+            estimated: true
+            expected_fit: { cpu_ram_gb: 64, gpu_vram_gb: 32 }
+
+  - family: Llama 3.1
+    publisher: Meta
+    licence: llama3.1
+    licence_url: https://github.com/meta-llama/llama-models/blob/main/models/llama3_1/LICENSE
+    # Gated, and that is fine: the weights are obtainable by anybody who
+    # accepts Meta's terms, which is what the eligibility policy requires. The
+    # panel says so before you try to download anything.
+    gated: true
+    gate_note: >-
+      Hugging Face requires you to agree to share your contact information and
+      accept the Llama 3.1 Community License before the files appear.
+    source_verified: 2026-11-06
+    variants:
+      - id: meta-llama/Llama-3.1-8B-Instruct
+        parameter_class: 8B
+        source: https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct
+        context_tokens: 131072
+        quantisations:
+          - label: Q4_K_M
+            runtime: llama.cpp
+            weights_gb: 4.9
+            estimated: true
+            expected_fit: { cpu_ram_gb: 8, gpu_vram_gb: 8 }
+          - label: BF16
+            runtime: vllm
+            weights_gb: 16.1
+            estimated: true
+            expected_fit: { cpu_ram_gb: 32, gpu_vram_gb: 20 }
+
+  - family: DeepSeek
+    publisher: DeepSeek
+    licence: mit
+    licence_url: https://opensource.org/license/mit
+    gated: false
+    # Carried over from catalog/models/seed-v1.yaml. Unlike the four above,
+    # its model card was not re-read in this pass, so the licence and the
+    # parameter class are the catalog's existing record rather than a fresh
+    # reading. Marked so nobody mistakes one for the other.
+    source_verified: null
+    source_note: carried from catalog/models/seed-v1.yaml; not re-verified in this pass
+    variants:
+      - id: deepseek-ai/DeepSeek-R1-Distill-Qwen-14B
+        parameter_class: 14B
+        source: https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-14B
+        context_tokens: null
+        quantisations:
+          - label: Q4_K_M
+            runtime: llama.cpp
+            weights_gb: 9.0
+            estimated: true
+            expected_fit: { cpu_ram_gb: 16, gpu_vram_gb: 12 }
+
+# Checked and deliberately excluded, so the reasoning is on the record rather
+# than looking like an oversight.
+excluded:
+  - id: google/gemma-3-4b-it
+    reason: >-
+      Multimodal. Its model card states "Gemma 3 models are multimodal,
+      handling text and image input and generating text output", and its
+      pipeline tag is image-text-to-text. OmoBench's profiles measure text
+      generation, so it is out of scope here however good it is.
+    checked: 2026-11-06

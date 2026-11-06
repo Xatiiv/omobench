@@ -84,6 +84,7 @@ namespace OmoBench.Installer
             "benchmarks/profiles/throughput-v1.yaml",
             "catalog/models/seed-v1.yaml",
             "catalog/downloads/cpu-v1.json",
+            "catalog/workloads/text-generation-v1.yaml",
             "schema/benchmark-run.schema.json",
             "tools/validate_results.py",
         };

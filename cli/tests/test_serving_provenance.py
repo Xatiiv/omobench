@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import io
 import json
 import os
 import shutil
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 
 import provenance_fixtures as fixtures
@@ -485,6 +487,121 @@ class ModelProposalPackagingTests(PackagingFixture):
         self.package(run, provenance=self.declaration(fixtures.bridged_declaration()),
                      force=True)
         self.assertFalse((run / "model-proposal.json").exists())
+
+
+class UncataloguedModelTests(PackagingFixture):
+    """A model nobody curated, packaged on the strength of its own facts.
+
+    The curated list stopped being the set of models allowed to exist. What
+    replaces membership is the set of requirements membership used to stand
+    for, stated in the bundle so a reviewer checks the same things either
+    way. See docs/model-eligibility.md.
+    """
+
+    ELIGIBILITY = {
+        "licence": "apache-2.0",
+        "licence_url": "https://huggingface.co/someone/Model-7B/blob/main/LICENSE",
+        "weights_publicly_downloadable": True,
+        "modality": "text-generation",
+        "publisher": "someone",
+        "family": "Model",
+        "parameter_class": "7B",
+    }
+
+    def package_custom(self, **declaration):
+        # The shared fixture declares a catalogued model; a custom one has to
+        # say what it actually is.
+        declaration.setdefault("catalog_status", "uncatalogued")
+        run = fixtures.single_host_run(self.root)
+        document = fixtures.single_host_declaration(**declaration)
+        return self.package(
+            run, model="someone/Model-7B", framework="vllm", framework_version="0.11.0",
+            execution_device="gpu", provenance=self.declaration(document))
+
+    def test_an_uncatalogued_model_packages_as_schema_1_2(self) -> None:
+        code, result = self.package_custom(eligibility=dict(self.ELIGIBILITY))
+        self.assertEqual(code, 0)
+        self.assertEqual(result["schema_version"], "1.2")
+        self.assertEqual(result["model"]["catalog_status"], "uncatalogued")
+        self.assertEqual(result["model"]["eligibility"]["licence"], "apache-2.0")
+        self.assertTrue(result["model"]["eligibility"]["weights_publicly_downloadable"])
+
+    def test_no_proposal_is_needed(self) -> None:
+        """The whole point: a proposal is a route, not a toll."""
+        code, _ = self.package_custom(eligibility=dict(self.ELIGIBILITY))
+        self.assertEqual(code, 0)
+        self.assertFalse((self.root / ".omobench-runs" / "run-fixture-1234"
+                          / "model-proposal.json").exists())
+
+    def test_a_catalogued_model_still_packages_as_1_1(self) -> None:
+        """Nothing already published changes meaning, or version."""
+        run = fixtures.single_host_run(self.root)
+        code, result = self.package(
+            run, framework="vllm", framework_version="0.11.0", execution_device="gpu",
+            provenance=self.declaration(fixtures.single_host_declaration()))
+        self.assertEqual(code, 0)
+        self.assertEqual(result["schema_version"], "1.1")
+        self.assertNotIn("eligibility", result["model"])
+
+    def test_saying_nothing_at_all_explains_what_is_needed(self) -> None:
+        errors = io.StringIO()
+        with redirect_stderr(errors):
+            code, _ = self.package_custom()
+        self.assertEqual(code, 2)
+        self.assertIn("not on the curated list, which is fine", errors.getvalue())
+        self.assertIn("whether anybody can download the weights", errors.getvalue())
+
+    def test_weights_nobody_else_can_get_are_refused_at_packaging(self) -> None:
+        eligibility = dict(self.ELIGIBILITY, weights_publicly_downloadable=False)
+        errors = io.StringIO()
+        with redirect_stderr(errors):
+            code, _ = self.package_custom(eligibility=eligibility)
+        self.assertEqual(code, 2)
+        self.assertIn("benchmarked here but not published", errors.getvalue())
+
+    def test_another_modality_is_refused_at_packaging(self) -> None:
+        eligibility = dict(self.ELIGIBILITY, modality="image-text-to-text")
+        errors = io.StringIO()
+        with redirect_stderr(errors):
+            code, _ = self.package_custom(eligibility=eligibility)
+        self.assertEqual(code, 2)
+        self.assertIn("measure text generation", errors.getvalue())
+
+    def test_a_licence_nobody_can_read_is_refused(self) -> None:
+        eligibility = dict(self.ELIGIBILITY, licence_url="see the repository")
+        errors = io.StringIO()
+        with redirect_stderr(errors):
+            code, _ = self.package_custom(eligibility=eligibility)
+        self.assertEqual(code, 2)
+        self.assertIn("nobody can open is not one anybody can check", errors.getvalue())
+
+    def test_a_fine_tune_keeps_its_own_identity(self) -> None:
+        """A fine-tune is not its base, and must not be filed under it."""
+        eligibility = dict(self.ELIGIBILITY, base_model="Qwen/Qwen3-4B")
+        code, result = self.package_custom(eligibility=eligibility)
+        self.assertEqual(code, 0)
+        self.assertEqual(result["model"]["id"], "someone/Model-7B")
+        self.assertEqual(result["model"]["eligibility"]["base_model"], "Qwen/Qwen3-4B")
+
+    def test_a_fine_tune_may_not_name_itself_as_its_base(self) -> None:
+        eligibility = dict(self.ELIGIBILITY, base_model="someone/Model-7B")
+        errors = io.StringIO()
+        with redirect_stderr(errors):
+            code, _ = self.package_custom(eligibility=eligibility)
+        self.assertEqual(code, 2)
+        self.assertIn("A fine-tune's base is a different model", errors.getvalue())
+
+    def test_a_curated_model_cannot_be_passed_off_as_custom(self) -> None:
+        run = fixtures.single_host_run(self.root)
+        document = fixtures.single_host_declaration(
+            catalog_status="uncatalogued", eligibility=dict(self.ELIGIBILITY))
+        errors = io.StringIO()
+        with redirect_stderr(errors):
+            code, _ = self.package(
+                run, framework="vllm", framework_version="0.11.0", execution_device="gpu",
+                provenance=self.declaration(document))
+        self.assertEqual(code, 2)
+        self.assertIn("already on the curated list", errors.getvalue())
 
 
 class InterruptedRunTests(PackagingFixture):
