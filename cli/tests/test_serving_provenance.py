@@ -515,6 +515,26 @@ class RepackagingTests(PackagingFixture):
         self.assertEqual(result["hardware"]["cpu"], "AMD Ryzen 7 9800X3D")
         self.assertEqual(self.validate(destination), [])
 
+    def test_evidence_that_still_names_the_contributor_is_refused(self) -> None:
+        """Repackaging copies bytes and records their hashes, so it cannot
+        quietly rewrite them: it says what is there and points at the step
+        whose output can be checked."""
+        run = fixtures.bridged_run(self.root)
+        log = run / "guidellm.stdout.log"
+        log.write_text(log.read_text(encoding="utf-8")
+                       + "\nwrote /home/someone/private/out.json\n", encoding="utf-8")
+        import io
+        from contextlib import redirect_stderr
+
+        errors = io.StringIO()
+        with redirect_stderr(errors):
+            code, destination = self.repackage(
+                run, fixtures.bridged_declaration(result=self.result_section()))
+        self.assertEqual(code, 2)
+        self.assertIn("a home directory: /home/someone", errors.getvalue())
+        self.assertIn("omobench redact", errors.getvalue())
+        self.assertFalse(destination.exists())
+
     def test_the_original_evidence_is_left_exactly_as_it_was(self) -> None:
         run = fixtures.bridged_run(self.root)
         before = {path.name: sha256_file(path) for path in sorted(run.iterdir())}

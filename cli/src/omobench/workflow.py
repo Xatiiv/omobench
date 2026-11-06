@@ -64,6 +64,7 @@ def check(
     recovery: str = "",
     detail: str = "",
     field: str | None = None,
+    severity: str | None = None,
 ) -> dict[str, Any]:
     """One check, in the shape every surface renders.
 
@@ -74,11 +75,18 @@ def check(
     will be needed rather than a fault. "unknown" is a check nobody has run,
     which is never reported as a pass. All three stand in the way of their
     gate; only "blocked" is a failure.
+
+    `severity` is a second, independent axis, and exists because "attention"
+    covers both "you have not entered this yet" and "this environment has
+    already run out of memory". Those deserve the same gate and very different
+    prominence. It never changes what a check blocks.
     """
     if state not in {"ok", "blocked", "attention", "unknown"}:
         raise ValueError(f"Unknown check state: {state!r}")
     if blocks is not None and blocks not in GATES:
         raise ValueError(f"A check can only block {', '.join(GATES)}: {blocks!r}")
+    if severity is not None and severity not in {"severe"}:
+        raise ValueError(f"Unknown check severity: {severity!r}")
     return {
         "id": identifier,
         "label": label,
@@ -89,6 +97,7 @@ def check(
         "recovery": recovery,
         "detail": detail,
         "field": field,
+        "severity": severity,
     }
 
 
@@ -129,6 +138,94 @@ def failing(checks: list[dict[str, Any]], gate: str) -> list[dict[str, Any]]:
     return [item for item in checks if item["state"] == "blocked" and item["blocks"] == gate]
 
 
+def memory_check(memory: dict[str, Any], *, bridged: bool = False) -> dict[str, Any]:
+    """What the benchmark runner's own environment has left, said as such.
+
+    Three things this deliberately does not do.
+
+    It does not call the reading "this machine". Inside WSL the total is what
+    Windows handed the distribution, and on a bridged run the model is served
+    on a different computer altogether -- so an unlabelled number would be
+    read as a fact about the serving host that nothing here established.
+
+    It does not treat swap in use as proof of paging. Swap filling up says the
+    kernel has had to move pages out at some point; Linux also swaps out idle
+    pages under no particular pressure, and a full swap file on an otherwise
+    comfortable host proves nothing about what a benchmark will do. What is
+    worth saying is the pair: very little available *and* swap already spent.
+
+    And it does not act. It changes no WSL setting and stops no process; both
+    are the contributor's to decide, and both can cost them work they did not
+    ask to lose. It never stops a run either -- a contributor may know exactly
+    why their environment looks like this.
+    """
+    available, total = memory["available_gb"], memory["total_gb"]
+    swap_used, swap_total = memory["swap_used_gb"], memory["swap_total_gb"]
+    label = memory.get("environment_label", "the machine running this panel")
+    total_means = memory.get("total_means", "on the machine running this panel")
+    is_wsl = memory.get("environment") == "wsl"
+
+    # Not a threshold anybody can defend in general: how much a benchmark needs
+    # depends on the weights, the context length and the runtime. What is
+    # defensible is reporting that this environment has already run out.
+    strained = available < 1.0 or swap_used > 0.5
+    # Severe is the pair, not either half: almost nothing left *and* swap
+    # already spent is the state the previous CPU run started from, and it is
+    # the one worth putting in front of somebody about to spend an hour.
+    severe = available < 1.0 and swap_used > 0.5
+
+    observed = f"{available} GB available of {total} GB {total_means}"
+    if swap_total:
+        observed += f"; {swap_used} GB of its {swap_total} GB swap in use"
+
+    detail = f"Read from the kernel inside {label}."
+    if bridged:
+        detail += (" This is the benchmark runner. The model is served on another machine, "
+                   "and nothing here describes that machine's memory.")
+    elif is_wsl:
+        detail += (" On this setup that environment runs the model server as well as the "
+                   "runner. It is the memory Windows has given the distribution, not the "
+                   "memory installed in the computer.")
+
+    if not strained:
+        recovery = ""
+    else:
+        choices = [
+            "close what else is resident here -- other panels, editors, language servers, "
+            "builds -- and read this again",
+            "serve a smaller or more heavily quantized model, if one is already installed",
+        ]
+        if is_wsl:
+            choices.append(
+                "give the distribution more memory yourself: a `memory=` line in "
+                "%USERPROFILE%\\.wslconfig, then `wsl --shutdown`. OmoBench does not write "
+                "that file, and how much this computer can spare is yours to judge")
+        if not bridged:
+            choices.append(
+                "serve the model on another machine and measure it across the bridge, so the "
+                "server and the runner stop sharing one allocation")
+        recovery = (
+            ("Severe: this environment is nearly out of memory and has already spent swap. "
+             if severe else "")
+            + "Swap in use means the kernel has had to move pages out at some point; by itself "
+              "it does not prove this run would page. What it does mean is that a long profile "
+              "would start with no headroom, and a run that pages reports the paging rather "
+              "than the model. Nothing here stops the run. Your choices: "
+            + "; ".join(choices) + ".")
+
+    return check(
+        "memory",
+        f"Memory to spare in {label}",
+        state="attention" if strained else "ok",
+        observed=observed,
+        source=SOURCE_MACHINE,
+        blocks="run",
+        detail=detail,
+        recovery=recovery,
+        severity="severe" if severe else None,
+    )
+
+
 def run_checks(
     *,
     setup_ok: bool,
@@ -138,6 +235,7 @@ def run_checks(
     tokenizer_report: dict[str, Any] | None,
     tokenizer_source: str | None,
     memory: dict[str, Any] | None = None,
+    bridged: bool = False,
 ) -> list[dict[str, Any]]:
     """What stands between this configuration and a benchmark that measures something.
 
@@ -158,30 +256,7 @@ def run_checks(
     )]
 
     if memory is not None:
-        # Not a threshold anybody can defend in general: how much a benchmark
-        # needs depends on the weights, the context length and the runtime. What
-        # is defensible is reporting that this host has already run out --
-        # swap in use with little left is not a prediction, it is the state the
-        # run would start from. It never stops a run: a contributor may know
-        # exactly why their machine looks like this.
-        strained = memory["available_gb"] < 1.0 or memory["swap_used_gb"] > 0.5
-        checks.append(check(
-            "memory",
-            "This machine has memory to spare",
-            state="attention" if strained else "ok",
-            observed=f"{memory['available_gb']} GB available of {memory['total_gb']} GB"
-                     + (f", {memory['swap_used_gb']} GB of swap in use"
-                        if memory["swap_used_gb"] else ""),
-            source=SOURCE_MACHINE,
-            blocks="run",
-            detail="Read on the machine running this panel. On a bridged run the model is "
-                   "served somewhere else, and nothing here describes that machine.",
-            recovery="" if not strained else
-                     "A server and a runner competing for memory measure the paging rather "
-                     "than the model, and a long profile gets slower as it goes. Give this "
-                     "environment more memory, serve a smaller model, or close what else is "
-                     "resident before starting.",
-        ))
+        checks.append(memory_check(memory, bridged=bridged))
 
     if not endpoint:
         checks.append(check(

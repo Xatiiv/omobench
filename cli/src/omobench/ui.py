@@ -938,6 +938,7 @@ class Controller:
             endpoint=endpoint, server_check=(served or {}).get("report"),
             tokenizer_report=loaded, tokenizer_source=tokenizer or model,
             memory=cli.memory_pressure(),
+            bridged=bool(values.get("windows_bridge", False)),
         ) + self.requirement_checks(job or self._preview_job(model, values), values)
         proposal = self.proposal_status(values) if model else None
         identity_settled = bool(model) and (

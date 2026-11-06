@@ -278,29 +278,79 @@ class MemoryPressureTests(unittest.TestCase):
     runtime. What is reported is the state the run would start from.
     """
 
-    def checks(self, memory):
+    NATIVE = {"total_gb": 64.0, "available_gb": 48.0, "swap_total_gb": 8.0,
+              "swap_used_gb": 0.0, "environment": "linux",
+              "total_means": "on the machine running this panel",
+              "environment_label": "the machine running this panel"}
+    EXHAUSTED_WSL = {"total_gb": 7.85, "available_gb": 0.26, "swap_total_gb": 2.0,
+                     "swap_used_gb": 2.0, "environment": "wsl",
+                     "total_means": "allocated to this WSL environment",
+                     "environment_label": "the WSL environment running this panel"}
+
+    def checks(self, memory, **kwargs):
         return {item["id"]: item for item in workflow.run_checks(
             setup_ok=True, setup_message="ready", endpoint=None, server_check=None,
-            tokenizer_report=None, tokenizer_source=None, memory=memory)}
+            tokenizer_report=None, tokenizer_source=None, memory=memory, **kwargs)}
 
     def test_a_host_with_room_says_so_quietly(self) -> None:
-        item = self.checks({"total_gb": 64.0, "available_gb": 48.0,
-                            "swap_total_gb": 8.0, "swap_used_gb": 0.0})["memory"]
+        item = self.checks(self.NATIVE)["memory"]
         self.assertEqual(item["state"], "ok")
         self.assertEqual(item["recovery"], "")
+        self.assertIsNone(item["severity"])
         self.assertIn("48.0 GB available of 64.0 GB", item["observed"])
 
     def test_an_exhausted_host_is_reported_with_what_was_read(self) -> None:
-        item = self.checks({"total_gb": 7.85, "available_gb": 0.26,
-                            "swap_total_gb": 2.0, "swap_used_gb": 2.0})["memory"]
+        item = self.checks(self.EXHAUSTED_WSL)["memory"]
         self.assertEqual(item["state"], "attention")
         self.assertIn("0.26 GB available", item["observed"])
-        self.assertIn("2.0 GB of swap in use", item["observed"])
-        self.assertIn("measure the paging", item["recovery"])
+        self.assertIn("2.0 GB of its 2.0 GB swap in use", item["observed"])
+
+    def test_severe_pressure_is_marked_without_becoming_a_failure(self) -> None:
+        """Prominence and gate are separate axes: it shouts, it does not block."""
+        item = self.checks(self.EXHAUSTED_WSL)["memory"]
+        self.assertEqual(item["severity"], "severe")
+        self.assertTrue(item["recovery"].startswith("Severe:"))
+        self.assertEqual(item["state"], "attention")
+        self.assertEqual(item["blocks"], "run")
+
+    def test_swap_alone_is_noted_but_not_called_severe(self) -> None:
+        """Linux swaps idle pages out on a comfortable host too."""
+        item = self.checks({**self.NATIVE, "swap_used_gb": 3.0})["memory"]
+        self.assertEqual(item["state"], "attention")
+        self.assertIsNone(item["severity"])
+
+    def test_full_swap_is_never_presented_as_proof_of_paging(self) -> None:
+        item = self.checks(self.EXHAUSTED_WSL)["memory"]
+        self.assertIn("does not prove", item["recovery"])
+        self.assertNotIn("is paging", item["recovery"])
+
+    def test_the_reading_names_the_environment_it_describes(self) -> None:
+        wsl = self.checks(self.EXHAUSTED_WSL)["memory"]
+        self.assertIn("WSL environment", wsl["label"])
+        self.assertIn("allocated to this WSL environment", wsl["observed"])
+        self.assertIn("not the memory installed in the computer", wsl["detail"])
+
+    def test_a_bridged_run_is_told_this_is_not_the_serving_host(self) -> None:
+        """WSL memory is never presented as the serving machine's memory."""
+        item = self.checks(self.EXHAUSTED_WSL, bridged=True)["memory"]
+        self.assertIn("The model is served on another machine", item["detail"])
+        self.assertIn("nothing here describes that machine's memory", item["detail"])
+        # And the direct-run advice to "use the bridge" is not offered to
+        # somebody already using it.
+        self.assertNotIn("measure it across the bridge", item["recovery"])
+
+    def test_the_choices_offered_change_nothing_by_themselves(self) -> None:
+        """No setting is written and no process is stopped on the contributor's behalf."""
+        recovery = self.checks(self.EXHAUSTED_WSL)["memory"]["recovery"]
+        self.assertIn("OmoBench does not write that file", recovery)
+        self.assertIn(".wslconfig", recovery)
+        self.assertIn("Nothing here stops the run", recovery)
+        self.assertIn("close what else is resident here", recovery)
+        self.assertIn("smaller or more heavily quantized model", recovery)
 
     def test_memory_pressure_never_stops_a_benchmark(self) -> None:
         """A contributor may know exactly why their machine looks like this."""
-        strained = {"total_gb": 7.85, "available_gb": 0.1, "swap_total_gb": 2.0, "swap_used_gb": 2.0}
+        strained = {**self.EXHAUSTED_WSL, "available_gb": 0.1}
         checks = list(self.checks(strained).values())
         self.assertEqual([item["id"] for item in workflow.failing(checks, "run")], [])
 

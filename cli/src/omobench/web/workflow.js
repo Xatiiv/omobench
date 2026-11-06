@@ -45,8 +45,18 @@ globalThis.WorkflowView = class WorkflowView {
 
   // What was checked, what was seen, where that came from, and one specific
   // thing to do about it.
+  //
+  // Severity is a second axis and is rendered as one: a check can be severe
+  // without being a failure, which is exactly what an environment that has
+  // already run out of memory is. It is marked, not re-coloured as a fault,
+  // because the gate it blocks has not changed.
   static check(item) {
-    const li = WorkflowView.element("li", `status-item ${WorkflowView.CHECK_CLASS[item.state] || "pending"}`);
+    const classes = [`status-item ${WorkflowView.CHECK_CLASS[item.state] || "pending"}`];
+    if (item.severity === "severe") classes.push("severe");
+    const li = WorkflowView.element("li", classes.join(" "));
+    if (item.severity === "severe") {
+      li.append(WorkflowView.element("span", "severity-tag", "Severe"));
+    }
     li.append(WorkflowView.element("strong", null, item.label));
     li.append(WorkflowView.element("span", "sub-check", item.observed
       ? `Seen: ${item.observed} — from ${item.source}`

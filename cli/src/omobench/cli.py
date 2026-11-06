@@ -1131,14 +1131,34 @@ def profile_measured_requests(root: Path, profile_id: str) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def running_under_wsl() -> bool:
+    """Is this Linux a WSL distribution rather than the machine itself?
+
+    Asked of the kernel, which says so in its own release string, rather than
+    of an environment variable a shell may or may not have exported.
+    """
+    try:
+        release = Path("/proc/sys/kernel/osrelease").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return "microsoft" in release.lower() or "wsl" in release.lower()
+
+
 def memory_pressure() -> dict[str, Any] | None:
-    """What this host has left, read from the kernel rather than guessed.
+    """What *this environment* has left, read from the kernel rather than guessed.
 
     A benchmark competing for memory measures the paging. The model server
     holds the weights resident and the runner holds a tokenizer and its own
     process tree, and on a small WSL virtual machine the two together can
     exhaust it -- at which point per-request latency stops describing the
     inference stack at all.
+
+    Which environment this describes is part of the reading, not a detail to
+    work out later. Inside WSL, `MemTotal` is what Windows handed this
+    distribution, not the memory installed in the machine, and on a bridged
+    run the model is served somewhere else entirely -- so a number labelled
+    only "this machine" would be read as a fact about the serving host that
+    nothing here established. The label travels with the numbers.
 
     Returns None where there is nothing to read (anything but Linux), because
     a number nobody measured is worse than no number.
@@ -1157,11 +1177,20 @@ def memory_pressure() -> dict[str, Any] | None:
         return None
     swap_total = values.get("SwapTotal", 0)
     swap_free = values.get("SwapFree", 0)
+    wsl = running_under_wsl()
     return {
         "total_gb": round(values["MemTotal"] / 1024 / 1024, 2),
         "available_gb": round(values["MemAvailable"] / 1024 / 1024, 2),
         "swap_total_gb": round(swap_total / 1024 / 1024, 2),
         "swap_used_gb": round((swap_total - swap_free) / 1024 / 1024, 2),
+        "environment": "wsl" if wsl else "linux",
+        # What the total actually counts, in the words the reader needs. A WSL
+        # distribution cannot see the host's installed memory from in here, and
+        # must not imply that it can.
+        "total_means": ("allocated to this WSL environment" if wsl
+                        else "on the machine running this panel"),
+        "environment_label": ("the WSL environment running this panel" if wsl
+                              else "the machine running this panel"),
     }
 
 
@@ -1404,7 +1433,77 @@ def _run_guidellm_command(
 
 
 def redact_endpoint(text: str, endpoint: str) -> str:
-    return text.replace(endpoint.rstrip("/"), "<LOCAL_ENDPOINT>")
+    """The address this run was measured against, wherever it was written."""
+    if endpoint and endpoint.strip("/"):
+        text = text.replace(endpoint.rstrip("/"), "<LOCAL_ENDPOINT>")
+    return text
+
+
+# A URL carrying its own credentials, anywhere -- not only at the endpoint the
+# run was configured with. The bridge builds an ephemeral authenticated target,
+# a contributor may paste one into the panel, and a runner is free to echo
+# whatever it was handed into its own report. Matched by shape rather than by
+# value, because the value is the thing nobody should have to supply twice.
+#
+# The host goes with the credentials. A URL that carries a password is private
+# by construction -- nobody puts one on a public address -- so replacing the
+# secret and publishing the machine it opens would be half a redaction. Any
+# path after the authority is kept: `/v1/chat/completions` is the protocol,
+# not the contributor.
+CREDENTIALLED_URL = re.compile(
+    r"[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s/@\"'<>]+:[^\s/@\"'<>]*@[^\s/\"'<>]*")
+# A loopback address is a private fact about a contributor's machine -- which
+# port they chose, and that it was theirs. The project already replaced the one
+# endpoint it was told about; this catches the same address written anywhere
+# else in the same evidence.
+LOOPBACK_URL = re.compile(
+    r"https?://(?:127(?:\.\d{1,3}){3}|localhost|\[::1\]|0\.0\.0\.0)(?::\d{1,5})?")
+# A home directory names a person. The run directory and the checkout are
+# replaced first and usually cover it; this is the backstop for evidence that
+# mentions a path neither of those contains.
+HOME_DIRECTORIES = (
+    re.compile(r"(?<![\w.\-])/home/[^/\s\"':,;)\]]+"),
+    re.compile(r"(?<![\w.\-])/Users/[^/\s\"':,;)\]]+"),
+    re.compile(r"(?<![\w.\-])[A-Za-z]:[\\/]{1,2}Users[\\/]{1,2}[^\\/\s\"':,;)\]]+"),
+)
+
+
+# A secret that is not part of a URL: the runner writes the key it was given
+# into its own report, under a name that says what it is. Matched on the field
+# name ending in a credential word, so `api_key` and `access_token` are caught
+# while `audio_tokens`, `prompt_tokens` and `first_output_token_iteration` --
+# all of which are in every report -- are not.
+CREDENTIAL_PLACEHOLDER = "<REDACTED_CREDENTIAL>"
+CREDENTIAL_FIELD = re.compile(
+    r'("[A-Za-z0-9_\-]*?(?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|'
+    r'bearer[_-]?token|session[_-]?token|secret|password|passphrase|authorization)"\s*:\s*)'
+    r'"([^"]*)"',
+    re.IGNORECASE)
+BEARER_TOKEN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=\-]{8,}")
+
+
+def redact_credentials(text: str) -> str:
+    """Secrets, in the three shapes evidence actually carries them.
+
+    Inside a URL, as a named field in the runner's JSON, and as an
+    Authorization header echoed into a log. An empty value is left alone:
+    replacing `""` with a placeholder would claim a credential was there.
+    """
+    text = CREDENTIALLED_URL.sub("<LOCAL_ENDPOINT>", text)
+    text = CREDENTIAL_FIELD.sub(
+        lambda match: match.group(1) + (
+            f'"{CREDENTIAL_PLACEHOLDER}"' if match.group(2) else '""'), text)
+    return BEARER_TOKEN.sub(f"Bearer {CREDENTIAL_PLACEHOLDER}", text)
+
+
+def redact_loopback_endpoints(text: str) -> str:
+    return LOOPBACK_URL.sub("<LOCAL_ENDPOINT>", text)
+
+
+def redact_home_directories(text: str) -> str:
+    for pattern in HOME_DIRECTORIES:
+        text = pattern.sub("<HOME>", text)
+    return text
 
 
 def redact_local_paths(text: str, run_directory: Path, root: Path) -> str:
@@ -1430,8 +1529,19 @@ def redact_evidence(text: str, *, endpoint: str, run_directory: Path, root: Path
     The runner's own report, its log and the reproduce instructions are
     redacted identically; an address the project judged worth hiding in one of
     them is not public information in another.
+
+    Ordered deliberately. The configured endpoint goes first, because it is
+    the one string known to be the address and replacing it whole beats
+    finding its parts. Credentials anywhere else follow -- a URL that carries
+    a password loses its host along with the password, since nobody puts one
+    on a public address. Then any other loopback address. Paths come last and
+    from the most specific outwards -- run directory, checkout, home -- so a
+    staging path becomes `<RUN_DIRECTORY>` rather than a home replacement
+    with the rest of somebody's layout still attached.
     """
-    return redact_local_paths(redact_endpoint(text, endpoint), run_directory, root)
+    text = redact_endpoint(text, endpoint)
+    text = redact_loopback_endpoints(redact_credentials(text))
+    return redact_home_directories(redact_local_paths(text, run_directory, root))
 
 
 def compress_file(path: Path) -> Path:
@@ -1448,6 +1558,130 @@ def sha256_file(path: Path) -> str:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     return f"sha256:{digest.hexdigest()}"
+
+
+# The distributable files, and whether each one is read as text or has to be
+# decompressed first. A rule that only looked at what it could read without
+# unpacking would miss the file with the most of a contributor's machine in it.
+COMPRESSED_EVIDENCE = "guidellm-benchmarks.json.gz"
+
+
+def read_evidence_text(path: Path) -> str:
+    """One distributable file as text, decompressing where that is what it is."""
+    if path.name.endswith(".gz"):
+        with gzip.open(path, "rt", encoding="utf-8", errors="replace") as source:
+            return source.read()
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def write_evidence_text(path: Path, text: str) -> None:
+    """The counterpart, recompressed without a timestamp.
+
+    gzip records the modification time of what it compressed, so the same
+    bytes compressed twice hash differently. The hash of a distributable file
+    is recorded in the result and checked by the registry, so it is written
+    reproducibly: the same evidence redacted twice produces the same file.
+    """
+    if path.name.endswith(".gz"):
+        with path.open("wb") as raw, gzip.GzipFile(
+                filename="", mode="wb", fileobj=raw, mtime=0) as destination:
+            destination.write(text.encode("utf-8"))
+        return
+    path.write_text(text, encoding="utf-8")
+
+
+def evidence_privacy_findings(text: str) -> list[str]:
+    """What is still in this text that should not leave the machine.
+
+    Deliberately re-derived from the content rather than from what redaction
+    was asked to remove: a scan that only looked for the strings it had just
+    replaced could only ever agree with itself.
+    """
+    findings: list[str] = []
+    # A secret is never quoted back: printing it into a terminal and a shell
+    # history in the course of reporting it would be the same disclosure
+    # again. Only the field's name is named.
+    if CREDENTIALLED_URL.search(text):
+        findings.append("a URL carrying credentials")
+    for field, value in dict.fromkeys(
+            (match.group(1).split('"')[1], match.group(2))
+            for match in CREDENTIAL_FIELD.finditer(text)):
+        if value and value != CREDENTIAL_PLACEHOLDER:
+            findings.append(f'a credential in the field "{field}"')
+    if BEARER_TOKEN.search(text.replace(f"Bearer {CREDENTIAL_PLACEHOLDER}", "")):
+        findings.append("an Authorization bearer token")
+    for label, pattern in (("a loopback address", LOOPBACK_URL),
+                           ("a home directory", HOME_DIRECTORIES[0]),
+                           ("a home directory", HOME_DIRECTORIES[1]),
+                           ("a home directory", HOME_DIRECTORIES[2])):
+        for found in dict.fromkeys(match.group(0) for match in pattern.finditer(text)):
+            findings.append(f"{label}: {found}")
+    return findings
+
+
+def scan_evidence_privacy(directory: Path) -> dict[str, list[str]]:
+    """Every distributable file in a bundle, including the compressed report."""
+    return {name: evidence_privacy_findings(read_evidence_text(directory / name))
+            for name in EVIDENCE_FILENAMES if (directory / name).is_file()}
+
+
+def redact_run_evidence(
+    source: Path,
+    destination: Path,
+    *,
+    endpoint: str = "",
+    run_directory: Path | None = None,
+    root: Path | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Put a finished run's evidence through the redaction path, into a copy.
+
+    This exists because the redaction the runner now applies while it writes
+    cannot reach backwards. Evidence collected before it was there is real
+    evidence -- hours of measurement that nothing would be gained by taking
+    again -- but it carries the contributor's home directory and the loopback
+    address their server listened on, and those were on their way to a public
+    repository.
+
+    `source` is never written to. The measurements are not touched: only
+    addresses, credentials and paths change, and a file with none of those in
+    it is copied byte for byte so its hash does not move for no reason. The
+    compressed report is unpacked, redacted and packed again, because that is
+    the file with the most of a contributor's machine in it.
+    """
+    run_directory = run_directory or source
+    root = root or checkout_above(source) or source
+    destination.mkdir(parents=True, exist_ok=True)
+    report: dict[str, dict[str, Any]] = {}
+    for name in EVIDENCE_FILENAMES:
+        original, copy = source / name, destination / name
+        text = read_evidence_text(original)
+        redacted = redact_evidence(text, endpoint=endpoint,
+                                   run_directory=run_directory, root=root)
+        if redacted == text:
+            shutil.copyfile(original, copy)
+        else:
+            write_evidence_text(copy, redacted)
+        report[name] = {
+            "changed": redacted != text,
+            "source_sha256": sha256_file(original),
+            "distributable_sha256": sha256_file(copy),
+            "remaining": evidence_privacy_findings(read_evidence_text(copy)),
+        }
+    return report
+
+
+def checkout_above(run_directory: Path) -> Path | None:
+    """The checkout a staging directory sits in, named by its own layout.
+
+    Staging lives at `<checkout>/.omobench-runs/...`, so the checkout is the
+    parent of the `.omobench-runs` this run is under -- not something to be
+    guessed at, and not the checkout doing the redacting, which is frequently
+    a different one.
+    """
+    for parent in run_directory.resolve().parents:
+        if parent.name == ".omobench-runs":
+            return parent.parent
+    return None
 
 
 def sha256_json(value: Any) -> str:
@@ -2626,6 +2860,25 @@ def build_parser() -> argparse.ArgumentParser:
     repackage.add_argument("--submitter", help="override the submitter recorded in the original result")
     repackage.add_argument("--force", action="store_true", help="allow replacement of an existing derived bundle")
 
+    redact = subcommands.add_parser(
+        "redact",
+        help="write a redacted copy of a finished run's evidence, leaving the original alone",
+    )
+    redact.add_argument("--run-dir", required=True, help="the finished staging run to read")
+    redact.add_argument("--output-dir", required=True,
+                        help="where to write the redacted copy; never the run directory itself")
+    redact.add_argument("--endpoint", default="",
+                        help="the endpoint this run was measured against, if it is not a "
+                             "loopback address the scan recognises on its own")
+    redact.add_argument("--force", action="store_true",
+                        help="allow replacement of an existing redacted copy")
+
+    scan = subcommands.add_parser(
+        "scan-evidence",
+        help="report private material left in a run's distributable files, changing nothing",
+    )
+    scan.add_argument("--run-dir", required=True, help="the directory to read")
+
     weights = subcommands.add_parser(
         "weights", help="identify local weight files by hashing their bytes"
     )
@@ -2711,6 +2964,87 @@ EVIDENCE_FILENAMES = ("guidellm-benchmarks.json.gz", "guidellm.stdout.log",
                       "environment.json", "reproduce.md")
 
 
+def run_scan_evidence(args: argparse.Namespace) -> int:
+    """Say what is still in a bundle's distributable files. Change nothing.
+
+    Separate from redaction on purpose. Reading is safe and can be run on a
+    bundle somebody else produced, on a directory that is already public, or
+    on the output of the redaction itself -- which is the only way a redaction
+    gets checked by something other than its own assumptions.
+    """
+    directory = Path(args.run_dir).expanduser()
+    missing = [name for name in EVIDENCE_FILENAMES if not (directory / name).is_file()]
+    if missing:
+        print(f"{directory} is missing {', '.join(missing)}.", file=sys.stderr)
+        return 2
+    findings = scan_evidence_privacy(directory)
+    total = sum(len(items) for items in findings.values())
+    for name in EVIDENCE_FILENAMES:
+        items = findings.get(name, [])
+        label = " (decompressed)" if name == COMPRESSED_EVIDENCE else ""
+        print(f"{name}{label}: " + (f"{len(items)} to answer for" if items else "clean"))
+        for item in items:
+            print(f"    {item}")
+    if total:
+        print(f"\n{total} thing(s) in this bundle name the contributor's machine or carry a "
+              f"credential. Write a redacted copy with:\n"
+              f"    omobench redact --run-dir {directory} --output-dir <somewhere else>",
+              file=sys.stderr)
+        return 1
+    print("\nNothing found that names the contributor's machine or carries a credential. "
+          "This is a scan for the patterns OmoBench redacts, not a guarantee about prompts "
+          "or model output.")
+    return 0
+
+
+def run_redact_evidence(args: argparse.Namespace) -> int:
+    """Write a redacted copy of a finished run, and check the copy.
+
+    The original is read and never written. What comes out is verified by
+    scanning it again rather than by trusting that the substitutions ran, and
+    a copy that still has something in it is reported as a failure even
+    though the files were written -- a redaction nobody checked is not a
+    redaction.
+    """
+    source = Path(args.run_dir).expanduser().resolve()
+    destination = Path(args.output_dir).expanduser().resolve()
+    if destination == source:
+        print("Redaction writes a copy; it never overwrites the evidence it read.",
+              file=sys.stderr)
+        return 2
+    missing = [name for name in EVIDENCE_FILENAMES if not (source / name).is_file()]
+    if missing:
+        print(f"{source} is missing {', '.join(missing)}. These files are the run itself.",
+              file=sys.stderr)
+        return 2
+    if destination.exists() and any(destination.iterdir()) and not args.force:
+        print(f"Refusing to write into {destination}: it is not empty. Use --force.",
+              file=sys.stderr)
+        return 2
+
+    report = redact_run_evidence(source, destination, endpoint=args.endpoint)
+    remaining = 0
+    for name in EVIDENCE_FILENAMES:
+        entry = report[name]
+        label = " (decompressed)" if name == COMPRESSED_EVIDENCE else ""
+        print(f"{name}{label}: " + ("redacted" if entry["changed"] else "nothing to redact"))
+        print(f"    was  {entry['source_sha256']}")
+        print(f"    now  {entry['distributable_sha256']}")
+        for item in entry["remaining"]:
+            print(f"    STILL PRESENT: {item}")
+            remaining += 1
+
+    print(f"\nThe evidence in {source} was read and not modified.")
+    if remaining:
+        print(f"\n{remaining} thing(s) survived redaction in {destination}. Do not submit it.",
+              file=sys.stderr)
+        return 1
+    print("Nothing the redaction scans for is left in the copy. Package from it with "
+          "omobench package --run-dir, and review the files before submitting either way: "
+          "no scan knows what a prompt or a model's own output may contain.")
+    return 0
+
+
 def repackage_local_run(args: argparse.Namespace) -> int:
     """Package a run that already happened, under the schema that can describe it.
 
@@ -2748,6 +3082,22 @@ def repackage_local_run(args: argparse.Namespace) -> int:
             "These files are the run itself -- its raw measurements, the runner's log, the "
             "environment it ran in, and how to reproduce it. Nothing can reconstruct them after "
             "the fact, so this run cannot become a public result.",
+            file=sys.stderr)
+        return 2
+
+    # Repackaging copies evidence byte for byte and records the source hashes,
+    # which is what lets a reader see that a derived bundle carries the same
+    # measurements rather than new ones. That guarantee is worth keeping, so
+    # this refuses rather than quietly rewriting the files underneath it --
+    # redaction is a separate, visible step with its own output to check.
+    leaking = {name: items for name, items in scan_evidence_privacy(source).items() if items}
+    if leaking:
+        print(
+            f"{source} still carries material that should not be published:\n"
+            + "\n".join(f"  {name}: " + "; ".join(items) for name, items in leaking.items())
+            + "\n\nRepackaging copies evidence unchanged and records its hashes, so it will not "
+              "rewrite these for you. Write a redacted copy first, then repackage that:\n"
+              f"    omobench redact --run-dir {source} --output-dir <somewhere else>",
             file=sys.stderr)
         return 2
 
@@ -2937,6 +3287,10 @@ def main() -> int:
         return package_local_run(args)
     if args.command == "repackage":
         return repackage_local_run(args)
+    if args.command == "redact":
+        return run_redact_evidence(args)
+    if args.command == "scan-evidence":
+        return run_scan_evidence(args)
     if args.command == "weights":
         return run_weights_command(args)
     if args.command == "tokenizer":

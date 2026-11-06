@@ -76,6 +76,24 @@ class AdvancedDashboardTests(unittest.TestCase):
         self.assertEqual(self.states["checkRequirementsRequests"],
                          ["POST /api/runs/<job>/requirements", "POST /api/workflow"])
 
+    def test_severe_pressure_is_marked_without_being_recoloured_as_a_failure(self):
+        """Prominence and gate are separate axes, and the view renders both.
+
+        The memory reading is "attention" -- it blocks nothing and a
+        contributor may have a reason for it -- while being the one thing on
+        the page worth seeing before an hour of CPU time goes into a run.
+        """
+        gate = {item["className"]: item for item in self.states["selected"]["runGate"]}
+        severe = next(item for name, item in gate.items() if "severe" in name)
+        self.assertEqual(severe["className"], "status-item pending severe")
+        self.assertEqual(severe["parts"][0], "severity-tag")
+        self.assertEqual(severe["text"][0], "Severe")
+        self.assertIn("allocated to this WSL environment", " ".join(severe["text"]))
+        # Nothing else in the gate is marked, and nothing became a failure.
+        self.assertEqual([name for name in gate if "severe" in name],
+                         ["status-item pending severe"])
+        self.assertEqual([name for name in gate if "fail" in name], [])
+
     # -- one shared component --------------------------------------------------
 
     def test_the_panel_mounts_the_shared_dashboard_not_a_copy(self):

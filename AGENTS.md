@@ -107,6 +107,13 @@ See [provenance.md](docs/provenance.md).
   estimate how long a particular machine will take.
 - Anything after the benchmark must be retryable without re-running it. A
   refused bundle or a failed submission leaves every evidence file untouched.
+- A reading of a machine names the environment it describes. Inside WSL,
+  `MemTotal` is what Windows allocated to the distribution, not the memory
+  installed in the computer, and on a bridged run the serving host is a
+  different machine the runner knows nothing about. Never present one as the
+  other. Report severity separately from what a check blocks, state the
+  choices, and change nothing: no WSL setting is written and no process is
+  stopped on a contributor's behalf. Swap in use is not proof of paging.
 
 ### Explaining evidence and comparisons
 
@@ -132,6 +139,16 @@ Treat `results/` as append-only public evidence.
 - Preserve the complete bundle: `result.json`, raw runner output, runner log, environment snapshot, and reproduction instructions.
 - Keep artifact paths and SHA-256 hashes valid.
 - Never place API keys, tokens, private hostnames, private prompts, model weights, or other secrets in a bundle, log, or documentation.
+- Evidence is redacted as it is written: before the raw report is compressed,
+  and therefore before it is hashed. Evidence collected earlier passes through
+  the same rules into a copy (`omobench redact`), never by rewriting the
+  original and never by re-running the benchmark; `omobench repackage` refuses
+  material it would otherwise copy, because it records source hashes as proof
+  the derived bundle carries the same measurements. What a redaction removes,
+  `scan-evidence` must independently fail to find — a check that only looks
+  for the strings it just replaced only agrees with itself. Schema validity,
+  privacy and profile acceptance are three separate verdicts; never let one
+  stand in for another.
 - Do not claim that a run is publishable unless the server's own logs or hardware telemetry confirm real inference on the declared execution device.
 
 Local staging data belongs in `.omobench-runs/`; UI jobs use

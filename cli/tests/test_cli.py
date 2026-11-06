@@ -165,6 +165,21 @@ class GuideLLMCommandTests(unittest.TestCase):
         self.assertGreaterEqual(reading["swap_used_gb"], 0)
         self.assertLessEqual(reading["swap_used_gb"], reading["swap_total_gb"])
 
+    def test_the_reading_says_which_environment_it_measured(self) -> None:
+        """Inside WSL, MemTotal is an allocation, not the computer's memory."""
+        from omobench.cli import memory_pressure, running_under_wsl
+
+        reading = memory_pressure()
+        if reading is None:
+            self.assertNotEqual(sys.platform, "linux")
+            return
+        self.assertEqual(reading["environment"], "wsl" if running_under_wsl() else "linux")
+        if reading["environment"] == "wsl":
+            self.assertEqual(reading["total_means"], "allocated to this WSL environment")
+            self.assertIn("WSL", reading["environment_label"])
+        else:
+            self.assertNotIn("WSL", reading["total_means"])
+
     def test_the_profile_briefing_is_read_from_the_profile_itself(self) -> None:
         """Workload, limits and acceptance, before the run rather than after.
 
@@ -226,6 +241,193 @@ class GuideLLMCommandTests(unittest.TestCase):
             redact_endpoint(value, "http://localhost:8000/v1"),
             "server=<LOCAL_ENDPOINT> and again <LOCAL_ENDPOINT>",
         )
+
+
+class EvidenceRedactionTests(unittest.TestCase):
+    """What leaves the machine, and what a scan can still find in it afterwards.
+
+    The redaction the runner applies while it writes cannot reach backwards,
+    so evidence collected before it existed has to be able to pass through
+    the same rules without the benchmark being taken again. These cover the
+    rules themselves; the scan is held to finding what they remove, because a
+    check that only looked for the strings it had just replaced could only
+    ever agree with itself.
+    """
+
+    def redact(self, text: str, **kwargs) -> str:
+        from omobench.cli import redact_evidence
+
+        return redact_evidence(text, endpoint=kwargs.get("endpoint", ""),
+                               run_directory=Path(kwargs.get("run_directory", "/run/dir")),
+                               root=Path(kwargs.get("root", "/checkout")))
+
+    def findings(self, text: str) -> list[str]:
+        from omobench.cli import evidence_privacy_findings
+
+        return evidence_privacy_findings(text)
+
+    def test_a_credentialled_url_loses_its_host_with_the_password(self) -> None:
+        """Nobody puts a password on a public address, so the host is private too."""
+        text = 'target "https://bench:s3cr3t@gpu-box.internal.example:8443/v1/chat"'
+        redacted = self.redact(text)
+        self.assertNotIn("s3cr3t", redacted)
+        self.assertNotIn("gpu-box.internal.example", redacted)
+        self.assertIn("/v1/chat", redacted)  # the protocol is not the contributor
+
+    def test_a_credential_field_is_emptied_and_a_token_count_is_not(self) -> None:
+        text = ('{"api_key": "sk-live-abcd", "access_token": "x9", "audio_tokens": null, '
+                '"prompt_tokens": 1024, "first_output_token_iteration": 1793895642.49}')
+        redacted = self.redact(text)
+        self.assertNotIn("sk-live-abcd", redacted)
+        self.assertNotIn('"x9"', redacted)
+        self.assertIn('"prompt_tokens": 1024', redacted)
+        self.assertIn('"audio_tokens": null', redacted)
+        self.assertIn('"first_output_token_iteration": 1793895642.49', redacted)
+
+    def test_an_absent_credential_is_not_given_one(self) -> None:
+        """Replacing `""` with a placeholder would claim a secret was there."""
+        self.assertIn('"api_key": ""', self.redact('{"api_key": ""}'))
+        self.assertIn('"api_key": null', self.redact('{"api_key": null}'))
+
+    def test_a_bearer_header_echoed_into_a_log_is_redacted(self) -> None:
+        redacted = self.redact("Authorization: Bearer eyJhbGciOi.J9.abcdefgh")
+        self.assertNotIn("eyJhbGciOi", redacted)
+        self.assertIn("Bearer <REDACTED_CREDENTIAL>", redacted)
+
+    def test_home_directories_go_whether_posix_or_windows(self) -> None:
+        redacted = self.redact("read /home/someone/x and C:\\Users\\Someone\\y and /Users/third/z")
+        for name in ("someone", "Someone", "third"):
+            self.assertNotIn(name, redacted)
+        self.assertEqual(redacted.count("<HOME>"), 3)
+
+    def test_the_run_directory_wins_over_the_checkout_and_the_home(self) -> None:
+        """Most specific first, or a staging path keeps somebody's layout."""
+        redacted = self.redact("/home/p/co/.omobench-runs/r/out.json",
+                               run_directory="/home/p/co/.omobench-runs/r", root="/home/p/co")
+        self.assertEqual(redacted, "<RUN_DIRECTORY>/out.json")
+
+    def test_a_loopback_address_nobody_declared_is_still_private(self) -> None:
+        self.assertIn("<LOCAL_ENDPOINT>", self.redact("connected to http://127.0.0.1:8099/v1"))
+
+    def test_the_scan_finds_every_rule_and_names_no_secret(self) -> None:
+        text = ('{"api_key": "sk-live-abcd"} https://u:p@box.example/v1 '
+                'http://127.0.0.1:8099 /home/someone/x')
+        findings = self.findings(text)
+        self.assertIn("a URL carrying credentials", findings)
+        self.assertIn('a credential in the field "api_key"', findings)
+        self.assertIn("a loopback address: http://127.0.0.1:8099", findings)
+        self.assertIn("a home directory: /home/someone", findings)
+        for secret in ("sk-live-abcd", "u:p@box.example"):
+            self.assertNotIn(secret, " ".join(findings))
+
+    def test_what_redaction_removes_the_scan_no_longer_finds(self) -> None:
+        text = ('{"api_key": "sk-live-abcd"} https://u:p@box.example/v1 '
+                'http://127.0.0.1:8099 /home/someone/x Authorization: Bearer abcdefghij')
+        self.assertEqual(self.findings(self.redact(text)), [])
+
+    def test_redacting_twice_changes_nothing_the_second_time(self) -> None:
+        text = '{"api_key": "sk-live-abcd"} http://127.0.0.1:8099 /home/someone/x'
+        once = self.redact(text)
+        self.assertEqual(self.redact(once), once)
+
+
+class RunEvidenceRedactionTests(unittest.TestCase):
+    """The same rules over a whole run directory, compressed report included."""
+
+    REPORT = ('{"metadata": {"guidellm_version": "0.7.3"}, "backend": '
+              '{"target": "http://127.0.0.1:8099", "api_key": "sk-live-abcd"}, '
+              '"output_path": "/home/someone/co/.omobench-runs/r/guidellm-benchmarks.json", '
+              '"metrics": {"ttft_ms": 32980.86, "requests": 28, "ratio": 0.5329}}')
+
+    def build(self, directory: Path) -> Path:
+        from omobench.cli import write_evidence_text
+
+        run = directory / "run-aaaabbbbcccc"
+        run.mkdir()
+        (run / "guidellm.stdout.log").write_text(
+            "writing /home/someone/co/.omobench-runs/r/out\n", encoding="utf-8")
+        (run / "environment.json").write_text('{"os": "Linux"}\n', encoding="utf-8")
+        (run / "reproduce.md").write_text("# how\n", encoding="utf-8")
+        write_evidence_text(run / "guidellm-benchmarks.json.gz", self.REPORT)
+        return run
+
+    def test_the_source_is_read_and_never_written(self) -> None:
+        from omobench.cli import redact_run_evidence, sha256_file
+
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.build(Path(directory))
+            before = {path.name: sha256_file(path) for path in sorted(run.iterdir())}
+            redact_run_evidence(run, Path(directory) / "out")
+            after = {path.name: sha256_file(path) for path in sorted(run.iterdir())}
+            self.assertEqual(before, after)
+
+    def test_the_compressed_report_is_unpacked_redacted_and_packed_again(self) -> None:
+        from omobench.cli import read_evidence_text, redact_run_evidence
+
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.build(Path(directory))
+            out = Path(directory) / "out"
+            report = redact_run_evidence(run, out)
+            text = read_evidence_text(out / "guidellm-benchmarks.json.gz")
+            self.assertTrue(report["guidellm-benchmarks.json.gz"]["changed"])
+            self.assertNotIn("sk-live-abcd", text)
+            self.assertNotIn("127.0.0.1", text)
+            self.assertNotIn("/home/someone", text)
+            # Every measurement in it survives, unrounded.
+            self.assertEqual(json.loads(text)["metrics"],
+                             {"ttft_ms": 32980.86, "requests": 28, "ratio": 0.5329})
+
+    def test_a_file_with_nothing_to_redact_keeps_its_hash(self) -> None:
+        """A hash that moves for no reason is a hash somebody has to explain."""
+        from omobench.cli import redact_run_evidence
+
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.build(Path(directory))
+            report = redact_run_evidence(run, Path(directory) / "out")
+            environment = report["environment.json"]
+            self.assertFalse(environment["changed"])
+            self.assertEqual(environment["source_sha256"], environment["distributable_sha256"])
+
+    def test_the_copy_is_scanned_rather_than_assumed_clean(self) -> None:
+        from omobench.cli import redact_run_evidence
+
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.build(Path(directory))
+            report = redact_run_evidence(run, Path(directory) / "out")
+            self.assertEqual([item for entry in report.values() for item in entry["remaining"]], [])
+
+    def test_the_same_evidence_redacted_twice_produces_the_same_bytes(self) -> None:
+        """gzip stores a timestamp; a recorded hash must not depend on the clock."""
+        from omobench.cli import redact_run_evidence, sha256_file
+
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.build(Path(directory))
+            first = Path(directory) / "first"
+            second = Path(directory) / "second"
+            redact_run_evidence(run, first)
+            redact_run_evidence(run, second)
+            for name in ("guidellm-benchmarks.json.gz", "guidellm.stdout.log"):
+                self.assertEqual(sha256_file(first / name), sha256_file(second / name))
+
+    def test_the_checkout_is_found_from_the_run_directory_not_from_here(self) -> None:
+        """An old run was staged in a different checkout from the one redacting it."""
+        from omobench.cli import checkout_above
+
+        self.assertEqual(
+            checkout_above(Path("/home/p/their-checkout/.omobench-runs/ui/job-1/run-2")),
+            Path("/home/p/their-checkout"))
+        self.assertIsNone(checkout_above(Path("/tmp/somewhere/run-2")))
+
+    def test_a_scan_reads_the_compressed_report_too(self) -> None:
+        """The file with the most of a contributor's machine in it is the packed one."""
+        from omobench.cli import scan_evidence_privacy
+
+        with tempfile.TemporaryDirectory() as directory:
+            run = self.build(Path(directory))
+            findings = scan_evidence_privacy(run)
+            self.assertIn('a credential in the field "api_key"',
+                          findings["guidellm-benchmarks.json.gz"])
+            self.assertEqual(findings["environment.json"], [])
 
 
 GUIDELLM_MODULE_STUB = (

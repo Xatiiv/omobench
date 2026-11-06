@@ -226,6 +226,58 @@ the same run once with a source and once without produces two different
 configurations. Omitting `--model-source` leaves `model` exactly as before, the fingerprint for a run packaged without a source is unaffected by this
 option's existence.
 
+## Evidence that does not name you
+
+A benchmark run writes down more than it measures. The runner records the
+address it connected to and the path it wrote its own report to; the
+reproduce instructions quote the command, output path and all. Left alone,
+those publish a loopback port, a home directory and a checkout layout, and on
+a server configured with a key they can publish the key.
+
+Runs made from a current checkout are redacted as they are written — before
+the raw report is compressed, and therefore before it is hashed, so the
+published bytes and the recorded hash still agree. Four kinds of thing go:
+
+| In the evidence | Becomes |
+| --- | --- |
+| The endpoint this run was measured against | `<LOCAL_ENDPOINT>` |
+| Any URL carrying credentials, host and all | `<LOCAL_ENDPOINT>` |
+| Any other loopback address | `<LOCAL_ENDPOINT>` |
+| An `api_key`, `access_token`, `secret` … field, or a `Bearer` header | `<REDACTED_CREDENTIAL>` |
+| The staging directory, the checkout, a home directory | `<RUN_DIRECTORY>`, `<CHECKOUT>`, `<HOME>` |
+
+Measurements are never touched. A field name like `prompt_tokens` or
+`first_output_token_iteration` is not a credential and is left exactly as the
+runner wrote it.
+
+### Evidence collected before that
+
+Redaction at write time cannot reach backwards, and a run that already
+happened is hours of real measurement that nothing would be gained by taking
+again. Pass it through the same rules into a copy:
+
+```bash
+omobench scan-evidence --run-dir .omobench-runs/ui/job-<id>/run-<id>
+omobench redact --run-dir .omobench-runs/ui/job-<id>/run-<id> \
+                --output-dir .omobench-runs/run-<id>-redacted
+```
+
+`redact` reads the original and never writes to it. It prints each
+distributable file's hash before and after, unpacks and repacks the
+compressed report rather than skipping it, copies a file with nothing to
+redact byte for byte so its hash does not move for no reason, and then scans
+what it produced — a redaction nobody checked is not a redaction. Package
+from the copy as usual.
+
+`scan-evidence` changes nothing and can be run on anything, including a
+bundle somebody else produced. `omobench repackage` refuses evidence that
+still carries this material rather than rewriting it, because it copies bytes
+and records their hashes as proof the derived bundle carries the same
+measurements.
+
+Neither command knows what a prompt or a model's own output may contain.
+Review the five files before submitting either way.
+
 ## Repeats and duplicates
 
 A `configuration_fingerprint` is a SHA-256 digest of the normalized model

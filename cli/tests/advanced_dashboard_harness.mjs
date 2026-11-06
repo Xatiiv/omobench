@@ -75,6 +75,12 @@ const WORKFLOW = {
   checks: [
     { id: "runner", label: "The benchmark runner can start here", state: "ok",
       observed: "ready", source: "this machine", blocks: "run", recovery: "", detail: "", field: null },
+    // Severe without being a failure: the pair of states the memory reading
+    // produces, and the one the shared view has to render differently.
+    { id: "memory", label: "Memory to spare in the WSL environment running this panel",
+      state: "attention", observed: "0.26 GB available of 7.85 GB allocated to this WSL environment",
+      source: "this machine", blocks: "run", recovery: "fixture memory recovery",
+      detail: "fixture memory detail", field: null, severity: "severe" },
     { id: "catalog", label: "Canonical model ID is in the OmoBench catalog", state: "attention",
       observed: "Qwen/Qwen3-VL-4B-Instruct", source: "you", blocks: "submit",
       recovery: "fixture catalog recovery", detail: "fixture catalog detail", field: "model" },
@@ -242,6 +248,11 @@ function snapshot() {
     startOverHidden: get("start-over-button").hidden,
     errorHidden: get("run-error").hidden,
     error: get("run-error").textContent,
+    runGate: get("gate-run").children.map((item) => ({
+      className: item.className,
+      parts: item.children.map((part) => part.className || part.id),
+      text: item.children.map((part) => part.textContent),
+    })),
     metricsHidden: get("metrics").hidden,
     metricCount: get("metrics").children.length,
     exportHidden: get("download-summary").hidden,

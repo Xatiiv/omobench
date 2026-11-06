@@ -148,18 +148,38 @@ successful measured requests with **no errors at all** and still fell short of
 the 40 the profile requires. Most of its requests took 43 to 77 seconds — but
 five of the thirty-three took 297, 436, 509, 718 and 1,621 seconds, and
 between those stalls the run went back to its usual speed. That is not a slow
-processor and it is not thermal decline, both of which are gradual. It is
-paging: the host had 0.26 GB of memory available with its swap entirely full,
-and the model server alone was resident at 6.9 GB of 7.85 GB, because the
-server and the benchmark runner were sharing one small virtual machine.
+processor and it is not thermal decline, both of which are gradual. The
+environment it ran in had 0.26 GB of memory available with its swap entirely
+full.
+
+What that environment was is the point. The benchmark ran inside a WSL
+distribution with a 7.49 GB allocation on a computer with 15.46 GB installed,
+and that one allocation was holding the model server, the benchmark runner,
+a second panel, a website build and a site server at the same time. Measured
+since, on the same machine with nothing else running, the managed server by
+itself is resident at **4.30 GB and leaves 4.51 GB available with swap
+untouched**. The shortfall was what the environment was asked to hold, not
+what the model costs.
 
 So a host like that does not need a profile with weaker criteria; the numbers
-it produces are not describing the inference stack. This is why the panel
-reads out what the machine has left before the run, and why a host under
-memory pressure is told that a server and a runner competing for memory
-measure the paging. The check never stops a run — a contributor may know
-exactly why their machine looks like that — and no acceptance threshold moves
-because of it.
+it produced are not describing the inference stack. This is why the panel
+reads out what the environment has left before the run — and why it says
+*which* environment, because inside WSL that total is an allocation rather
+than the computer's memory, and on a bridged run the model is served on a
+machine this reading knows nothing about. Severe pressure is marked as
+severe. The check never stops a run — a contributor may know exactly why
+their environment looks like that — and no acceptance threshold moves because
+of it.
+
+Nor does the panel act on it. Swap filling up means the kernel has had to
+move pages out at some point; Linux also swaps idle pages out on a
+comfortable host, so a full swap file is not by itself proof that a run is
+paging. The choices are stated and left to the contributor: close what else
+is resident, serve a smaller model if one is installed, give the distribution
+more memory (a `memory=` line in `%USERPROFILE%\.wslconfig` and
+`wsl --shutdown` — OmoBench does not write that file), or serve the model
+elsewhere and measure it across the bridge. Nothing is changed and no process
+is stopped on anybody's behalf.
 
 The panel now says all of this on the page, before the run: what the profile
 executes, when it stops, how much time the budget allows per request, what
