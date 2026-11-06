@@ -186,13 +186,31 @@ class InvocationTests(unittest.TestCase):
     def test_plain_runner_secret_uses_stdin_not_argv(self):
         import tempfile
         with tempfile.TemporaryDirectory() as directory:
-            with patch.object(cli.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+            # The plain path launches with Popen, so the supervisor has
+            # something to stop, and hands the secret to communicate() rather
+            # than to the command line. Both halves are checked here.
+            sent = {}
+
+            class FakeProcess:
+                returncode, pid, stdin = 0, 4242, None
+
+                def communicate(self, **kwargs):
+                    sent.update(kwargs)
+                    return ("", "")
+
+                def poll(self):
+                    return 0
+
+                def wait(self, timeout=None):
+                    return 0
+
+            with patch.object(cli.subprocess, "Popen", return_value=FakeProcess()) as run:
                 cli._run_guidellm_command(["guidellm", "run", "--backend", "kind=openai_http"],
                     log_path=Path(directory) / "log", root=Path(directory), profile_id="chat-small-v2",
                     telemetry_dir=None, bridge_credentials={"endpoint": "http://127.0.0.1:3456", "token": "secret-canary"})
-                args, kwargs = run.call_args
+                args, _kwargs = run.call_args
                 self.assertNotIn("secret-canary", str(args))
-                self.assertIn("secret-canary", kwargs["input"])
+                self.assertIn("secret-canary", sent["input"])
                 self.assertEqual(args[0][1:3], ["-m", "omobench.bridge_runner"])
 
     def test_ui_rejects_arbitrary_transport_selection(self):

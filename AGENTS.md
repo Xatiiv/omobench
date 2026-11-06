@@ -107,6 +107,17 @@ See [provenance.md](docs/provenance.md).
   estimate how long a particular machine will take.
 - Anything after the benchmark must be retryable without re-running it. A
   refused bundle or a failed submission leaves every evidence file untouched.
+- Four limits bound a run and they are not interchangeable: an inactivity
+  timeout (the gap between two chunks), a request deadline (one request end to
+  end), a measurement ceiling (when new work stops), and a shutdown grace. The
+  pinned runner enforces the first with an httpx *read* timeout and evaluates
+  the third only while handling a request update, so OmoBench supervises the
+  rest from outside. A supervisor inside a suspended machine does not run
+  either: never claim a wall-clock termination guarantee. Wall clock against
+  monotonic clock is the only evidence of an interruption -- never a slow
+  model response -- and suspended time is reported, never subtracted. A
+  confirmed suspension blocks publication and ranking, never diagnosis. See
+  [bounded-execution.md](docs/bounded-execution.md).
 - A reading of a machine names the environment it describes. Inside WSL,
   `MemTotal` is what Windows allocated to the distribution, not the memory
   installed in the computer, and on a bridged run the serving host is a
@@ -179,7 +190,7 @@ Keep localhost/token/origin protections and the one-panel-per-checkout lock.
 | `app/` | Results website |
 | `windows/companion/` | Windows companion that opens the existing panel from the website's `omobench://` link; see [windows-companion.md](docs/windows-companion.md) |
 | `windows/installer/` | Downloadable Windows installer that installs the companion and prepares an environment; see [windows-installer.md](docs/windows-installer.md) |
-| `docs/` | Contributor and submission documentation; see [guided-workflow.md](docs/guided-workflow.md) and [provenance.md](docs/provenance.md) |
+| `docs/` | Contributor and submission documentation; see [guided-workflow.md](docs/guided-workflow.md), [provenance.md](docs/provenance.md) and [bounded-execution.md](docs/bounded-execution.md) |
 
 ## Safe change workflow
 

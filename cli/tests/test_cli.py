@@ -585,6 +585,31 @@ class ConflictingPathExecutableTests(unittest.TestCase):
         self.assertIn("live telemetry unavailable", self.log_path.read_text(encoding="utf-8"))
 
 
+class FakeRunnerProcess:
+    """A runner the supervisor could signal, if it ever needed to.
+
+    The plain-subprocess path uses Popen rather than run() so that the
+    execution supervisor has a process group to stop; these tests are about
+    *how many times* a benchmark is invoked, so the stand-in only has to
+    finish immediately and say what its exit code was.
+    """
+
+    def __init__(self, returncode: int = 0) -> None:
+        self.returncode = returncode
+        self.pid = 4242
+        self.stdin = None
+        self.signals: list[int] = []
+
+    def communicate(self, **_kwargs):
+        return ("", "")
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
 class TelemetryFallbackBoundaryTests(unittest.TestCase):
     """Fallback is for failures *before* the benchmark is invoked. After that,
     an error must never start a second run or truncate the first one's log."""
@@ -601,7 +626,7 @@ class TelemetryFallbackBoundaryTests(unittest.TestCase):
 
         with patch.object(
             telemetry_module, "run_generative_benchmark_with_telemetry", side_effect=telemetry_side_effect
-        ), patch("omobench.cli.subprocess.run", subprocess_mock):
+        ), patch("omobench.cli.subprocess.Popen", subprocess_mock):
             return run_guidellm_command(
                 ["guidellm", "run", "--backend", "x"],
                 log_path=self.log_path, root=self.root,
@@ -611,7 +636,7 @@ class TelemetryFallbackBoundaryTests(unittest.TestCase):
     def test_a_setup_failure_before_execution_falls_back_exactly_once(self) -> None:
         from omobench import telemetry as telemetry_module
 
-        subprocess_mock = Mock(return_value=subprocess.CompletedProcess(args=[], returncode=0))
+        subprocess_mock = Mock(return_value=FakeRunnerProcess())
         outcome = self._run(telemetry_module.TelemetryUnavailable("could not attach"), subprocess_mock)
         self.assertEqual(outcome.returncode, 0)
         self.assertTrue(outcome.evidence_log_finalized)
@@ -628,7 +653,7 @@ class TelemetryFallbackBoundaryTests(unittest.TestCase):
             Path(kwargs["stdout_log_path"]).write_text(evidence, encoding="utf-8")
             raise OSError(5, "Input/output error")
 
-        subprocess_mock = Mock(return_value=subprocess.CompletedProcess(args=[], returncode=0))
+        subprocess_mock = Mock(return_value=FakeRunnerProcess())
         with self.assertRaises(OSError):
             self._run(already_executed, subprocess_mock)
         subprocess_mock.assert_not_called()
@@ -639,7 +664,7 @@ class TelemetryFallbackBoundaryTests(unittest.TestCase):
 
     def test_an_unexpected_error_after_execution_never_starts_a_second_run(self) -> None:
         """Any non-TelemetryUnavailable error is treated as post-invocation."""
-        subprocess_mock = Mock(return_value=subprocess.CompletedProcess(args=[], returncode=0))
+        subprocess_mock = Mock(return_value=FakeRunnerProcess())
         with self.assertRaises(RuntimeError):
             self._run(RuntimeError("something went wrong mid-run"), subprocess_mock)
         subprocess_mock.assert_not_called()
@@ -656,7 +681,7 @@ class TelemetryFallbackBoundaryTests(unittest.TestCase):
             Path(kwargs["stdout_log_path"]).write_text(evidence, encoding="utf-8")
             return EVIDENCE_FINALIZATION_EXIT_CODE
 
-        subprocess_mock = Mock(return_value=subprocess.CompletedProcess(args=[], returncode=0))
+        subprocess_mock = Mock(return_value=FakeRunnerProcess())
         outcome = self._run(already_executed, subprocess_mock)
         self.assertEqual(outcome.returncode, EVIDENCE_FINALIZATION_EXIT_CODE)
         self.assertFalse(outcome.evidence_log_finalized, "the caller must be told explicitly, not left to infer")
@@ -669,8 +694,8 @@ class TelemetryFallbackBoundaryTests(unittest.TestCase):
 
         blocker = self.root / "telemetry"
         blocker.write_text("not a directory", encoding="utf-8")
-        subprocess_mock = Mock(return_value=subprocess.CompletedProcess(args=[], returncode=0))
-        with patch("omobench.cli.subprocess.run", subprocess_mock):
+        subprocess_mock = Mock(return_value=FakeRunnerProcess())
+        with patch("omobench.cli.subprocess.Popen", subprocess_mock):
             outcome = run_guidellm_command(
                 ["guidellm", "run", "--backend", "x"],
                 log_path=self.log_path, root=self.root,

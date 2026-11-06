@@ -430,4 +430,46 @@ results.historyActiveTab = {
   noReview: reviewRequests.length === reviewsBeforeActiveTab,
   progressVisible: !get("progress-panel").hidden && !get("screen-run").hidden,
 };
+// What this environment has left, on the screen where a managed run is
+// actually started -- not only on the advanced panel's gate lists. Rendered
+// by the shared view, from the same /api/workflow answer.
+const environmentFixture = {
+  checks: [
+    { id: "memory", label: "Memory to spare in the WSL environment running this panel",
+      state: "attention", observed: "0.26 GB available of 7.49 GB allocated to this WSL environment",
+      source: "this machine", blocks: "run", recovery: "Severe: fixture recovery",
+      detail: "fixture memory detail", field: null, severity: "severe" },
+    { id: "wsl-host", label: "What this reading cannot see", state: "attention",
+      observed: "a WSL distribution; its Windows host is not readable from in here",
+      source: "this machine", blocks: null, recovery: "fixture host recovery",
+      detail: "fixture host detail", field: null, severity: null },
+    { id: "runner", label: "The benchmark runner can start here", state: "ok",
+      observed: "ready", source: "this machine", blocks: "run", recovery: "", detail: "",
+      field: null, severity: null },
+  ],
+};
+runInContext(
+  "selectedRecipeId = 'fixture-recipe'; recipesById = { 'fixture-recipe': "
+  + "{ model_id: 'Fixture/Model', benchmark_profile: 'chat-small-extended-v1',"
+  + " execution_device: 'cpu' } };", context);
+const environmentRequests = [];
+context.fetch = async (path, options) => {
+  environmentRequests.push({ path, method: options?.method || "GET" });
+  if (path !== "/api/workflow") throw new Error(`unexpected request: ${path}`);
+  return { ok: true, json: async () => environmentFixture };
+};
+await context.renderEnvironmentNotes();
+results.environmentNotes = {
+  hidden: get("environment-notes").hidden,
+  items: get("environment-notes").children.map((li) => ({
+    className: li.className,
+    text: li.children.map((part) => part.textContent),
+  })),
+  requests: environmentRequests.map((entry) => `${entry.method} ${entry.path}`),
+};
+// A page that cannot reach the panel still reviews: none of this stops a run.
+context.fetch = async () => { throw new Error("offline"); };
+await context.renderEnvironmentNotes();
+results.environmentNotesSurviveFailure = get("environment-notes").children.length;
+
 process.stdout.write(JSON.stringify(results));

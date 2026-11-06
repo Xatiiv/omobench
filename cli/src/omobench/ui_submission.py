@@ -85,10 +85,22 @@ def validate_bundle(root: Path, run: Path) -> list[str]:
 # the registry will not take -- which is a different fact from a bundle that
 # could not be built, and the two must not be collapsed.
 ACCEPTANCE_MARKER = ": acceptance: "
+INTERRUPTION_MARKER = ": interruption: "
+# The two reasons the registry refuses a bundle that is otherwise complete and
+# schema-valid: it did not measure enough, or what it measured is not about
+# the model because the machine was suspended partway through. Both stop
+# publication. Neither is a reason to stop somebody looking at their own
+# evidence -- which is the one view that lets them check it for secrets, and
+# the only way to work out what went wrong.
+DIAGNOSABLE_MARKERS = (ACCEPTANCE_MARKER, INTERRUPTION_MARKER)
+
+
+def diagnosable(error: str) -> bool:
+    return any(marker in error for marker in DIAGNOSABLE_MARKERS)
 
 
 def acceptance_only(errors: list[str]) -> bool:
-    return bool(errors) and all(ACCEPTANCE_MARKER in error for error in errors)
+    return bool(errors) and all(diagnosable(error) for error in errors)
 
 
 def bundle_snapshot(root: Path, run: Path, *,
@@ -231,7 +243,7 @@ def prepare_submission(root: Path, run: Path) -> dict:
     result, contents, digest = bundle_snapshot(root, run, allow_unacceptable=True)
     prefix = destination(result)
     title, body = description(result, prefix)
-    unacceptable = [error for error in validate_bundle(root, run) if ACCEPTANCE_MARKER in error]
+    unacceptable = [error for error in validate_bundle(root, run) if diagnosable(error)]
     preview = {"files": [{"path": f"{prefix}/{name}", "bytes": len(content),
                           "sha256": hashlib.sha256(content).hexdigest()} for name, content in contents.items()],
                "result": result, "title": title, "body": body, "bundle_digest": digest,

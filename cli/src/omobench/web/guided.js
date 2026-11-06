@@ -278,6 +278,7 @@ async function doReview() {
   try {
     reviewReport = await api("/api/managed/review", { recipe: selectedRecipeId, storage_dir: storageDir });
     renderSummary(reviewReport);
+    await renderEnvironmentNotes();
   } catch (error) {
     $("storage-error").hidden = false;
     $("storage-error").textContent = error.message;
@@ -286,6 +287,21 @@ async function doReview() {
     $("summary-checking").hidden = true;
     $("summary-body").hidden = false;
   }
+}
+
+// What this environment has left, and what that reading does not cover, said
+// on the screen where a managed run is started rather than only on the
+// advanced panel's gate lists. Same computation, same renderer; failing to
+// fetch it leaves the review alone, because none of it stops a run.
+async function renderEnvironmentNotes() {
+  const recipe = recipesById[selectedRecipeId];
+  const report = await api("/api/workflow", {
+    model: recipe ? recipe.model_id : "",
+    profile: recipe ? recipe.benchmark_profile : "",
+    execution_device: recipe ? recipe.execution_device : "cpu",
+    windows_bridge: false,
+  }).catch(() => null);
+  if (report) workflowView.renderSelected(report, "environment-notes", ["memory", "wsl-host"]);
 }
 
 function renderSummary(report) {

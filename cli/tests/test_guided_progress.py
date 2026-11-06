@@ -259,6 +259,29 @@ class GuidedLocalExportTests(unittest.TestCase):
         self.assertTrue(state["evidenceVisible"])
         self.assertEqual(state["evidenceSections"], ["Which model, and which weights"])
 
+    def test_the_review_screen_says_what_this_environment_has_left(self):
+        """Said where the run is started, not only on the advanced panel.
+
+        A managed run is begun from this screen, so the reading belongs on
+        it -- severe pressure marked as severe, and the note about what a
+        reading taken inside WSL cannot cover. Both come from the same
+        /api/workflow answer the gate lists use and through the same
+        renderer, so the two pages cannot drift.
+        """
+        notes = self.states["environmentNotes"]
+        self.assertFalse(notes["hidden"])
+        self.assertEqual(notes["requests"], ["POST /api/workflow"])
+        self.assertEqual([item["className"] for item in notes["items"]],
+                         ["status-item pending severe", "status-item pending"])
+        severe, host = notes["items"]
+        self.assertEqual(severe["text"][0], "Severe")
+        self.assertIn("allocated to this WSL environment", " ".join(severe["text"]))
+        self.assertIn("not readable from in here", " ".join(host["text"]))
+
+    def test_a_panel_it_cannot_reach_does_not_stop_the_review(self):
+        """None of this blocks a run, so none of it may block the screen."""
+        self.assertEqual(self.states["environmentNotesSurviveFailure"], 2)
+
     def test_the_share_screen_lists_every_publication_requirement(self):
         checklist = self.states["publicationChecklist"]
         self.assertIn("fail:Canonical model ID is in the OmoBench catalog", checklist["items"])

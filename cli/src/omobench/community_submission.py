@@ -90,14 +90,15 @@ def check_previous(state, actor, digest):
 
 
 def prepare_community(root: Path, run: Path, session, state: dict):
-    # The same rule as the origin route: a bundle the registry will refuse on
-    # its acceptance thresholds can still be looked at by the person who made
-    # it. submit_community() below stays strict.
+    # The same rule as the origin route: a bundle the registry will refuse --
+    # because it did not measure enough, or because the machine was suspended
+    # while it did -- can still be looked at by the person who made it.
+    # submit_community() below stays strict.
     result, contents, digest = bundle_snapshot(root, run, allow_unacceptable=True)
     prefix = destination(result)
     title, body = description(result, prefix)
-    from .ui_submission import ACCEPTANCE_MARKER, validate_bundle
-    unacceptable = [error for error in validate_bundle(root, run) if ACCEPTANCE_MARKER in error]
+    from .ui_submission import diagnosable, validate_bundle
+    unacceptable = [error for error in validate_bundle(root, run) if diagnosable(error)]
     preview = {"mode": "community", "files": [
         {"path": f"{prefix}/{name}", "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
         for name, data in contents.items()], "result": result, "title": title, "body": body,

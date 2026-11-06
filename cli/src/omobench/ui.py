@@ -25,7 +25,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-from . import cli, workflow
+from . import cli, execution, workflow
 
 
 JOB_ID = re.compile(r"^job-[a-f0-9]{16}$")
@@ -939,6 +939,7 @@ class Controller:
             tokenizer_report=loaded, tokenizer_source=tokenizer or model,
             memory=cli.memory_pressure(),
             bridged=bool(values.get("windows_bridge", False)),
+            sleep_prevention=execution.sleep_prevention_availability(),
         ) + self.requirement_checks(job or self._preview_job(model, values), values)
         proposal = self.proposal_status(values) if model else None
         identity_settled = bool(model) and (

@@ -162,6 +162,92 @@
         }
       }
     },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "limits", "interruption"],
+      "description": "Schema 1.1 only. How this run was bounded, and whether the machine executed throughout it. Present only when the run itself recorded it: a bundle packaged from evidence collected before this contract existed has nothing to say here, and nothing may be inferred for it afterwards.",
+      "properties": {
+        "contract": {
+          "enum": ["bounded-execution-v1"],
+          "description": "Which set of execution rules bounded this run. Versioned so a change to what a run does is visible, rather than silently applied to results that predate it."
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["inactivity_timeout_seconds", "request_deadline_seconds", "measurement_ceiling_seconds", "shutdown_grace_seconds"],
+          "description": "Four limits, named for what each one bounds. They are not interchangeable: the inactivity timeout bounds the gap between two chunks of one response and is the runner's HTTP client's, while the request deadline bounds a whole request however lively its stream.",
+          "properties": {
+            "inactivity_timeout_seconds": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+            "request_deadline_seconds": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+            "measurement_ceiling_seconds": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+            "shutdown_grace_seconds": { "type": "number", "exclusiveMinimum": 0 }
+          }
+        },
+        "supervisor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["fired"],
+          "description": "Whether an independent timer had to stop this run, and whether asking politely was enough.",
+          "properties": {
+            "fired": { "type": "boolean" },
+            "reason": { "enum": ["measurement-window-overrun", "request-deadline-exceeded", null] },
+            "escalated": { "type": "boolean" },
+            "at_seconds": { "type": ["number", "null"], "minimum": 0 },
+            "anchor": {
+              "enum": ["measurement-start", "run-start"],
+              "description": "What the measurement window was counted from. The runner's ceiling starts at its first request, so loading weights and building a dataset belong to neither the ceiling nor the grace; 'run-start' means the run never reported a first request and the fallback applied."
+            },
+            "detail": { "type": "string" }
+          }
+        },
+        "interruption": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state"],
+          "description": "Whether wall-clock time passed that this environment did not execute through. Evidence, never a correction: suspended time is never subtracted from a measured latency.",
+          "properties": {
+            "state": {
+              "enum": ["none", "gap", "clock-jump", "suspended"],
+              "description": "Ordered by how much each one claims. 'suspended' is confirmed, and only the kernel's own suspend record (CLOCK_BOOTTIME against CLOCK_MONOTONIC) earns it. 'clock-jump' is the wall clock disagreeing with the monotonic clock while the kernel says nothing happened: from inside that has two causes which cannot be told apart -- the environment was paused without being told, or the wall clock was stepped -- so it is reported as unexplained rather than promoted. 'gap' is a scheduling delay, where the clocks agreed and something merely did not get to run."
+            },
+            "observed_seconds": { "type": "number", "minimum": 0 },
+            "longest_seconds": { "type": "number", "minimum": 0 },
+            "method": { "type": "string" },
+            "events": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["kind", "seconds", "started_at", "ended_at"],
+                "properties": {
+                  "kind": { "enum": ["gap", "clock-jump", "suspended"] },
+                  "seconds": { "type": "number", "minimum": 0 },
+                  "started_at": { "type": "string", "format": "date-time" },
+                  "ended_at": { "type": "string", "format": "date-time" },
+                  "wall_seconds": { "type": "number" },
+                  "monotonic_seconds": { "type": "number" },
+                  "boottime_seconds": { "type": ["number", "null"] }
+                }
+              }
+            }
+          }
+        },
+        "sleep_prevention": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["requested", "held"],
+          "description": "Whether the host was asked to stay awake for this run, and whether it agreed. A granted request is not a guarantee: a lid, a battery, a policy or a person can still suspend a machine.",
+          "properties": {
+            "requested": { "type": "boolean" },
+            "held": { "type": "boolean" },
+            "mechanism": { "type": ["string", "null"] },
+            "request": { "enum": ["execution-required", "system-required", null] },
+            "detail": { "type": "string" }
+          }
+        }
+      }
+    },
     "model": {
       "type": "object",
       "additionalProperties": false,
@@ -420,7 +506,10 @@
         "required": ["schema_version"]
       },
       "then": {
-        "not": { "required": ["environment"] },
+        "allOf": [
+          { "not": { "required": ["environment"] } },
+          { "not": { "required": ["execution"] } }
+        ],
         "properties": {
           "model": {
             "allOf": [

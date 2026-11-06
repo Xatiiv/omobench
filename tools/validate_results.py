@@ -191,6 +191,77 @@ def safe_artifact_path(result_path: Path, artifact_path: str) -> Path | None:
     return candidate
 
 
+def execution_errors(relative: Path, result: dict[str, Any]) -> list[str]:
+    """What a run's own execution record has to be consistent about.
+
+    Three separate things, and the registry keeps them separate.
+
+    A measurement taken while the machine was suspended is not a measurement
+    of the model. The benchmark cannot tell a paused virtual machine from slow
+    inference -- it records the wait as latency -- so a confirmed suspension
+    makes the numbers describe the host's power state. That is refused here,
+    and it is refused *for a different reason* than falling short of a
+    profile's thresholds: the bundle is schema-valid, its evidence is intact,
+    and it stays downloadable, inspectable and packageable. It is the
+    publishing that stops.
+
+    An unexplained scheduling gap is not refused. Something did not get to run
+    for a while, which is a question about a busy machine rather than an
+    answer about a suspended one, and treating a question as a verdict would
+    quietly throw away good results from loaded hardware.
+
+    And the record has to agree with itself, because a state nobody can check
+    against its own evidence is just an assertion.
+    """
+    execution = result.get("execution")
+    if not isinstance(execution, dict):
+        return []
+    errors: list[str] = []
+    interruption = execution.get("interruption") or {}
+    state = interruption.get("state")
+    events = interruption.get("events") or []
+    kinds = {event.get("kind") for event in events if isinstance(event, dict)}
+    severity = ["none", "gap", "clock-jump", "suspended"]
+
+    if state in {"suspended", "clock-jump", "gap"} and state not in kinds:
+        errors.append(
+            f"{relative}: execution.interruption: state is {state!r} but no event of that kind "
+            "is recorded; the state has to be derived from the evidence beside it")
+    if state == "none" and events:
+        errors.append(
+            f"{relative}: execution.interruption: state is 'none' but {len(events)} interruption "
+            "event(s) are recorded")
+    if state in severity:
+        worse = [kind for kind in kinds
+                 if kind in severity and severity.index(kind) > severity.index(state)]
+        if worse:
+            errors.append(
+                f"{relative}: execution.interruption: state is {state!r} but {sorted(worse)} "
+                "is recorded; the worst thing observed is what the state reports")
+
+    seconds = interruption.get("observed_seconds")
+    amount = seconds if seconds is not None else "an unrecorded number of"
+    if state == "suspended":
+        errors.append(
+            f"{relative}: interruption: this run was suspended for {amount} seconds while it "
+            "was measuring, so its latencies include time the machine was not running; a "
+            "suspended measurement is not a measurement of the model and is not published. "
+            "The bundle is otherwise valid and stays available for diagnosis")
+    elif state == "clock-jump":
+        # Deliberately not called a suspension. Two clocks disagreed and the
+        # kernel recorded no suspend, which from inside the machine could be
+        # either a pause it was never told about or an adjusted wall clock.
+        # Either way nothing here establishes that it was running throughout,
+        # and a measurement that might contain a pause is not one to publish.
+        errors.append(
+            f"{relative}: interruption: this run's wall clock and monotonic clock disagreed by "
+            f"{amount} seconds while it was measuring, and the kernel recorded no suspend. That "
+            "is either a pause this environment was not told about or an adjusted clock, and "
+            "nothing here can tell which, so it is not established that the machine was running "
+            "throughout. Not published; the bundle stays available for diagnosis")
+    return errors
+
+
 def transport_errors(relative: Path, result: dict[str, Any], snapshot: dict[str, Any]) -> list[str]:
     """Reconcile the transport a result declares with the transport its evidence recorded.
 
@@ -501,6 +572,8 @@ def validate_result(
                 errors.append(f"{relative}: environment_snapshot: cannot establish transport provenance from a readable JSON object under 1 MiB")
             else:
                 errors.extend(transport_errors(relative, result, snapshot))
+
+    errors.extend(execution_errors(relative, result))
 
     # Publication acceptance: distinct from the checks above. A schema-valid,
     # hash-correct bundle with intact evidence still may not meet its own

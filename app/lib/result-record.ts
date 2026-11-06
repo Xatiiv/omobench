@@ -34,6 +34,23 @@ export type ServingEnvironment = {
   settings: Array<{ name: string; provenance: Provenance; value: string }>;
 };
 
+export type ExecutionRecord = {
+  contract: string;
+  limits: {
+    inactivityTimeoutSeconds: number | null;
+    measurementCeilingSeconds: number | null;
+    requestDeadlineSeconds: number | null;
+    shutdownGraceSeconds: number | null;
+  };
+  interruption: {
+    longestSeconds: number | null;
+    observedSeconds: number | null;
+    state: "none" | "gap" | "clock-jump" | "suspended";
+  };
+  sleepPrevention: { detail: string; held: boolean; requested: boolean } | null;
+  supervisor: { detail: string; escalated: boolean; fired: boolean; reason: string | null } | null;
+};
+
 export type Fact = { provenance: Provenance; value: string | null };
 export type NumericFact = { provenance: Provenance; value: number | null };
 
@@ -93,6 +110,11 @@ export type ResultRecord = {
   // reconstructed from the runner's own environment: on a bridged run those
   // are different machines.
   serving: ServingEnvironment | null;
+  // How the run was bounded, and whether the machine executed throughout it.
+  // Absent on a 1.0 result and on any run recorded before the execution
+  // contract existed; absent means nobody looked, never that nothing
+  // happened.
+  execution: ExecutionRecord | null;
   servedModelId: string | null;
   tokenizer: TokenizerIdentity | null;
   // A 1.0 result could only be published as a direct run -- the registry
@@ -231,6 +253,65 @@ function readNumericFact(value: unknown, label: string, sourcePath: string): Num
   if (typeof inner !== "number" || !Number.isFinite(inner) || inner <= 0) throw new Error(`Local result ${sourcePath} has an invalid ${label} value.`);
   if (provenance === "unknown") throw new Error(`Local result ${sourcePath} records a known ${label} as unknown.`);
   return { provenance, value: inner };
+}
+
+// Absent is a real answer here and the common one: every result published
+// before the execution contract existed has nothing to say, and a 1.0 bundle
+// may not carry it at all. Nothing is filled in for them — "nobody looked" and
+// "nothing happened" are different claims, and only the run could have made
+// the second.
+function readExecution(
+  value: JsonObject,
+  schemaVersion: SchemaVersion,
+  sourcePath: string,
+): ExecutionRecord | null {
+  const execution = value.execution;
+  if (execution === undefined || execution === null) return null;
+  if (schemaVersion !== "1.1") {
+    throw new Error(`Local result ${sourcePath} is schema 1.0 and cannot carry an execution record.`);
+  }
+  if (!isObject(execution)) throw new Error(`Local result ${sourcePath} has an invalid execution record.`);
+  const limits = objectField(execution, "limits", sourcePath);
+  const interruption = objectField(execution, "interruption", sourcePath);
+  const state = interruption.state;
+  // An unrecognised state is refused rather than treated as "none": a value
+  // this code does not understand is not one it can clear for ranking.
+  if (state !== "none" && state !== "gap" && state !== "clock-jump" && state !== "suspended") {
+    throw new Error(`Local result ${sourcePath} has an unknown interruption state.`);
+  }
+  const sleep = execution.sleep_prevention;
+  const supervisor = execution.supervisor;
+  const number = (field: unknown): number | null =>
+    typeof field === "number" && Number.isFinite(field) ? field : null;
+  return {
+    contract: typeof execution.contract === "string" ? execution.contract : "",
+    limits: {
+      inactivityTimeoutSeconds: number(limits.inactivity_timeout_seconds),
+      measurementCeilingSeconds: number(limits.measurement_ceiling_seconds),
+      requestDeadlineSeconds: number(limits.request_deadline_seconds),
+      shutdownGraceSeconds: number(limits.shutdown_grace_seconds),
+    },
+    interruption: {
+      longestSeconds: number(interruption.longest_seconds),
+      observedSeconds: number(interruption.observed_seconds),
+      state,
+    },
+    sleepPrevention: isObject(sleep)
+      ? {
+          detail: typeof sleep.detail === "string" ? sleep.detail : "",
+          held: sleep.held === true,
+          requested: sleep.requested === true,
+        }
+      : null,
+    supervisor: isObject(supervisor)
+      ? {
+          detail: typeof supervisor.detail === "string" ? supervisor.detail : "",
+          escalated: supervisor.escalated === true,
+          fired: supervisor.fired === true,
+          reason: typeof supervisor.reason === "string" ? supervisor.reason : null,
+        }
+      : null,
+  };
 }
 
 function readServing(environment: JsonObject, sourcePath: string): ServingEnvironment {
@@ -391,6 +472,7 @@ export function readResultRecord(sourcePath: string, value: unknown): ResultReco
     throw new Error(`Local result ${sourcePath} is schema 1.0 and cannot carry an environment.`);
   }
   const serving = isObject(environment) ? readServing(environment, sourcePath) : null;
+  const execution = readExecution(value, schemaVersion, sourcePath);
   const transport = isObject(environment)
     ? readTransport(environment, sourcePath)
     : { bridgeVersion: null, kind: "direct" as const, overheadIncluded: false, protocol: "Not recorded" };
@@ -437,6 +519,7 @@ export function readResultRecord(sourcePath: string, value: unknown): ResultReco
       isObject(packaging) && packaging.metadata_declared_after_execution === true,
     schemaVersion,
     serving,
+    execution,
     servedModelId: optionalTextField(model, "served_model_id", sourcePath),
     tokenizer: readTokenizer(model, sourcePath),
     transport,

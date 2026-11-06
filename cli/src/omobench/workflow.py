@@ -226,6 +226,79 @@ def memory_check(memory: dict[str, Any], *, bridged: bool = False) -> dict[str, 
     )
 
 
+def host_blind_spot(memory: dict[str, Any]) -> dict[str, Any] | None:
+    """What a reading taken inside WSL cannot see, said where it matters.
+
+    This exists because of a run that failed for a reason the check above was
+    structurally unable to report. Its first eight requests took 58 to 78
+    seconds each -- comfortably inside the profile -- and three later ones
+    took 1,505, 1,279 and 5,793 seconds, while `/proc/meminfo` reported over
+    2 GB available and almost no swap in use the whole time. The distribution
+    was fine. The computer underneath it was down to 680 MB of 15.46 GB and
+    kept entering Modern Standby, which suspends the distribution along with
+    it. A benchmark cannot tell a suspended virtual machine from slow
+    inference: it records the wait as the model's latency.
+
+    So this gates nothing and asserts nothing about the host. It says what
+    the number above is not, which is the one thing the panel can honestly
+    offer about a machine it cannot read.
+    """
+    if memory.get("environment") != "wsl":
+        return None
+    return check(
+        "wsl-host",
+        "What this reading cannot see",
+        state="attention",
+        observed="a WSL distribution; its Windows host is not readable from in here",
+        source=SOURCE_MACHINE,
+        blocks=None,
+        detail="How much memory the computer has left, and whether it is about to sleep, "
+               "are not visible from inside the distribution. The numbers above are the "
+               "distribution's own.",
+        recovery="A Windows host that runs short of memory, or that enters Modern Standby, "
+                 "suspends this distribution with it -- and a benchmark cannot tell that "
+                 "apart from slow inference, because it records the wait as the model's "
+                 "latency. Before a long profile, leave the computer awake and on power, "
+                 "and close what you do not need on the Windows side.",
+    )
+
+
+def sleep_prevention_check(availability: dict[str, Any]) -> dict[str, Any]:
+    """Whether this run can ask Windows to stay awake, said before it starts.
+
+    Worth its own line because the failure it guards against does not look
+    like a failure. A machine that sleeps mid-benchmark produces a complete
+    result with plausible numbers in it; the suspension arrives as the
+    model's latency, and nothing on the page says otherwise unless somebody
+    put it there.
+
+    Marked severe when it cannot be asked for, because the contributor is
+    about to spend an hour on a measurement that may quietly describe their
+    power settings. It still never blocks a run: somebody who has already
+    disabled sleep themselves needs no help from this.
+    """
+    available = bool(availability.get("available"))
+    return check(
+        "sleep-prevention",
+        "Windows can be asked to stay awake",
+        state="ok" if available else "attention",
+        observed="available" if available else "not available from here",
+        source=SOURCE_MACHINE,
+        blocks="run",
+        severity=None if available else "severe",
+        detail="A WSL distribution is suspended along with the computer it runs in. Asking "
+               "Windows for a power request is done through the companion, which is the only "
+               "part of OmoBench that is a Windows program.",
+        recovery="" if available else
+                 "Open this panel through the Windows companion, and update it if it is "
+                 "older than this checkout. Until then, turn off sleep yourself for the "
+                 "length of the run, leave the computer on power, and do not close the lid. "
+                 "A run this panel cannot keep awake still records whether the machine was "
+                 f"suspended, and such a result is kept for diagnosis and not published. "
+                 f"({availability.get('detail') or 'the companion was not reachable'})",
+    )
+
+
 def run_checks(
     *,
     setup_ok: bool,
@@ -236,6 +309,7 @@ def run_checks(
     tokenizer_source: str | None,
     memory: dict[str, Any] | None = None,
     bridged: bool = False,
+    sleep_prevention: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """What stands between this configuration and a benchmark that measures something.
 
@@ -257,6 +331,11 @@ def run_checks(
 
     if memory is not None:
         checks.append(memory_check(memory, bridged=bridged))
+        blind_spot = host_blind_spot(memory)
+        if blind_spot is not None:
+            checks.append(blind_spot)
+        if sleep_prevention is not None and memory.get("environment") == "wsl":
+            checks.append(sleep_prevention_check(sleep_prevention))
 
     if not endpoint:
         checks.append(check(
@@ -514,6 +593,31 @@ def submit_checks(
         detail="The profile sets its own minimum successful requests and maximum error rate. "
                "A benchmark that finished is not thereby a result the registry will take.",
     ))
+
+    # Kept apart from acceptance on purpose. Falling short of a threshold means
+    # the run did not measure enough; an interruption means what it did measure
+    # may not be about the model, because time the machine spent not running
+    # was recorded as the model's latency. Same gate, different sentence, and
+    # the bundle stays downloadable and inspectable under both.
+    interrupted = [message for message in (validation or {}).get("errors", [])
+                   if "interruption:" in message]
+    if interrupted or validation:
+        confirmed = any("was suspended for" in message for message in interrupted)
+        checks.append(check(
+            "uninterrupted",
+            "The machine ran throughout",
+            state="blocked" if interrupted else "ok",
+            observed=("suspended while measuring" if confirmed else
+                      "clocks disagreed while measuring" if interrupted else
+                      "no interruption observed"),
+            source=SOURCE_RUN,
+            blocks="submit",
+            recovery=" ".join(interrupted),
+            detail="Wall-clock time that passes while this environment is not running is "
+                   "recorded as the model's latency, because nothing in a benchmark can tell "
+                   "the two apart. A run that was suspended, or that cannot be shown not to "
+                   "have been, is kept for diagnosis and is not published.",
+        ))
     return checks
 
 

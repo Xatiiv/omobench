@@ -17,6 +17,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -1301,6 +1302,113 @@ class RunnerOutcome:
 
     returncode: int
     evidence_log_finalized: bool = True
+    # Whether the supervisor had to stop this run, filled in by the path that
+    # actually ran it; and the assembled record of how the run was bounded and
+    # whether anything interrupted it, filled in by its caller. Both are None
+    # only where a caller built an outcome by hand, which the tests do.
+    supervisor: Any = None
+    execution: Any = None
+
+
+# A run the supervisor had to stop the hard way: the graceful stop was asked
+# for, its grace expired, and the runner was still going. Distinct from the
+# runner's own codes so nothing mistakes it for something the benchmark said.
+EXECUTION_ABANDONED_EXIT_CODE = 75
+
+
+def signal_process_group(process: Any, number: int) -> None:
+    """Signal the runner, and its workers too when they are its own to signal.
+
+    Ownership is the whole question here. A runner started in its own process
+    group can be signalled as a group, which reaches the worker processes it
+    spawned -- stopping the leader alone would leave them measuring into a
+    file nobody will read. A runner sharing *this* process's group cannot:
+    signalling that group would signal us, and on the panel's path it is this
+    process's own group that the panel signals to cancel a run. So a shared
+    group gets the leader only, exactly as before this supervisor existed.
+    """
+    if process.poll() is not None:
+        return
+    with contextlib.suppress(ProcessLookupError, OSError, PermissionError):
+        if os.name == "nt":
+            process.kill()
+            return
+        group = os.getpgid(process.pid)
+        if group == os.getpgid(0):
+            os.kill(process.pid, number)
+        else:
+            os.killpg(group, number)
+
+
+def abandon_run(code: int) -> None:
+    """Leave, taking everything this process started with it.
+
+    The last resort on the in-process path: the runner is past the grace a
+    stop was allowed and is still going, so nothing polite is left. Exiting
+    alone would orphan the runner's worker processes, which would carry on
+    measuring into a file nobody will read, so the whole process group goes.
+
+    Only when this process leads that group -- which it does when the panel
+    started it, because the panel gives every run its own session. Run
+    straight from a shell it does not, and killing the shell's group would
+    take the contributor's terminal with it, so that case exits alone.
+    """
+    with contextlib.suppress(OSError, PermissionError):
+        if os.name != "nt" and os.getpid() == os.getpgid(0):
+            os.killpg(os.getpgid(0), signal.SIGKILL)
+    os._exit(code)
+
+
+def profile_deadlines(root: Path, profile_id: str) -> Any:
+    """What bounds this profile's run, read from the profile itself.
+
+    The request deadline defaults to the measurement ceiling, which is not a
+    new limit: a request cannot outlive the window it runs in. A profile may
+    declare a tighter `execution.request_deadline_seconds`, and one that does
+    is a different execution contract and gets its own version -- none of the
+    profiles shipped today declares one, so nothing any existing result
+    measured is changed by any of this.
+    """
+    from .execution import Deadlines
+
+    execution = profile_document(root, profile_id).get("execution", {})
+    ceiling = execution.get("maximum_duration_seconds")
+    declared = execution.get("request_deadline_seconds")
+    return Deadlines(
+        inactivity_seconds=execution.get("request_timeout_seconds"),
+        request_seconds=declared if isinstance(declared, (int, float)) else ceiling,
+        window_seconds=ceiling if isinstance(ceiling, (int, float)) else None,
+    )
+
+
+def telemetry_progress(telemetry_dir: Path | None) -> Any:
+    """The run's own account of itself: what it has done, and for how long.
+
+    Returns `(processed_requests, measured_seconds)`. The first changes when
+    a request finishes; the second is how long the run says it has been
+    measuring, which is what the supervisor anchors its window to -- the
+    runner's ceiling starts at its first request, not when this process did,
+    and loading a model is not part of anybody's ninety minutes.
+
+    Deliberately read from the telemetry snapshot the run already writes,
+    rather than from inside the runner: the supervisor's whole purpose is to
+    be outside the control flow it is watching.
+    """
+    if telemetry_dir is None:
+        return None
+    snapshot = telemetry_dir / "telemetry.json"
+
+    def read() -> Any:
+        try:
+            document = json.loads(snapshot.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        requests = document.get("requests") or {}
+        elapsed = document.get("elapsed_seconds")
+        return (requests.get("processed"),
+                elapsed if isinstance(elapsed, (int, float)) and elapsed > 0 else None)
+
+    return read
 
 
 def guidellm_runner_invocation(command: list[str]) -> list[str]:
@@ -1330,12 +1438,51 @@ def guidellm_runner_invocation(command: list[str]) -> list[str]:
 
 
 def run_guidellm_command(command, *, log_path, root, profile_id, telemetry_dir, bridge_credentials=None):
-    kwargs = dict(log_path=log_path, root=root, profile_id=profile_id, telemetry_dir=telemetry_dir)
-    if bridge_credentials is None:
-        return _run_guidellm_command(command, **kwargs)
-    from .bridge_runner import authenticated_backend
-    with authenticated_backend(bridge_credentials):
-        return _run_guidellm_command(command, bridge_credentials=bridge_credentials, **kwargs)
+    """Run the benchmark, bounded, with the machine asked to stay awake.
+
+    Three things wrap the run and none of them can change what it measures.
+    A power request, so the computer does not idle into sleep and turn its own
+    suspension into the model's latency. A clock watch, so that if it is
+    suspended anyway the result says so instead of pretending. And a
+    supervisor, because the runner's duration ceiling is evaluated while
+    handling a request update rather than by a timer, and a run with one
+    long-streaming request can leave it unevaluated for hours.
+    """
+    from .execution import ClockWatch, ExecutionRecord, keep_the_machine_awake
+
+    deadlines = profile_deadlines(root, profile_id)
+    watch = ClockWatch()
+    awake = keep_the_machine_awake()
+    kwargs = dict(log_path=log_path, root=root, profile_id=profile_id,
+                  telemetry_dir=telemetry_dir, deadlines=deadlines,
+                  # Handed down so that even the hard stop releases it first,
+                  # rather than relying on the pipe closing as this process
+                  # dies. That fallback is real and tested, but a request
+                  # released deliberately is released sooner.
+                  release=awake.close)
+    try:
+        with watch:
+            if bridge_credentials is None:
+                outcome = _run_guidellm_command(command, **kwargs)
+            else:
+                from .bridge_runner import authenticated_backend
+
+                with authenticated_backend(bridge_credentials):
+                    outcome = _run_guidellm_command(
+                        command, bridge_credentials=bridge_credentials, **kwargs)
+    finally:
+        # Released on every path: success, failure, cancellation, and -- by
+        # the pipe closing when this process dies -- termination.
+        awake.close()
+    from .execution import SupervisorOutcome
+
+    outcome.execution = ExecutionRecord(
+        deadlines=deadlines,
+        interruption=watch.document(),
+        supervisor=outcome.supervisor or SupervisorOutcome(),
+        sleep_prevention=awake.status,
+    )
+    return outcome
 
 
 def _run_guidellm_command(
@@ -1345,6 +1492,8 @@ def _run_guidellm_command(
     root: Path,
     profile_id: str,
     telemetry_dir: Path | None,
+    deadlines: Any = None,
+    release: Any = None,
     bridge_credentials: dict | None = None,
 ) -> RunnerOutcome:
     """Run `command` (as built by build_guidellm_command) exactly as the
@@ -1366,13 +1515,54 @@ def _run_guidellm_command(
         invocation = [sys.executable, "-m", "omobench.bridge_runner", *command[1:]]
         private_input = {"input": json.dumps(bridge_credentials) + "\n"}
 
+    from .execution import ExecutionSupervisor
+
+    supervisor_outcome = None
+
+    def supervise(stop, escalate, finished):
+        """Run the supervisor around one execution path, or not at all.
+
+        Not at all when nothing declared a limit: a supervisor with no
+        deadline would be a thread that only ever costs something.
+        """
+        nonlocal supervisor_outcome
+        if deadlines is None or (deadlines.window_seconds is None
+                                 and deadlines.request_seconds is None):
+            return contextlib.nullcontext()
+        supervisor = ExecutionSupervisor(
+            deadlines, stop=stop, escalate=escalate, finished=finished,
+            progress=telemetry_progress(telemetry_dir))
+
+        @contextlib.contextmanager
+        def running():
+            with supervisor:
+                yield
+            nonlocal supervisor_outcome
+            supervisor_outcome = supervisor.outcome
+
+        return running()
+
     def plain_subprocess(note: str | None = None) -> RunnerOutcome:
         log_file = log_path.open("w", encoding="utf-8")
         try:
             if note is not None:
                 log_file.write(note)
                 log_file.flush()
-            returncode = subprocess.run(invocation, stdout=log_file, stderr=subprocess.STDOUT, text=True, **private_input).returncode
+            # Popen rather than run(), so the supervisor has a handle to stop.
+            # Deliberately *not* in a new session: the panel cancels a run by
+            # signalling this process's own group, and a runner moved out of
+            # it would stop being reachable that way -- which is the one stop
+            # path a contributor actually presses.
+            process = subprocess.Popen(
+                invocation, stdout=log_file, stderr=subprocess.STDOUT, text=True,
+                stdin=subprocess.PIPE if private_input else None)
+            with supervise(
+                stop=lambda _reason: signal_process_group(process, signal.SIGTERM),
+                escalate=lambda _reason: signal_process_group(process, signal.SIGKILL),
+                finished=lambda: process.poll() is not None,
+            ):
+                process.communicate(**({"input": private_input["input"]} if private_input else {}))
+            returncode = process.returncode
         except BaseException:
             with contextlib.suppress(OSError, ValueError):
                 log_file.close()
@@ -1386,8 +1576,9 @@ def _run_guidellm_command(
             log_file.close()
         except (OSError, ValueError) as error:
             print(f"Could not finalize the required evidence log {log_path}: {error}", file=sys.stderr)
-            return RunnerOutcome(returncode or EVIDENCE_FINALIZATION_EXIT_CODE, evidence_log_finalized=False)
-        return RunnerOutcome(returncode)
+            return RunnerOutcome(returncode or EVIDENCE_FINALIZATION_EXIT_CODE,
+                                 evidence_log_finalized=False, supervisor=supervisor_outcome)
+        return RunnerOutcome(returncode, supervisor=supervisor_outcome)
 
     if telemetry_dir is None:
         return plain_subprocess()
@@ -1411,17 +1602,40 @@ def _run_guidellm_command(
     # -- happens after execution began: catching it would reopen the log with
     # "w", destroying the finished run's output, and launch a duplicate
     # benchmark. It is allowed to propagate instead.
+    #
+    # This path runs the benchmark in *this* process, so the supervisor's
+    # graceful stop is the same SIGTERM a contributor's cancel sends: the
+    # telemetry runner installs an asyncio handler for it that cancels the
+    # benchmark task, which is what unwinds the scheduler and writes the
+    # evidence. Escalation is the one blunt instrument left -- the runner is
+    # past its grace and still going -- and it costs the files this function's
+    # caller would have written afterwards. That is the trade: a run nobody
+    # can stop is worse than a run that ends incomplete and says so.
+    finished = threading.Event()
     try:
-        returncode = telemetry_module.run_generative_benchmark_with_telemetry(
-            argv,
-            snapshot_path=telemetry_dir / "telemetry.json",
-            history_path=telemetry_dir / "telemetry-history.json",
-            stdout_log_path=log_path,
-            run_label=profile_id,
-            total_measured_requests=profile_measured_requests(root, profile_id),
-            configured_max_requests=PROFILE_SPECS[profile_id].get("max_requests"),
-            phase_contract=profile_phase_contract(root, profile_id),
-        )
+        def abandon(_reason: str) -> None:
+            if release is not None:
+                release()
+            abandon_run(EXECUTION_ABANDONED_EXIT_CODE)
+
+        with supervise(
+            stop=lambda _reason: os.kill(os.getpid(), signal.SIGTERM),
+            escalate=abandon,
+            finished=finished.is_set,
+        ):
+            try:
+                returncode = telemetry_module.run_generative_benchmark_with_telemetry(
+                    argv,
+                    snapshot_path=telemetry_dir / "telemetry.json",
+                    history_path=telemetry_dir / "telemetry-history.json",
+                    stdout_log_path=log_path,
+                    run_label=profile_id,
+                    total_measured_requests=profile_measured_requests(root, profile_id),
+                    configured_max_requests=PROFILE_SPECS[profile_id].get("max_requests"),
+                    phase_contract=profile_phase_contract(root, profile_id),
+                )
+            finally:
+                finished.set()
     except telemetry_module.TelemetryUnavailable as error:
         return plain_subprocess(f"OmoBench: live telemetry unavailable ({error}); running without it.\n")
     # telemetry.py reports an unfinalized required log through this code, and
@@ -1429,6 +1643,7 @@ def _run_guidellm_command(
     return RunnerOutcome(
         returncode,
         evidence_log_finalized=returncode != EVIDENCE_FINALIZATION_EXIT_CODE,
+        supervisor=supervisor_outcome,
     )
 
 
@@ -2040,6 +2255,24 @@ def artifact_metadata(path: Path, run_directory: Path) -> dict[str, str]:
     return {"path": relative_path, "sha256": sha256_file(path)}
 
 
+def execution_from_environment(environment: dict[str, Any]) -> dict[str, Any] | None:
+    """The run's own execution record, taken from its evidence or not at all.
+
+    A run made before this existed has nothing to say here, and packaging must
+    not invent an answer for it: "nothing was recorded" and "nothing was
+    observed" are different claims, and only the run itself could have made
+    the second one. An unrecognised contract is also left out rather than
+    copied, because a value this code does not understand is not a fact it can
+    vouch for.
+    """
+    from .execution import EXECUTION_CONTRACT
+
+    record = environment.get("execution")
+    if not isinstance(record, dict) or record.get("contract") != EXECUTION_CONTRACT:
+        return None
+    return record
+
+
 def hardware_from_environment(
     environment: dict[str, Any],
     cpu_override: str | None,
@@ -2273,6 +2506,12 @@ def _write_local_run(args: argparse.Namespace) -> int:
     environment = doctor_report()
     if getattr(args, "_bridge_provenance", None):
         environment["transport"] = args._bridge_provenance
+    # How the run was bounded, whether anything stopped it, and whether the
+    # machine executed throughout. Written into the run's own evidence rather
+    # than computed at packaging time, because packaging happens later -- and
+    # possibly on another day -- and none of this can be recovered afterwards.
+    if outcome.execution is not None:
+        environment["execution"] = outcome.execution.document()
     environment_path.write_text(json.dumps(environment, indent=2) + "\n", encoding="utf-8")
     reproduce_path = run_directory / "reproduce.md"
     reproduce_path.write_text(
@@ -2401,6 +2640,7 @@ def package_local_run(args: argparse.Namespace) -> int:
         if not isinstance(environment, dict):
             raise ValueError("environment.json must contain an object at its root.")
         transport_provenance = environment.get("transport")
+        execution_record = execution_from_environment(environment)
         declaration = None
         provenance_path = getattr(args, "provenance", None)
         if provenance_path:
@@ -2521,6 +2761,12 @@ def package_local_run(args: argparse.Namespace) -> int:
             "configuration_fingerprint": sha256_json(fingerprint_payload),
             "execution_device": args.execution_device,
             **({"environment": provenance["environment"]} if provenance else {}),
+            # Schema 1.1 only, and only when the run recorded one: 1.0 is
+            # frozen, and a bundle written before this existed must not
+            # acquire a fact nobody collected. Copied from the run's own
+            # evidence, never recomputed -- a clock read today says nothing
+            # about whether a benchmark executed last week.
+            **({"execution": execution_record} if provenance and execution_record else {}),
             "model": model,
             "runtime": runtime,
             "hardware": hardware,

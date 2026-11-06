@@ -248,6 +248,32 @@ export function assess(
           + "which this comparison holds fixed. Ask a different question, or choose a different run.");
   }
 
+  // A run that cannot be shown to have been running throughout never ranks,
+  // whatever the question. The registry refuses such a bundle, so one should
+  // not be here at all — but a bundle can be read from a file, a fork or a
+  // branch that never went through the registry, and a measurement that may
+  // contain time the machine was not running is not a measurement of the
+  // model under any question somebody might ask of it.
+  //
+  // The two states are kept apart in what they say, because only one of them
+  // is a conclusion: a confirmed suspension, against two clocks that
+  // disagreed while the kernel recorded nothing.
+  for (const [record, side] of [[reference, "This run"], [candidate, "The other run"]] as const) {
+    const state = record.execution?.interruption?.state;
+    if (state !== "suspended" && state !== "clock-jump") continue;
+    const seconds = Math.round(record.execution?.interruption?.observedSeconds ?? 0);
+    suitability = "unsuitable";
+    blockers.push(state === "suspended" ? "Suspended while measuring" : "Clocks disagreed while measuring");
+    reasons.push(state === "suspended"
+      ? `${side} was suspended for ${seconds} seconds while it was measuring. Nothing in a `
+        + "benchmark can tell a paused machine from slow inference, so that time is inside its "
+        + "latencies. It is kept for diagnosis and does not rank."
+      : `${side} had its wall clock and monotonic clock disagree by ${seconds} seconds while it `
+        + "was measuring, with no suspend recorded by the kernel. That is either a pause it was "
+        + "never told about or an adjusted clock, and nothing establishes which, so it is not "
+        + "established that the machine was running throughout. It does not rank.");
+  }
+
   if (suitability === "ranking") {
     reasons.push("The declared workload matches on every dimension, including the exact profile "
       + "bytes and the transport. Hardware, engine build and execution device may differ: that "

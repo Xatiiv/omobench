@@ -66,6 +66,20 @@ globalThis.WorkflowView = class WorkflowView {
     return li;
   }
 
+  // A page with no gate lists can still show particular checks where they are
+  // relevant. The guided review screen shows what this environment has left,
+  // and what that reading does not cover, beside the disk space and before
+  // anybody starts an hour of CPU time -- rendered by this same method, so
+  // the two pages do not grow two ideas of what a check looks like.
+  renderSelected(report, elementId, ids) {
+    const list = this.get(elementId);
+    if (!list) return;
+    const wanted = new Set(ids);
+    const items = (report.checks || []).filter((item) => wanted.has(item.id));
+    list.replaceChildren(...items.map(WorkflowView.check));
+    list.hidden = !items.length;
+  }
+
   renderGates(report) {
     const local = this.get("preflight-local");
     if (local) local.textContent = report.local_report;

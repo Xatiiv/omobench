@@ -171,6 +171,35 @@ severe. The check never stops a run — a contributor may know exactly why
 their environment looks like that — and no acceptance threshold moves because
 of it.
 
+### What a reading taken inside WSL cannot see
+
+A later run on the same machine, with the distribution quiet and 6.5 GB of
+its 7.49 GB free at the start, failed anyway — and failed for a reason
+`/proc/meminfo` is structurally unable to report.
+
+Its first eight requests took **58 to 78 seconds each**, which is the
+hardware working exactly as it should: sixty of those is about an hour,
+comfortably inside the ninety-minute ceiling. Then request nine took 1,505
+seconds, request ten 1,279, and request eleven **5,793**. Throughout, the
+distribution reported over 2 GB available and essentially no swap in use.
+
+The computer underneath it did not. The Windows host has 15.46 GB installed
+and was down to around 680 MB available, with its page file 7.5 GB in use —
+and it repeatedly entered **Modern Standby**, which suspends a WSL
+distribution along with the rest of the machine. The panel's own one-minute
+poll loop, which does nothing but sleep, returned 13, 16, 41 and 72 minutes
+late; those gaps line up to the minute with the host's sleep and wake events.
+A benchmark cannot tell a suspended virtual machine from slow inference. It
+records the wait as the model's latency, and the result is a p95 time to
+first token of 1,494 seconds for a model that generates at about 8 tokens a
+second.
+
+So the panel says what the reading does not cover, as a note that gates
+nothing: inside WSL, the host's memory and its power state are not readable,
+and a long profile needs the computer awake, on power, and not short of
+memory. That is the honest extent of what a panel running inside a
+distribution can offer about the machine outside it.
+
 Nor does the panel act on it. Swap filling up means the kernel has had to
 move pages out at some point; Linux also swaps idle pages out on a
 comfortable host, so a full swap file is not by itself proof that a run is
@@ -187,12 +216,46 @@ qualifying takes, and what happens if the ceiling wins. None of it is a
 prediction about your machine, and the panel never estimates how long your run
 will take.
 
-Stopping is bounded in both directions. A ceiling-driven stop cancels what is
-in flight rather than draining it: in the run measured here the scheduler had
-stopped queuing 20.6 seconds after the ceiling and had exited 20.9 seconds
-after it. A contributor-initiated cancel sends the whole process group a
-`SIGTERM`, gives it three seconds, and then kills it — so a runner that ignores
+A contributor-initiated cancel is bounded: it sends the whole process group a
+`SIGTERM`, gives it three seconds, and then kills it, so a runner that ignores
 the polite signal cannot hold a ninety-minute profile open.
+
+**A ceiling-driven stop was not**, and the reason is worth stating exactly,
+because it is not the one it first looks like.
+
+The pinned runner's duration constraint does ask for everything to stop. It
+returns `request_queuing="stop"` *and* `request_processing="stop_local"`, and
+the worker cancels the request it is processing when that arrives. In the run
+that overran, once the constraint fired the scheduler exited **0.1 seconds
+later** and the one request that had been queued but never started was
+recorded `cancelled`. Nothing drains.
+
+The defect is *when* it fires. The constraint is a function the scheduler
+evaluates while handling a request update — there is no timer. With a
+concurrency of one, a single request that streams for 96 minutes produces no
+update for the scheduler to evaluate it on, and a suspended virtual machine
+evaluates nothing at all. In that run the constraint's own recorded
+`elapsed_time` when it finally fired was **9,101 seconds against a 5,400-second
+ceiling**: 3,701 seconds late. The `stop_time` of 5,400 s in the report is not
+an observation — it is `start_time + max_duration`, written by the constraint
+after the fact.
+
+The profile's `request_timeout_seconds: 300` does not cap it either. It
+becomes the backend's `timeout`, which the runner passes to httpx as
+`Timeout(read=300, connect=…)`, and httpx's read timeout is the maximum gap
+*between chunks*. A stream delivering a token every few seconds never trips
+it, however long the whole request runs.
+
+So four different limits have to be named separately, and OmoBench now does:
+
+| Limit | What it bounds | Who enforces it |
+| --- | --- | --- |
+| Inactivity timeout | The gap between two chunks of one response | the runner's HTTP client |
+| Request deadline | One request end to end, however lively its stream | OmoBench's supervisor |
+| Measurement ceiling | When the run stops starting new work | the runner's constraint |
+| Shutdown grace | How long a stop may take before the process group is killed | OmoBench's supervisor |
+
+See [bounded-execution.md](bounded-execution.md).
 
 ## Review: what the evidence says
 

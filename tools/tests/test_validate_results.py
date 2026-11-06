@@ -1416,5 +1416,168 @@ class ModelProposalTests(RegistryFixture):
         self.assertIn("not readable JSON", stderr)
 
 
+class InterruptedMeasurementTests(RegistryFixture):
+    """A measurement taken while the machine was suspended is not a
+    measurement of the model, and is refused for that reason rather than for
+    falling short of a threshold."""
+
+    def write(self, execution, *, template=None):
+        result = template if template is not None else bridged_template()
+        if execution is not None:
+            result["execution"] = execution
+        write_bundle(self.results_path / "qwen3-4b" / "2026-11-06-run-fixture-1234",
+                     artifact_contents={"environment_snapshot": BRIDGED_SNAPSHOT},
+                     template=result)
+
+    @staticmethod
+    def record(state, **interruption):
+        return {
+            "contract": "bounded-execution-v1",
+            "limits": {"inactivity_timeout_seconds": 300.0,
+                       "request_deadline_seconds": 900.0,
+                       "measurement_ceiling_seconds": 900.0,
+                       "shutdown_grace_seconds": 60.0},
+            "interruption": {"state": state, "observed_seconds": 0.0,
+                             "longest_seconds": 0.0, "events": [], **interruption},
+        }
+
+    def test_a_run_with_no_execution_record_is_unaffected(self) -> None:
+        """Every result published before this contract existed stays valid."""
+        self.write(None)
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 0, stderr)
+
+    def test_an_uninterrupted_run_passes(self) -> None:
+        self.write(self.record("none"))
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 0, stderr)
+
+    def test_a_confirmed_suspension_is_refused_and_says_why(self) -> None:
+        self.write(self.record(
+            "suspended", observed_seconds=4296.0, longest_seconds=4296.0,
+            events=[{"kind": "suspended", "seconds": 4296.0,
+                     "started_at": "2026-11-06T03:47:26Z", "ended_at": "2026-11-06T04:59:26Z"}]))
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("interruption:", stderr)
+        self.assertIn("4296.0 seconds while it was measuring", stderr)
+        self.assertIn("stays available for diagnosis", stderr)
+        # Not an acceptance failure: different problem, different sentence.
+        self.assertNotIn("acceptance:", stderr)
+
+    def test_an_unexplained_gap_is_not_refused(self) -> None:
+        """Something did not get to run. That is a question, not a verdict."""
+        self.write(self.record(
+            "gap", observed_seconds=119.0, longest_seconds=119.0,
+            events=[{"kind": "gap", "seconds": 119.0,
+                     "started_at": "2026-11-06T03:47:26Z", "ended_at": "2026-11-06T03:49:26Z"}]))
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 0, stderr)
+
+    def test_an_ambiguous_clock_jump_is_refused_without_being_called_a_suspension(self) -> None:
+        """Measured on this project's WSL2 distribution: its CLOCK_BOOTTIME
+        equals CLOCK_MONOTONIC through host sleep cycles, and NTP is active.
+        So a wall-clock divergence has two possible causes and the registry
+        must not pick one."""
+        self.write(self.record(
+            "clock-jump", observed_seconds=4296.0, longest_seconds=4296.0,
+            events=[{"kind": "clock-jump", "seconds": 4296.0,
+                     "started_at": "2026-11-06T03:47:26Z", "ended_at": "2026-11-06T04:59:26Z"}]))
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("interruption:", stderr)
+        self.assertIn("kernel recorded no suspend", stderr)
+        self.assertIn("nothing here can tell which", stderr)
+        self.assertNotIn("was suspended for", stderr)
+        self.assertNotIn("acceptance:", stderr)
+
+    def test_a_clock_jump_claimed_without_an_event_is_refused(self) -> None:
+        self.write(self.record("clock-jump", observed_seconds=10.0))
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("no event of that kind is recorded", stderr)
+
+    def test_a_clock_jump_hiding_a_confirmed_suspension_is_refused(self) -> None:
+        self.write(self.record("clock-jump", events=[
+            {"kind": "clock-jump", "seconds": 10.0, "started_at": "2026-11-06T03:47:26Z",
+             "ended_at": "2026-11-06T03:47:36Z"},
+            {"kind": "suspended", "seconds": 600.0, "started_at": "2026-11-06T03:48:26Z",
+             "ended_at": "2026-11-06T03:58:26Z"}]))
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("the worst thing observed is what the state reports", stderr)
+
+    def test_a_gap_hiding_a_clock_jump_is_refused(self) -> None:
+        self.write(self.record("gap", events=[
+            {"kind": "gap", "seconds": 40.0, "started_at": "2026-11-06T03:47:26Z",
+             "ended_at": "2026-11-06T03:48:06Z"},
+            {"kind": "clock-jump", "seconds": 90.0, "started_at": "2026-11-06T03:49:26Z",
+             "ended_at": "2026-11-06T03:50:56Z"}]))
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("the worst thing observed is what the state reports", stderr)
+
+    def test_an_unknown_interruption_state_is_refused_by_the_schema(self) -> None:
+        self.write(self.record("probably-fine"))
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("interruption.state", stderr)
+
+    def test_the_anchor_is_recorded_and_checked(self) -> None:
+        """A deadline is meaningless without saying what it was measured from."""
+        record = self.record("none")
+        record["supervisor"] = {"fired": True, "reason": "measurement-window-overrun",
+                                "escalated": True, "at_seconds": 5461.0,
+                                "anchor": "measurement-start", "detail": "fixture"}
+        self.write(record)
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 0, stderr)
+
+        record["supervisor"]["anchor"] = "whenever"
+        self.write(record)
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("anchor", stderr)
+
+    def test_a_state_that_its_own_evidence_does_not_support_is_refused(self) -> None:
+        self.write(self.record("suspended", observed_seconds=100.0))
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("no event of that kind is recorded", stderr)
+
+    def test_a_clean_state_with_events_beside_it_is_refused(self) -> None:
+        self.write(self.record("none", events=[
+            {"kind": "gap", "seconds": 40.0, "started_at": "2026-11-06T03:47:26Z",
+             "ended_at": "2026-11-06T03:48:26Z"}]))
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("state is 'none' but 1 interruption event", stderr)
+
+    def test_a_gap_hiding_a_suspension_is_refused(self) -> None:
+        """The state reports the worst thing observed, not a convenient one."""
+        self.write(self.record("gap", events=[
+            {"kind": "suspended", "seconds": 600.0, "started_at": "2026-11-06T03:47:26Z",
+             "ended_at": "2026-11-06T03:57:26Z"}]))
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("the worst thing observed is what the state reports", stderr)
+
+    def test_schema_1_0_cannot_carry_an_execution_record(self) -> None:
+        """1.0 is frozen: it never acquires a fact nobody collected."""
+        write_bundle(self.results_path / "qwen3-4b" / "2026-11-06-run-fixture-1234",
+                     result_overrides={"execution": self.record("none")})
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("execution", stderr)
+
+    def test_an_unknown_contract_is_refused_by_the_schema(self) -> None:
+        record = self.record("none")
+        record["contract"] = "bounded-execution-v99"
+        self.write(record)
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("contract", stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

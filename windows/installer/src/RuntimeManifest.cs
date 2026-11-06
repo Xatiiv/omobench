@@ -59,6 +59,7 @@ namespace OmoBench.Installer
             "cli/src/omobench/serving_metadata.py",
             "cli/src/omobench/workflow.py",
             "cli/src/omobench/evidence.py",
+            "cli/src/omobench/execution.py",
             "cli/src/omobench/ui.py",
             "cli/src/omobench/ui_managed.py",
             "cli/src/omobench/ui_submission.py",

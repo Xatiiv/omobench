@@ -140,6 +140,36 @@ class GateSeparationTests(unittest.TestCase):
         arguments.update(overrides)
         return workflow.package_checks(**arguments)
 
+    def test_a_suspended_run_blocks_submission_and_nothing_else(self) -> None:
+        """Different from acceptance, and said differently.
+
+        Acceptance means the run did not measure enough. A suspension means
+        what it did measure is not about the model. Both stop publication;
+        neither stops packaging, downloading or looking at the bundle.
+        """
+        job = {**COMPLETED_JOB, "validation": {"valid": False, "errors": [
+            "results/x/result.json: interruption: this run was suspended for 4296.0 seconds "
+            "while it was measuring"]}}
+        checks = self.package(job=job) + self.submit(job=job)
+        self.assertEqual(ids(checks, "package"), [])
+        self.assertEqual(ids(checks, "run"), [])
+        self.assertIn("uninterrupted", ids(checks, "submit"))
+        item = find(checks, "uninterrupted")
+        self.assertEqual(item["state"], "blocked")
+        self.assertIn("suspended for 4296.0 seconds", item["recovery"])
+        self.assertIn("kept for diagnosis and is not published", item["detail"])
+
+    def test_a_run_that_was_not_interrupted_says_so(self) -> None:
+        job = {**COMPLETED_JOB, "validation": {"valid": True, "errors": []}}
+        item = find(self.submit(job=job), "uninterrupted")
+        self.assertEqual(item["state"], "ok")
+        self.assertEqual(item["observed"], "no interruption observed")
+
+    def test_nothing_is_claimed_about_a_run_nobody_has_validated(self) -> None:
+        """A check nobody has run is not a pass, so it is not offered at all."""
+        job = {**COMPLETED_JOB, "validation": None}
+        self.assertNotIn("uninterrupted", [item["id"] for item in self.submit(job=job)])
+
     def test_an_uncatalogued_model_blocks_submission_only(self) -> None:
         checks = self.package() + self.submit()
         self.assertEqual(ids(checks, "run"), [])
@@ -357,6 +387,53 @@ class MemoryPressureTests(unittest.TestCase):
     def test_a_host_that_reports_nothing_contributes_no_check(self) -> None:
         """A number nobody measured is worse than no number."""
         self.assertNotIn("memory", self.checks(None))
+
+    def test_wsl_is_told_whether_windows_can_be_asked_to_stay_awake(self) -> None:
+        available = self.checks(self.EXHAUSTED_WSL,
+                                sleep_prevention={"available": True, "detail": ""})
+        self.assertEqual(available["sleep-prevention"]["state"], "ok")
+        self.assertIsNone(available["sleep-prevention"]["severity"])
+        self.assertEqual(available["sleep-prevention"]["recovery"], "")
+
+    def test_no_way_to_ask_is_severe_and_says_what_to_do_instead(self) -> None:
+        """A machine that sleeps mid-run produces plausible numbers, which is
+        exactly why this cannot be quiet."""
+        item = self.checks(self.EXHAUSTED_WSL, sleep_prevention={
+            "available": False, "detail": "Open this panel through the companion"})["sleep-prevention"]
+        self.assertEqual(item["state"], "attention")
+        self.assertEqual(item["severity"], "severe")
+        self.assertIn("turn off sleep yourself", item["recovery"])
+        self.assertIn("do not close the lid", item["recovery"])
+        self.assertIn("Open this panel through the companion", item["recovery"])
+
+    def test_it_never_stops_a_run_either(self) -> None:
+        checks = list(self.checks(
+            self.EXHAUSTED_WSL,
+            sleep_prevention={"available": False, "detail": "nope"}).values())
+        self.assertEqual([item["id"] for item in workflow.failing(checks, "run")], [])
+
+    def test_a_machine_that_cannot_sleep_under_windows_is_not_asked_about_it(self) -> None:
+        self.assertNotIn("sleep-prevention",
+                         self.checks(self.NATIVE, sleep_prevention={"available": False,
+                                                                    "detail": "x"}))
+
+    def test_wsl_is_told_what_the_reading_does_not_cover(self) -> None:
+        """The run this was written for failed for a reason /proc could not show."""
+        item = self.checks(self.EXHAUSTED_WSL)["wsl-host"]
+        self.assertIn("not readable from in here", item["observed"])
+        self.assertIn("whether it is about to sleep", item["detail"])
+        self.assertIn("Modern Standby", item["recovery"])
+        self.assertIn("records the wait as the model's latency", item["recovery"])
+
+    def test_that_note_gates_nothing_at_all(self) -> None:
+        """It asserts nothing about the host, so it may stand in nobody's way."""
+        checks = list(self.checks(self.EXHAUSTED_WSL).values())
+        self.assertIsNone(self.checks(self.EXHAUSTED_WSL)["wsl-host"]["blocks"])
+        for gate in workflow.GATES:
+            self.assertNotIn("wsl-host", [item["id"] for item in workflow.blocking(checks, gate)])
+
+    def test_a_machine_that_is_its_own_host_gets_no_such_note(self) -> None:
+        self.assertNotIn("wsl-host", self.checks(self.NATIVE))
 
 
 class CompletionTests(unittest.TestCase):

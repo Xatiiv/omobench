@@ -326,6 +326,85 @@ test("two bridged runs stay comparable with each other", () => {
   assert.deepEqual(incompatibilities(bridged(), bridged()), []);
 });
 
+// --- A run that was not running ---------------------------------------------
+
+function suspendedFixture(state = "suspended", seconds = 4296) {
+  const document = bridgedFixture();
+  document.execution = {
+    contract: "bounded-execution-v1",
+    limits: { inactivity_timeout_seconds: 300, request_deadline_seconds: 5400,
+              measurement_ceiling_seconds: 5400, shutdown_grace_seconds: 60 },
+    interruption: { state, observed_seconds: seconds, longest_seconds: seconds, events: [] },
+  };
+  return document;
+}
+
+test("a run suspended while measuring never ranks, whatever is asked of it", () => {
+  const suspended = readResultRecord("suspended", suspendedFixture());
+  for (const question of Object.keys(comparisonQuestions)) {
+    const assessment = assess(bridged(), suspended, question);
+    assert.equal(assessment.suitability, "unsuitable", question);
+    assert.match(assessment.reasons.join(" "), /suspended for 4296 seconds/);
+    assert.ok(assessment.blockers.includes("Suspended while measuring"), question);
+  }
+});
+
+test("it does not matter which side of the comparison was suspended", () => {
+  const suspended = readResultRecord("suspended", suspendedFixture());
+  assert.match(assess(suspended, bridged()).reasons.join(" "), /This run was suspended/);
+  assert.match(assess(bridged(), suspended).reasons.join(" "), /The other run was suspended/);
+});
+
+test("an unexplained gap is not treated as a suspension", () => {
+  const gapped = readResultRecord("gap", suspendedFixture("gap", 119));
+  assert.equal(assess(bridged(), gapped).suitability, "ranking");
+});
+
+test("an ambiguous clock jump does not rank, and is not called a suspension", () => {
+  const jumped = readResultRecord("jump", suspendedFixture("clock-jump", 4296));
+  const assessment = assess(bridged(), jumped);
+  assert.equal(assessment.suitability, "unsuitable");
+  assert.ok(assessment.blockers.includes("Clocks disagreed while measuring"));
+  assert.match(assessment.reasons.join(" "), /no suspend recorded by the kernel/);
+  assert.doesNotMatch(assessment.reasons.join(" "), /was suspended for/);
+});
+
+test("the website refuses an interruption state it does not understand", () => {
+  const document = suspendedFixture();
+  document.execution.interruption.state = "probably-fine";
+  assert.throws(() => readResultRecord("unknown", document), /unknown interruption state/);
+});
+
+test("a run that recorded no execution block is unaffected", () => {
+  assert.equal(assess(bridged(), bridged()).suitability, "ranking");
+  assert.equal(record().execution, null);
+});
+
+test("a legacy result reads as not recorded rather than as not interrupted", () => {
+  // The distinction the whole module turns on: nobody looked, which is not
+  // the same claim as nothing happened.
+  const legacy = record();
+  assert.equal(legacy.schemaVersion, "1.0");
+  assert.equal(legacy.execution, null);
+  const modern = readResultRecord("modern", bridgedFixture());
+  assert.equal(modern.execution, null, "1.1 without the block is also 'not recorded'");
+  assert.equal(assess(legacy, legacy).suitability, "ranking");
+});
+
+test("the fields a recorded execution block exposes survive ingestion", () => {
+  const ingested = readResultRecord("recorded", suspendedFixture("none", 0));
+  assert.equal(ingested.execution.contract, "bounded-execution-v1");
+  assert.equal(ingested.execution.limits.measurementCeilingSeconds, 5400);
+  assert.equal(ingested.execution.limits.inactivityTimeoutSeconds, 300);
+  assert.equal(ingested.execution.interruption.state, "none");
+});
+
+test("a schema 1.0 result may not carry an execution record", () => {
+  const document = fixture();
+  document.execution = suspendedFixture().execution;
+  assert.throws(() => readResultRecord("legacy", document), /cannot carry an execution record/);
+});
+
 test("a split placement is not compared against an undivided one", () => {
   const document = bridgedFixture();
   document.environment.serving.placement = { mode: "cpu-gpu-offload", detail: "32 of 49 layers on GPU", provenance: "contributor-declared" };

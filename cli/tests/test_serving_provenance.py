@@ -487,6 +487,100 @@ class ModelProposalPackagingTests(PackagingFixture):
         self.assertFalse((run / "model-proposal.json").exists())
 
 
+class InterruptedRunTests(PackagingFixture):
+    """A run the machine slept through, and what is still possible with it."""
+
+    def suspended_bundle(self) -> Path:
+        run = fixtures.single_host_run(self.root)
+        code, result = self.package(
+            run, framework="vllm", framework_version="0.11.0", execution_device="gpu",
+            provenance=self.declaration(fixtures.single_host_declaration()))
+        self.assertEqual(code, 0)
+        self.assertEqual(result["schema_version"], "1.1")
+        result["execution"] = {
+            "contract": "bounded-execution-v1",
+            "limits": {"inactivity_timeout_seconds": 300.0, "request_deadline_seconds": 900.0,
+                       "measurement_ceiling_seconds": 900.0, "shutdown_grace_seconds": 60.0},
+            "supervisor": {"fired": False, "reason": None, "escalated": False,
+                           "at_seconds": None, "detail": ""},
+            "interruption": {"state": "suspended", "observed_seconds": 4296.0,
+                             "longest_seconds": 4296.0,
+                             "events": [{"kind": "suspended", "seconds": 4296.0,
+                                         "started_at": "2026-11-06T03:47:26+00:00",
+                                         "ended_at": "2026-11-06T04:59:26+00:00"}]},
+            "sleep_prevention": {"requested": True, "held": False,
+                                 "mechanism": "windows-power-request-v1", "request": None,
+                                 "detail": "Windows refused the request (error 5)."},
+        }
+        (run / "result.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+        return run
+
+    def test_an_uninterrupted_run_records_that_it_was_not(self) -> None:
+        run = fixtures.single_host_run(self.root)
+        code, result = self.package(
+            run, framework="vllm", framework_version="0.11.0", execution_device="gpu",
+            provenance=self.declaration(fixtures.single_host_declaration()))
+        self.assertEqual(code, 0)
+        # The fixture's environment.json carries no execution record, so none
+        # is invented: "nobody looked" is not "nothing happened".
+        self.assertNotIn("execution", result)
+        self.assertEqual(self.validate(run), [])
+
+    def test_a_suspended_run_is_refused_for_its_own_reason(self) -> None:
+        """Not an acceptance failure, and not said as one."""
+        errors = self.validate(self.suspended_bundle())
+        interruption = [error for error in errors if "interruption:" in error]
+        self.assertTrue(interruption, errors)
+        self.assertIn("suspended for 4296.0 seconds", interruption[0])
+        self.assertIn("not a measurement of the model", interruption[0])
+        self.assertIn("stays available for diagnosis", interruption[0])
+        self.assertEqual([error for error in errors if "acceptance:" in error], [])
+
+    def test_it_stays_inspectable_and_downloadable(self) -> None:
+        """Acceptance criteria block publication, not looking at your own run."""
+        from omobench.ui_submission import bundle_archive, prepare_submission
+
+        run = self.suspended_bundle()
+        preview = prepare_submission(self.root, run)
+        self.assertFalse(preview["can_submit"])
+        self.assertEqual(len(preview["files"]), 5)
+        self.assertIn("suspended", preview["message"])
+        self.assertGreater(len(bundle_archive(self.root, run)), 0)
+
+    def test_submission_itself_stays_shut(self) -> None:
+        from omobench.ui_submission import UIError, bundle_snapshot
+
+        run = self.suspended_bundle()
+        with self.assertRaises(UIError):
+            bundle_snapshot(self.root, run)  # strict: no allow_unacceptable
+
+    def test_a_repackage_takes_the_record_from_the_evidence_not_the_result(self) -> None:
+        """Which is what stops one being carried where it was never earned.
+
+        The record describes what happened while the benchmark ran, so it
+        lives in the run's own evidence. A derived bundle reads it from
+        there. Editing a result.json to claim one -- which is exactly what
+        this fixture did -- gets you nowhere, because repackaging never reads
+        the old result for it.
+        """
+        run = self.suspended_bundle()
+        destination = self.root / ".omobench-runs" / "run-fixture-1234-rebuilt"
+        code = repackage_local_run(argparse.Namespace(
+            run_dir=str(run),
+            provenance=self.declaration(fixtures.single_host_declaration(
+                result={"model": "Qwen/Qwen3-4B", "model_revision": "abc123",
+                        "quantization": "Q4_K_M", "framework": "vllm",
+                        "framework_version": "0.11.0", "execution_device": "gpu",
+                        "submitter": "local-tester", "profile": "chat-small-v1",
+                        "runtime_args": []})),
+            output_dir=str(destination), submitter=None, force=True))
+        self.assertEqual(code, 0)
+        rebuilt = json.loads((destination / "result.json").read_text(encoding="utf-8"))
+        # The evidence was copied byte for byte, and the evidence is where the
+        # record lives -- so a derived bundle cannot quietly lose it.
+        self.assertNotIn("execution", rebuilt)
+
+
 class RepackagingTests(PackagingFixture):
     def repackage(self, run: Path, declaration: dict, **overrides) -> tuple[int, Path]:
         destination = self.root / ".omobench-runs" / "run-fixture-1234-repackaged"
