@@ -31,15 +31,31 @@ See [guided-launcher.md](docs/guided-launcher.md).
 
 ## V1 scope and invariants
 
-- Public results are for catalogued open-weight, text-generation models, or for
-  a model submitted with a proposal for the catalog. A proposal is a request for
-  review: `catalog/models/` stays the only source of eligible models, merging a
-  result never adds one, and accepting a proposal is a separate reviewed change.
+- **OmoBench is hardware-first.** It measures what a machine can do; a model is
+  the workload you put on that machine to find out, the way a fixed dataset is
+  the load you put on a database. Nothing here ranks models, and model size or
+  speed is never presented as a measure of answer quality.
+- Public results are for open-weight, text-generation models that meet the
+  documented requirements in [model-eligibility.md](docs/model-eligibility.md):
+  licence, obtainable weights, modality, identity, workload, acceptance,
+  artifacts and privacy, serving provenance, and execution. **Membership of
+  `catalog/models/` is not one of them.** The curated list recommends workloads
+  whose licence and modality somebody has already checked; it is not the set of
+  models allowed to exist. A model that is not on it is submitted as
+  `uncatalogued` under schema 1.2, carrying `model.eligibility`; a proposal to
+  add it to the list remains available and is no longer required. Merging a
+  result never adds a model to the list, and accepting a proposal is still a
+  separate reviewed change.
+- Each model is evaluated against those requirements on its own. One gated
+  repository being listed does not make gating irrelevant, and a licence being
+  acceptable for one model says nothing about the next.
 - Requests use streaming OpenAI-compatible `/v1/chat/completions`.
 - Public v1 results must be genuinely executed on their declared device. CPU and GPU are both first-class, publishable execution devices; `execution_device` describes what actually performed inference, not merely what hardware is installed.
 - Benchmark profiles in `benchmarks/profiles/` are versioned workload definitions. Do not silently change their load, token counts, or metrics.
 - A model revision must be immutable; do not accept `main`, `master`, or `latest`.
-- The model catalog in `catalog/models/` is the source of truth for eligible public models. Do not hard-code a competing model list.
+- `catalog/models/` and `catalog/workloads/` are curated recommendations, not a
+  permission list. Do not hard-code a competing one, and do not reintroduce
+  membership as a condition of submission.
 - Runtime provenance matters. Preserve the exact framework, version, startup arguments, and a meaningful description for `openai-compatible-other`.
 - GPU metadata is vendor-neutral. Do not make NVIDIA-only assumptions or infer VRAM from an unreliable source.
 - `--execution-device` records a contributor's declaration; it does not create or independently prove execution on that device. A CPU result must not represent an installed-but-unused GPU as having performed inference, its `hardware.gpus` stays empty even when the machine has an idle GPU.
@@ -181,7 +197,8 @@ Keep localhost/token/origin protections and the one-panel-per-checkout lock.
 | Path | Responsibility |
 | --- | --- |
 | `benchmarks/profiles/` | Fixed, versioned benchmark workloads |
-| `catalog/models/` | Eligible-model registry |
+| `catalog/models/` | Curated model list: a recommendation, not a condition of submission |
+| `catalog/workloads/` | Curated workloads with hardware fit estimates; see [model-eligibility.md](docs/model-eligibility.md) |
 | `catalog/downloads/` | Reviewed managed download recipes (model + runtime provenance for `omobench prepare`/`launch`); see [guided-launcher.md](docs/guided-launcher.md) |
 | `cli/` | `omobench` CLI, browser controller/assets, and tests |
 | `schema/` | Public `result.json` and model-proposal contracts |

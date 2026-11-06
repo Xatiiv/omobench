@@ -953,7 +953,8 @@ class Controller:
             vram_gb = max(memories) if memories else None
 
         answer = workloads.describe(self.root, serving_ram_gb=ram_gb,
-                                    serving_vram_gb=vram_gb, placement=placement)
+                                    serving_vram_gb=vram_gb, placement=placement,
+                                    bridged=bridged)
         answer["hardware"]["source"] = source
         answer["hardware"]["bridged"] = bridged
         return answer

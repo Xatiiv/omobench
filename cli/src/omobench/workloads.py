@@ -76,15 +76,28 @@ def tier_for(gigabytes: float | None, tiers: tuple[int, ...]) -> int | None:
     return met[-1] if met else None
 
 
-def fits(requirement_gb: int | None, available_gb: float | None) -> str:
-    """Three answers, and "unknown" is one of them.
+def fits(requirement_gb: float | None, available_gb: float | None,
+         load_gb: float | None = None) -> str:
+    """Four answers, and two of them are not "no".
 
-    A fit nobody could compute is not a fit that failed. Saying so is the
-    difference between "this will not run" and "nothing here knows".
+    "unknown" is a real answer: a fit nobody could compute is not a fit that
+    failed, and saying so is the difference between "this will not run" and
+    "nothing here knows".
+
+    "marginal" is the one this project learned the hard way. Qwen3-4B Q4_K_M
+    loads into 4.3 GB on a 7.49 GB machine, serves perfectly well, and was
+    killed by the kernel 34 requests into a profile once it had grown to
+    7 GB. Reporting that as "fits" promises something that did not happen;
+    reporting it as "too large" denies something that plainly did. It loads,
+    and it may not finish.
     """
     if requirement_gb is None or available_gb is None:
         return "unknown"
-    return "fits" if available_gb >= requirement_gb else "too-large"
+    if available_gb >= requirement_gb:
+        return "fits"
+    if load_gb is not None and available_gb >= load_gb:
+        return "marginal"
+    return "too-large"
 
 
 def describe(
@@ -93,6 +106,7 @@ def describe(
     serving_ram_gb: float | None = None,
     serving_vram_gb: float | None = None,
     placement: str = "cpu-only",
+    bridged: bool = False,
 ) -> dict[str, Any]:
     """Every curated workload, annotated against the serving hardware given.
 
@@ -104,6 +118,12 @@ def describe(
     device = "gpu" if placement != "cpu-only" and serving_vram_gb is not None else "cpu"
     available = serving_vram_gb if device == "gpu" else serving_ram_gb
     tiers = GPU_VRAM_TIERS_GB if device == "gpu" else CPU_RAM_TIERS_GB
+    basis = document.get("estimate_basis") or {}
+    runner_allowance = basis.get("runner_allowance_gb") or 0.0
+    # The runner's own footprint counts only where it shares the machine with
+    # the server. On a bridged run it is somewhere else entirely, and charging
+    # the serving host for it would be inventing a constraint.
+    shares_host = not bridged and device == "cpu"
 
     families = []
     for family in document["families"]:
@@ -111,19 +131,35 @@ def describe(
         for variant in family.get("variants") or []:
             options = []
             for option in variant.get("quantisations") or []:
-                # A requirement, not a tier. Comparing a machine against the
-                # *class* it belongs to said this laptop could not run the
-                # model it had been running all day: 7.49 GB is short of the
-                # 8 GB tier, and the workload needs 4.
-                requirement = option.get("requires_gb")
+                # Four different numbers, and the one that decides is the
+                # last one anybody thinks of. A model that loads is not a
+                # model that fits: Qwen3-4B Q4_K_M loads into 4.3 GB and was
+                # holding 6.99 GB when the kernel killed it 34 requests into
+                # a profile. Fit is judged on sustained memory, plus the
+                # runner's own footprint when the runner shares the machine.
+                load_memory = option.get("load_memory_gb")
+                sustained = option.get("sustained_memory_gb") or load_memory
+                requirement = None
+                if sustained is not None:
+                    requirement = round(sustained + (runner_allowance if shares_host else 0.0), 1)
                 options.append({
                     "quantisation": option.get("label"),
                     "runtime": option.get("runtime"),
+                    # Kept apart on purpose, and each says whether anybody
+                    # measured it. A reader who cannot tell a measured figure
+                    # from arithmetic cannot judge the fit either.
                     "weights_gb": option.get("weights_gb"),
-                    # Says which kind of number the one above is. A reader who
-                    # cannot tell a measured file size from arithmetic cannot
-                    # judge the fit either.
-                    "weights_estimated": bool(option.get("estimated")),
+                    "weights_measured": bool(option.get("weights_measured")),
+                    "load_memory_gb": load_memory,
+                    "sustained_memory_gb": sustained,
+                    "memory_measured": bool(option.get("memory_measured")),
+                    "memory_note": option.get("memory_note"),
+                    "growth_model": option.get("growth_model") or "llama.cpp-observed",
+                    # What has actually happened on real hardware, which is
+                    # not the same claim as fitting and is usually less than
+                    # anybody assumes.
+                    "benchmark": option.get("benchmark") or "never-run",
+                    "benchmark_note": option.get("benchmark_note"),
                     "recipe": option.get("recipe"),
                     "prepared": option.get("recipe") is not None,
                     "requires_gb": requirement,
@@ -132,7 +168,7 @@ def describe(
                     # Presentation, never the comparison.
                     "tier_gb": next((tier for tier in tiers if requirement is not None
                                      and tier >= requirement), None),
-                    "fit": fits(requirement, available),
+                    "fit": fits(requirement, available, load_memory),
                     "offload_required": (
                         device == "gpu" and requirement is not None
                         and available is not None and available < requirement),
@@ -173,6 +209,8 @@ def describe(
             # still run plenty; only the first number decides anything.
             "available_gb": available,
             "tier_gb": tier_for(available, tiers),
+            "runner_shares_host": shares_host,
+            "runner_allowance_gb": runner_allowance if shares_host else 0.0,
             "tiers": list(tiers),
             "known": available is not None,
         },
@@ -183,6 +221,11 @@ def describe(
             "Expected to fit is arithmetic about memory, not a benchmark result: it predicts "
             "nothing about speed, about meeting a profile's acceptance thresholds, or about the "
             "quality of what the model produces.",
+            "Loading is not fitting. A server that starts in 4.3 GB can be holding 7 GB by the "
+            "end of a profile, and fit here is judged on the second figure. Where that figure "
+            "was not measured it is one observed growth ratio applied to an estimate.",
+            "'Marginal' means it will load and serve and may not finish: that is exactly what "
+            "happened here, to the workload this panel shipped as its recommended one.",
             "A machine that fits a workload can still fail to finish one.",
             "These sizes describe the machine that serves the model. On a bridged run that is a "
             "different computer from the one this panel is in.",

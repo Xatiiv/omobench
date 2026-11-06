@@ -20,12 +20,25 @@ permissions. The website registry updates after merge and a build containing it.
 
 ## Model eligibility
 
-`catalog/models/*.yaml` is the source of truth for eligible submitted models.
-`tools/validate_results.py` rejects a submitted result whose `model.id` is
-absent from the catalog, or whose catalog `modality` is not
-`text-generation`. This gate lives only in registry validation and CI; the
-`omobench` CLI package itself stays permissive about model IDs so it can be
-used for local staging before a model is added to the catalog.
+Eligibility is a set of requirements, not a list. They are stated in full in
+[model-eligibility.md](model-eligibility.md): licence, obtainable weights,
+text-generation modality, immutable identity, versioned workload, acceptance
+thresholds, artifacts and privacy, serving provenance, and execution.
+`tools/validate_results.py` checks every one of them and names the one that is
+missing.
+
+`catalog/models/*.yaml` is a **curated recommendation**: models whose licence
+and modality somebody has already checked, so a reviewer does not have to. A
+model on it submits as `catalogued` and needs no eligibility block. A model
+that is not on it submits as `uncatalogued` under schema 1.2, carrying
+`model.eligibility` with the licence, a URL where that licence can be read,
+whether anybody can obtain the weights, and the modality.
+
+Each model is judged on its own terms. A gated repository whose terms anybody
+may accept satisfies the obtainability requirement; one restricted to approved
+organisations does not, and neither does a licence that forbids publishing
+benchmark results. That another gated model is listed is not an argument about
+any particular one.
 
 A catalog entry requires non-empty `id`, `modality`, `source`, and `licence`
 fields; a missing or malformed `catalog/models/*.yaml` file fails validation
@@ -37,15 +50,14 @@ canonical catalog ID of the model actually served, and schema 1.1 records the
 alias separately as `model.served_model_id` so the two are never confused.
 Adding an alias does not make a different model eligible.
 
-An uncatalogued model has a route to review without a hand-written catalog
-change first: a schema 1.1 bundle may carry `model-proposal.json`, bound to
-that model, that run and that submitter, with `model.catalog_status` set to
-`proposed`. The validator checks the proposal and its relationship to the
-result, and rejects a second proposal for the same model. It does not make the
-model eligible: `catalog/models/*.yaml` remains the only source of eligible
-models, and accepting a proposal is a separate, reviewed catalog change. The
-catalog's `initial_runtimes` field is planning information, not an enforced
-runtime allowlist.
+A model may also be **proposed** for the curated list: a bundle may carry
+`model-proposal.json`, bound to that model, that run and that submitter, with
+`model.catalog_status` set to `proposed`. The validator checks the proposal and
+its relationship to the result, and rejects a second proposal for the same
+model. A proposal is a request to add the model to the recommendations — it is
+no longer the route to submitting a result, and accepting one is still a
+separate, reviewed catalog change. The catalog's `initial_runtimes` field is
+planning information, not an enforced runtime allowlist.
 
 Schema 1.1 also records what served the model, separately from what measured
 it, along with the weight identity, the tokenizer that counted the tokens, and

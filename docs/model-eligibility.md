@@ -24,11 +24,20 @@ conditions and one promise, and none of them is about being on a list.
 policy.** `meta-llama/Llama-3.1-8B-Instruct` has been in the catalog since the
 beginning, and its Hugging Face repository is gated: you must agree to share
 your contact information before the files appear. So "publicly downloadable"
-has always meant *obtainable by anybody who accepts the publisher's terms*, not
-*downloadable without a click-through*. That reading is kept, because narrowing
-it now would retroactively disqualify a model the project has always listed.
-What it excludes is weights nobody else can get at all: a private fine-tune, an
-internal checkpoint, a hosted API with no weights behind it.
+cannot have meant *downloadable without a click-through*, or that entry would
+never have been listed. It means *obtainable by anybody willing to accept the
+publisher's terms*. What it excludes is weights nobody else can get at all: a
+private fine-tune, an internal checkpoint, a hosted API with no weights behind
+it.
+
+**That is a reading of the policy, not a blanket pass for gating.** One gated
+repository being listed does not make gating irrelevant to the next one. A
+gate whose terms are open to anybody is consistent with requirement 2; a gate
+restricted to approved organisations, to one jurisdiction, or to
+non-commercial use by a particular class of person is not, and neither is one
+whose terms forbid publishing benchmark results — which is requirement 1. Each
+model is judged on its own terms, and "another gated model is listed" is not
+an argument about any of them.
 
 ## The requirements
 

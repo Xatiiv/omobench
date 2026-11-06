@@ -1,4 +1,4 @@
-catalog_version: 1
+catalog_version: 2
 # Workloads, not a leaderboard of models.
 #
 # OmoBench measures hardware. A model is the load you put on a machine to find
@@ -14,36 +14,54 @@ purpose: >-
   Curated text-generation workloads for evaluating hardware. Membership is a
   recommendation, never a condition of submission. See docs/model-eligibility.md.
 
-# How the fit tiers below were arrived at, so nobody reads them as measurements.
+# FOUR DIFFERENT NUMBERS, and version 1 of this file conflated two of them.
 #
-# `expected_fit` is ARITHMETIC, not a benchmark result. For a quantised GGUF
-# it is the weight file plus a working allowance:
+#   weights_gb           the file on disk
+#   load_memory_gb       what the server occupies once the model is loaded and
+#                        has served a few requests
+#   sustained_memory_gb  what it occupies by the END of a full profile
+#   (available memory)   what the serving machine actually has, read at runtime
 #
-#     weights + KV cache + runtime overhead
+# The third is the one that matters and the one nobody thinks to ask about.
+# Measured here on llama.cpp b10621 serving Qwen3-4B Q4_K_M: 2.5 GB of weights
+# loaded to 4.30 GB resident, and by request 34 of a 60-request profile the
+# process held 6.99 GB of ANONYMOUS memory -- not the mapped weight file, real
+# allocations -- at which point the kernel killed it on a 7.49 GB machine.
 #
-# with the KV cache taken at the profile's own context (chat-small-* serves at
-# 2048) and the overhead at 1 GB, which is what llama.cpp b10621 was observed
-# to need on this project's own laptop. Where the exact weight file is pinned
-# below, the weight figure is that file's real size. Where it is not, the
-# weight figure is `parameters x bits_per_weight / 8`, which is an estimate of
-# an estimate and is marked `estimated: true`.
+#     Out of memory: Killed process 197464 (llama-server)
+#       total-vm:12792992kB, anon-rss:6990392kB
 #
-# Two things this deliberately does not do. It does not promise the run will
-# qualify -- "expected to fit" and "successfully benchmarked" are different
-# claims, and only a result establishes the second. And it says nothing about
-# how good the answers are: a bigger or faster model is not a better one, and
-# this file ranks nothing.
+# So "it loaded once" is not evidence that it fits. Version 1 of this file said
+# Qwen3-4B Q4_K_M needed 4 GB, which was arithmetic from the weight file and
+# was wrong by most of a factor of two for the thing people actually want to do
+# with it. Where this session measured a number it is marked `measured: true`;
+# everywhere else the sustained figure applies the one growth ratio observed
+# here (6.99 / 4.30 = 1.63), which is a single observation of a single engine
+# and is marked as an estimate.
+#
+# And a run that completes is still not a run that qualifies. `benchmark`
+# records what has actually happened on real hardware, which for every entry
+# here is less than people would assume.
 estimate_basis:
   context_tokens: 2048
   runtime_overhead_gb: 1.0
-  overhead_source: >-
-    llama.cpp b10621 serving a 4B Q4_K_M model measured at 4.30 GB resident
-    against a 2.5 GB weight file, on this project's own hardware. A different
-    engine, a longer context or a larger batch will differ.
+  growth_ratio: 1.63
+  growth_source: >-
+    llama.cpp b10621, Qwen3-4B Q4_K_M, 34 requests of chat-small-extended-v1 on
+    2026-11-06: resident 4.30 GB at start, 6.99 GB anonymous at the kernel's
+    OOM kill. One observation, one engine, one model. A different engine, a
+    longer context or a larger batch will differ, and this ratio should be
+    replaced with real figures as they are measured.
+  runner_allowance_gb: 1.2
+  runner_allowance_source: >-
+    The benchmark runner holds a tokenizer and its own process tree beside the
+    server. Added only when the runner and the server share a machine, which is
+    every same-host run and no bridged one.
   caveat: >-
     Expected to fit is arithmetic about memory. It is not a prediction of
     speed, of acceptance, or of answer quality, and a machine that fits a
-    workload can still fail to finish the profile.
+    workload can still fail to finish the profile. Only a completed benchmark
+    establishes that a machine ran something.
 
 families:
   - family: Qwen3
@@ -62,21 +80,38 @@ families:
             runtime: llama.cpp
             artefact: ggml-org/Qwen3-4B-GGUF
             weights_gb: 2.5
-            estimated: false
+            weights_measured: true
+            load_memory_gb: 4.3
+            sustained_memory_gb: 7.0
+            memory_measured: true
+            memory_note: >-
+              Measured on this project's own hardware. 4.30 GB resident freshly
+              started; 6.99 GB anonymous by request 34, then OOM-killed on a
+              7.49 GB allocation.
+            benchmark: not-qualified
+            benchmark_note: >-
+              chat-small-v1 ran to its 900 s ceiling with 14 measured requests.
+              chat-small-extended-v1 was killed by the kernel at 29 successful.
+              No profile has qualified on that machine.
             recipe: qwen3-4b-cpu-v2
-            requires_gb: 4.0   # 2.5 GB weights + KV at 2048 + 1 GB overhead
           - label: Q8_0
             runtime: llama.cpp
             artefact: ggml-org/Qwen3-4B-GGUF
             weights_gb: 4.28
-            estimated: false
-            requires_gb: 5.8   # 4.28 GB weights + KV at 2048 + 1 GB overhead
+            weights_measured: true
+            load_memory_gb: 6.1
+            sustained_memory_gb: 9.9
+            memory_measured: false
+            benchmark: never-run
           - label: F16
             runtime: llama.cpp
             artefact: ggml-org/Qwen3-4B-GGUF
             weights_gb: 8.05
-            estimated: false
-            requires_gb: 9.6   # 8.05 GB weights + KV at 2048 + 1 GB overhead
+            weights_measured: true
+            load_memory_gb: 9.9
+            sustained_memory_gb: 16.1
+            memory_measured: false
+            benchmark: never-run
       - id: Qwen/Qwen3-8B
         parameter_class: 8B
         source: https://huggingface.co/Qwen/Qwen3-8B
@@ -85,13 +120,23 @@ families:
           - label: Q4_K_M
             runtime: llama.cpp
             weights_gb: 4.9
-            estimated: true
-            requires_gb: 6.4   # 4.9 GB weights + KV at 2048 + 1 GB overhead
+            weights_measured: false
+            load_memory_gb: 6.7
+            sustained_memory_gb: 10.9
+            memory_measured: false
+            benchmark: never-run
           - label: BF16
             runtime: vllm
             weights_gb: 16.4
-            estimated: true
-            requires_gb: 17.9   # 16.4 GB weights + KV at 2048 + 1 GB overhead
+            weights_measured: false
+            load_memory_gb: 18.2
+            sustained_memory_gb: 29.7
+            memory_measured: false
+            # vLLM pre-allocates its KV cache rather than growing into it, so
+            # the llama.cpp growth ratio is the wrong shape here. Marked so
+            # nobody reads this figure as more than a placeholder.
+            growth_model: not-applicable
+            benchmark: never-run
 
   - family: Mistral
     publisher: Mistral AI
@@ -108,13 +153,20 @@ families:
           - label: Q4_K_M
             runtime: llama.cpp
             weights_gb: 4.4
-            estimated: true
-            requires_gb: 5.9   # 4.4 GB weights + KV at 2048 + 1 GB overhead
+            weights_measured: false
+            load_memory_gb: 6.2
+            sustained_memory_gb: 10.1
+            memory_measured: false
+            benchmark: never-run
           - label: BF16
             runtime: vllm
             weights_gb: 14.5
-            estimated: true
-            requires_gb: 16.0   # 14.5 GB weights + KV at 2048 + 1 GB overhead
+            weights_measured: false
+            load_memory_gb: 16.3
+            sustained_memory_gb: 26.6
+            memory_measured: false
+            growth_model: not-applicable
+            benchmark: never-run
 
   - family: Phi
     publisher: Microsoft
@@ -133,25 +185,35 @@ families:
           - label: Q4_K_M
             runtime: llama.cpp
             weights_gb: 9.1
-            estimated: true
-            requires_gb: 11.1   # 9.1 GB weights + KV at 2048 + 1 GB overhead
+            weights_measured: false
+            load_memory_gb: 11.1
+            sustained_memory_gb: 18.1
+            memory_measured: false
+            benchmark: never-run
           - label: BF16
             runtime: vllm
             weights_gb: 29.3
-            estimated: true
-            requires_gb: 31.3   # 29.3 GB weights + KV at 2048 + 1 GB overhead
+            weights_measured: false
+            load_memory_gb: 31.3
+            sustained_memory_gb: 51.0
+            memory_measured: false
+            growth_model: not-applicable
+            benchmark: never-run
 
   - family: Llama 3.1
     publisher: Meta
     licence: llama3.1
     licence_url: https://github.com/meta-llama/llama-models/blob/main/models/llama3_1/LICENSE
-    # Gated, and that is fine: the weights are obtainable by anybody who
-    # accepts Meta's terms, which is what the eligibility policy requires. The
-    # panel says so before you try to download anything.
+    # Gated, and judged on its own terms: Meta's gate is open to anybody
+    # willing to accept the Llama 3.1 Community License, which is what the
+    # obtainability requirement asks. A gate restricted to approved
+    # organisations would not qualify, and this one being listed says nothing
+    # about any other gated model.
     gated: true
     gate_note: >-
       Hugging Face requires you to agree to share your contact information and
-      accept the Llama 3.1 Community License before the files appear.
+      accept the Llama 3.1 Community License before the files appear. Anybody
+      may accept it.
     source_verified: 2026-11-06
     variants:
       - id: meta-llama/Llama-3.1-8B-Instruct
@@ -162,25 +224,35 @@ families:
           - label: Q4_K_M
             runtime: llama.cpp
             weights_gb: 4.9
-            estimated: true
-            requires_gb: 6.4   # 4.9 GB weights + KV at 2048 + 1 GB overhead
+            weights_measured: false
+            load_memory_gb: 6.7
+            sustained_memory_gb: 10.9
+            memory_measured: false
+            benchmark: never-run
           - label: BF16
             runtime: vllm
             weights_gb: 16.1
-            estimated: true
-            requires_gb: 17.6   # 16.1 GB weights + KV at 2048 + 1 GB overhead
+            weights_measured: false
+            load_memory_gb: 17.9
+            sustained_memory_gb: 29.2
+            memory_measured: false
+            growth_model: not-applicable
+            benchmark: never-run
 
   - family: DeepSeek
     publisher: DeepSeek
     licence: mit
     licence_url: https://opensource.org/license/mit
     gated: false
-    # Carried over from catalog/models/seed-v1.yaml. Unlike the four above,
-    # its model card was not re-read in this pass, so the licence and the
-    # parameter class are the catalog's existing record rather than a fresh
-    # reading. Marked so nobody mistakes one for the other.
+    # Carried over from catalog/models/seed-v1.yaml and NOT re-read in this
+    # pass. Its licence and parameter class are the existing catalog's record
+    # rather than a fresh reading of the model card, which is a weaker thing
+    # and is marked as one. Resolve by reading the card and setting
+    # source_verified, or drop the entry.
     source_verified: null
-    source_note: carried from catalog/models/seed-v1.yaml; not re-verified in this pass
+    source_note: >-
+      Carried from catalog/models/seed-v1.yaml; the model card was not read in
+      this pass, so the licence and parameter class are unverified here.
     variants:
       - id: deepseek-ai/DeepSeek-R1-Distill-Qwen-14B
         parameter_class: 14B
@@ -190,8 +262,11 @@ families:
           - label: Q4_K_M
             runtime: llama.cpp
             weights_gb: 9.0
-            estimated: true
-            requires_gb: 11.0   # 9.0 GB weights + KV at 2048 + 1 GB overhead
+            weights_measured: false
+            load_memory_gb: 11.0
+            sustained_memory_gb: 17.9
+            memory_measured: false
+            benchmark: never-run
 
 # Checked and deliberately excluded, so the reasoning is on the record rather
 # than looking like an oversight.

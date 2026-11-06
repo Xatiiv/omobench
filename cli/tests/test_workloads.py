@@ -26,18 +26,32 @@ class CatalogTests(unittest.TestCase):
         document = workloads.load(Path("/nonexistent-checkout"))
         self.assertEqual(document["families"], [])
 
-    def test_every_weight_figure_says_whether_it_was_measured(self) -> None:
+    def test_every_memory_figure_says_whether_it_was_measured(self) -> None:
         for family in workloads.load(ROOT)["families"]:
             for variant in family["variants"]:
                 for option in variant["quantisations"]:
-                    self.assertIn("estimated", option, f"{variant['id']} {option['label']}")
-                    self.assertIsInstance(option["estimated"], bool)
+                    where = f"{variant['id']} {option['label']}"
+                    for key in ("weights_gb", "load_memory_gb", "sustained_memory_gb"):
+                        self.assertIn(key, option, where)
+                    self.assertIn("weights_measured", option, where)
+                    self.assertIn("memory_measured", option, where)
+                    self.assertIn(option.get("benchmark", "never-run"),
+                                  {"never-run", "not-qualified", "qualified"}, where)
+
+    def test_loading_and_sustaining_are_different_numbers(self) -> None:
+        """The distinction version 1 of the catalog did not make."""
+        for family in workloads.load(ROOT)["families"]:
+            for variant in family["variants"]:
+                for option in variant["quantisations"]:
+                    self.assertGreater(option["load_memory_gb"], option["weights_gb"])
+                    self.assertGreaterEqual(option["sustained_memory_gb"],
+                                            option["load_memory_gb"])
 
     def test_a_family_nobody_re_read_says_so(self) -> None:
         """Carried-over records and fresh readings are different things."""
         families = {f["family"]: f for f in workloads.load(ROOT)["families"]}
         self.assertIsNone(families["DeepSeek"]["source_verified"])
-        self.assertIn("not re-verified", families["DeepSeek"]["source_note"])
+        self.assertIn("not read in this pass", families["DeepSeek"]["source_note"])
         self.assertEqual(str(families["Qwen3"]["source_verified"]), "2026-11-06")
 
     def test_a_gated_family_is_marked_and_explained(self) -> None:
@@ -66,11 +80,18 @@ class TierTests(unittest.TestCase):
     def test_unknown_memory_produces_no_tier(self) -> None:
         self.assertIsNone(workloads.tier_for(None, workloads.CPU_RAM_TIERS_GB))
 
-    def test_unknown_is_a_third_answer_and_not_a_failure(self) -> None:
+    def test_unknown_is_a_real_answer_and_not_a_failure(self) -> None:
         self.assertEqual(workloads.fits(8, None), "unknown")
         self.assertEqual(workloads.fits(None, 64), "unknown")
         self.assertEqual(workloads.fits(8, 8), "fits")
         self.assertEqual(workloads.fits(16, 8), "too-large")
+
+    def test_marginal_is_the_answer_this_project_learned_the_hard_way(self) -> None:
+        """Loads and serves, and may not finish. Reporting it as "fits"
+        promises what did not happen; "too large" denies what plainly did."""
+        self.assertEqual(workloads.fits(8.2, 7.49, 4.3), "marginal")
+        self.assertEqual(workloads.fits(8.2, 7.49, 9.0), "too-large")
+        self.assertEqual(workloads.fits(8.2, 9.0, 4.3), "fits")
 
 
 class DescribeTests(unittest.TestCase):
@@ -88,7 +109,7 @@ class DescribeTests(unittest.TestCase):
         document = workloads.describe(ROOT, serving_ram_gb=8.0)
         self.assertEqual(document["hardware"]["tier_gb"], 8)
         self.assertEqual(document["hardware"]["available_gb"], 8.0)
-        self.assertEqual(self.options(document, "Qwen/Qwen3-4B", "Q4_K_M")["fit"], "fits")
+        self.assertEqual(self.options(document, "Qwen/Qwen3-4B", "Q4_K_M")["fit"], "marginal")
         self.assertEqual(self.options(document, "microsoft/phi-4", "Q4_K_M")["fit"], "too-large")
 
     def test_a_larger_machine_may_still_run_a_smaller_workload(self) -> None:
@@ -102,17 +123,34 @@ class DescribeTests(unittest.TestCase):
         self.assertFalse(document["hardware"]["known"])
         self.assertEqual(self.options(document, "Qwen/Qwen3-4B", "Q4_K_M")["fit"], "unknown")
 
-    def test_a_machine_below_a_tier_still_runs_what_it_can(self) -> None:
-        """The bug this found: comparing a machine against the tier it belongs
-        to said a 7.49 GB laptop could not run the 4 GB workload it had been
-        running all day. A requirement decides; a tier only labels."""
+    def test_this_laptop_is_told_the_truth_about_the_workload_that_killed_it(self) -> None:
+        """The whole of requirement 6, in one case with real evidence behind it.
+
+        7.49 GB of serving memory, a workload that loads into 4.3 GB and had
+        grown to 6.99 GB when the kernel killed it 34 requests into a profile.
+        Not "fits" -- that is the promise that failed. Not "too large" --
+        it demonstrably loaded and served. Marginal, with the runner's own
+        1.2 GB counted because the runner shared the machine.
+        """
         document = workloads.describe(ROOT, serving_ram_gb=7.49)
-        self.assertIsNone(document["hardware"]["tier_gb"], "short of the 8 GB tier")
+        self.assertTrue(document["hardware"]["runner_shares_host"])
         option = self.options(document, "Qwen/Qwen3-4B", "Q4_K_M")
-        self.assertEqual(option["fit"], "fits")
-        self.assertEqual(option["requires_gb"], 4.0)
-        self.assertEqual(option["tier_gb"], 8, "it is still an 8 GB-class workload")
-        self.assertEqual(self.options(document, "Qwen/Qwen3-4B", "F16")["fit"], "too-large")
+        self.assertEqual(option["fit"], "marginal")
+        self.assertEqual(option["load_memory_gb"], 4.3)
+        self.assertEqual(option["sustained_memory_gb"], 7.0)
+        self.assertEqual(option["requires_gb"], 8.2, "sustained plus the runner beside it")
+        self.assertTrue(option["memory_measured"])
+        self.assertEqual(option["benchmark"], "not-qualified")
+        self.assertIn("killed by the kernel", option["benchmark_note"])
+
+    def test_a_bridged_run_is_not_charged_for_the_runner(self) -> None:
+        """The runner is on another machine, so charging the serving host for
+        it would be inventing a constraint."""
+        same = workloads.describe(ROOT, serving_ram_gb=7.49)
+        bridged = workloads.describe(ROOT, serving_ram_gb=7.49, bridged=True)
+        self.assertFalse(bridged["hardware"]["runner_shares_host"])
+        self.assertEqual(self.options(same, "Qwen/Qwen3-4B", "Q4_K_M")["requires_gb"], 8.2)
+        self.assertEqual(self.options(bridged, "Qwen/Qwen3-4B", "Q4_K_M")["requires_gb"], 7.0)
 
     def test_gpu_placement_reads_vram_rather_than_system_memory(self) -> None:
         """Serving hardware is not runner hardware, and VRAM is not RAM."""
@@ -120,7 +158,9 @@ class DescribeTests(unittest.TestCase):
                                       placement="gpu-only")
         self.assertEqual(document["hardware"]["device"], "gpu")
         self.assertEqual(document["hardware"]["tier_gb"], 4)
-        self.assertEqual(self.options(document, "Qwen/Qwen3-4B", "Q4_K_M")["fit"], "fits")
+        # 4 GB of VRAM cannot even load a workload that needs 4.3 GB to start,
+        # so this is a flat no rather than a marginal yes.
+        self.assertEqual(self.options(document, "Qwen/Qwen3-4B", "Q4_K_M")["fit"], "too-large")
         self.assertEqual(self.options(document, "Qwen/Qwen3-4B", "F16")["fit"], "too-large")
         self.assertTrue(self.options(document, "Qwen/Qwen3-4B", "F16")["offload_required"])
 
