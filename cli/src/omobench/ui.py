@@ -25,7 +25,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-from . import cli
+from . import cli, execution, workflow
 
 
 JOB_ID = re.compile(r"^job-[a-f0-9]{16}$")
@@ -103,6 +103,8 @@ def endpoint_origin(endpoint: str) -> str:
 
 
 def run_config(data: dict) -> dict:
+    if type(data.get("windows_bridge", False)) is not bool:
+        raise UIError("Windows bridge selection must be a boolean.")
     endpoint = endpoint_origin(text_field(data, "endpoint"))
     model = text_field(data, "model")
     if "," in model:
@@ -126,7 +128,7 @@ def run_config(data: dict) -> dict:
         except ValueError as error:
             raise UIError(str(error)) from error
     return {"endpoint": endpoint, "model": model, "profile": profile,
-            "execution_device": device, "tokenizer": tokenizer or None}
+            "execution_device": device, "tokenizer": tokenizer or None, "windows_bridge": data.get("windows_bridge", False)}
 
 
 def safe_log(value: str) -> str:
@@ -142,7 +144,7 @@ class NoRedirect(HTTPRedirectHandler):
         raise UIError("The model server redirected the request. Enter its direct localhost address.")
 
 
-def streaming_probe(endpoint: str, model: str) -> tuple[str, str]:
+def streaming_probe(endpoint: str, model: str, *, _headers=None) -> tuple[str, str]:
     """One small streaming request, reported rather than raised.
 
     This is the check that matters: OmoBench's workload is streaming
@@ -150,7 +152,7 @@ def streaming_probe(endpoint: str, model: str) -> tuple[str, str]:
     stream chat completions cannot run a benchmark.
     """
     try:
-        probe_connection({"endpoint": endpoint, "model": model})
+        probe_connection({"endpoint": endpoint, "model": model}, **({"_headers": _headers} if _headers else {}))
     except UIError as error:
         message = str(error)
         if "redirected" in message or "streaming" in message or "chunk" in message:
@@ -162,13 +164,13 @@ def streaming_probe(endpoint: str, model: str) -> tuple[str, str]:
                   "and streams responses. The test request is not benchmark evidence.")
 
 
-def probe_connection(data: dict) -> dict:
+def probe_connection(data: dict, *, _headers=None) -> dict:
     endpoint = endpoint_origin(text_field(data, "endpoint"))
     model = text_field(data, "model")
     payload = {"model": model, "messages": [{"role": "user", "content": "Reply OK."}],
                "max_tokens": 1, "temperature": 0, "stream": True}
     request = Request(endpoint + "/v1/chat/completions", data=json.dumps(payload).encode(),
-                      headers={"Content-Type": "application/json", "Accept": "text/event-stream"})
+                      headers={"Content-Type": "application/json", "Accept": "text/event-stream", **(_headers or {})})
     try:
         # Ignore ambient HTTP proxies: this operation must stay on loopback.
         with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=15) as response:
@@ -193,14 +195,14 @@ def probe_connection(data: dict) -> dict:
         raise UIError("Could not read a streaming response. Check that the model is loaded and the server is running.") from error
 
 
-def served_models(endpoint: str, *, timeout: float = 8.0) -> dict:
+def served_models(endpoint: str, *, timeout: float = 8.0, _headers=None) -> dict:
     """Ask the server which models it serves, if it implements that endpoint.
 
     Only the endpoint the contributor entered is contacted, and only on
     loopback; nothing is discovered, scanned or guessed. A server that does not
     implement /v1/models is normal, not a failure.
     """
-    request = Request(endpoint + "/v1/models", headers={"Accept": "application/json"})
+    request = Request(endpoint + "/v1/models", headers={"Accept": "application/json", **(_headers or {})})
     try:
         with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=timeout) as response:
             document = json.loads(response.read(1024 * 1024))
@@ -231,7 +233,7 @@ def served_models(endpoint: str, *, timeout: float = 8.0) -> dict:
 
 
 def server_check(data: dict, *, can_execute: bool = True, runner_message: str = "",
-                 runner_health: Any = None) -> dict:
+                 runner_health: Any = None, _headers=None) -> dict:
     """What can actually be established about a contributor's own server.
 
     Deliberately staged rather than a single pass/fail: "the server answered"
@@ -280,7 +282,7 @@ def server_check(data: dict, *, can_execute: bool = True, runner_message: str = 
                                   else "This environment cannot run the benchmark."))
               + " This checked installed metadata only, not whether the runner imports.")
 
-    listing = served_models(endpoint)
+    listing = served_models(endpoint, **({"_headers": _headers} if _headers else {}))
     identifiers, listing_detail = listing["models"], listing["detail"]
     if not listing["reachable"]:
         stage("reachable", "Server reachable", "failed",
@@ -306,7 +308,7 @@ def server_check(data: dict, *, can_execute: bool = True, runner_message: str = 
                   "Use the identifier exactly as the server reports it, including any suffix.",
                   options=identifiers)
         if model:
-            state, detail = streaming_probe(endpoint, model)
+            state, detail = streaming_probe(endpoint, model, **({"_headers": _headers} if _headers else {}))
             stage("streaming", "Streaming chat completions", state, detail)
         else:
             stage("streaming", "Streaming chat completions", "skipped",
@@ -357,6 +359,15 @@ class Controller:
         self.worker: threading.Thread | None = None
         self.busy = False
         self.closing = False
+        # What the companion last read on the serving machine. Session-only: a
+        # detection is a reading of a machine at a time, not a saved fact.
+        self.last_serving_probe: dict | None = None
+        # The last server and tokenizer checks, so the workflow can say what was
+        # established rather than asking the contributor to remember. Both are
+        # session-only and both record which address or source they describe, so
+        # a stale answer is never read as a current one.
+        self.last_server_check: dict | None = None
+        self.last_tokenizer_report: dict | None = None
         from .github_auth import DeviceSession
         self.github_auth = DeviceSession()
         self.community_reviews: dict[str, dict] = {}
@@ -408,23 +419,64 @@ class Controller:
             except (OSError, ValueError, AttributeError, UIError):
                 continue
 
+    def runner_readiness(self) -> tuple[bool, str]:
+        """Whether a benchmark can start here at all, and why not when it cannot.
+
+        One answer, read by the setup payload and by the workflow's run gate,
+        so the stepper and the banner cannot disagree about it.
+        """
+        preflight = cli.guidellm_runner_preflight()
+        if sys.platform == "win32":
+            return False, "Start this panel from WSL2 or Linux to execute benchmarks."
+        return preflight.ok, preflight.message
+
     def setup(self) -> dict:
         report = cli.doctor_report()
-        preflight = cli.guidellm_runner_preflight()
-        native_windows = sys.platform == "win32"
+        can_execute, runner_message = self.runner_readiness()
         return {"environment": report, "profiles": cli.PROFILE_SPECS,
                 # How each profile's phases really resolve, so a page can mark a
                 # profile whose declaration its runner does not enforce.
                 "profile_contracts": {profile_id: cli.profile_phase_contract(self.root, profile_id)
                                       for profile_id in cli.PROFILE_SPECS},
+                # What each profile will do and what its result has to clear,
+                # so a contributor reads it before the run rather than
+                # discovering it in a validator message afterwards.
+                "profile_briefings": {profile_id: cli.profile_briefing(self.root, profile_id)
+                                      for profile_id in cli.PROFILE_SPECS},
                 "frameworks": cli.RUNTIME_FRAMEWORKS, "catalog": self.catalog_models(),
-                "can_execute": not native_windows and preflight.ok,
-                "runner_message": ("Start this panel from WSL2 or Linux to execute benchmarks." if native_windows else
-                    preflight.message),
+                "can_execute": can_execute,
+                "runner_message": runner_message,
                 "can_validate": importlib.util.find_spec("jsonschema") is not None}
 
     def _cli_command(self, arguments: list[str]) -> list[str]:
         return [sys.executable, "-u", "-m", "omobench.cli", *arguments]
+
+    @contextmanager
+    def _bridge_request(self, data):
+        if type(data.get("windows_bridge", False)) is not bool:
+            raise UIError("Windows bridge selection must be a boolean.")
+        if not data.get("windows_bridge"):
+            yield data, {}
+            return
+        from .bridge import BridgeSession
+        port = self._bridge_port(data)
+        try:
+            with BridgeSession(port) as session:
+                yield {**data, "endpoint": session.endpoint}, {"X-OmoBench-Bridge-Token": session.credentials["token"]}
+        except (ValueError, OSError) as error:
+            raise UIError("Windows bridge unavailable. Open the updated companion and check that the Windows server is running.") from error
+
+    def _bridge_port(self, data):
+        from .bridge import helper_path
+        from .bridge_http import Destination
+        try:
+            target = Destination.parse(endpoint_origin(text_field(data, "endpoint")))
+            if target.host != "127.0.0.1":
+                raise ValueError("IPv4 required")
+            helper_path()
+            return target.port
+        except (ValueError, OSError) as error:
+            raise UIError("Windows bridge needs an explicit IPv4 loopback port and an updated companion-managed WSL panel.") from error
 
     def connection(self, data: dict) -> dict:
         with self.lock:
@@ -432,13 +484,18 @@ class Controller:
                 raise UIError("Wait for the active operation before testing the connection.", 409)
             self.busy = True
         try:
-            return probe_connection(data)
+            with self._bridge_request(data) as (checked, headers):
+                return probe_connection(checked, **({"_headers": headers} if headers else {}))
         finally:
             with self.lock:
                 self.busy = False
 
     def start(self, data: dict) -> dict:
         config = run_config(data)
+        transport = None
+        if config["windows_bridge"]:
+            from .bridge import provenance
+            transport = provenance(self._bridge_port(data))
         if sys.platform == "win32":
             raise UIError("The current GuideLLM runner needs WSL2, Linux, or macOS. Start omobench ui there.")
         preflight = cli.guidellm_runner_preflight()
@@ -455,12 +512,16 @@ class Controller:
                    "model": config["model"], "profile": config["profile"], "execution_device": config["execution_device"],
                    "tokenizer": config.get("tokenizer"),
                    "summary": None, "error": None, "validation": None, "submission": None}
+            if transport:
+                job["transport"] = transport
             self.jobs[job_id] = job
             self._save(job)
             telemetry_dir = directory.relative_to(self.root).as_posix() + "/telemetry"
             arguments = ["run", f"--endpoint={config['endpoint']}", f"--model={config['model']}",
                          f"--profile={config['profile']}", f"--output-dir={directory.relative_to(self.root).as_posix()}",
                          f"--telemetry-dir={telemetry_dir}", "--execute"]
+            if config["windows_bridge"]:
+                arguments.append("--windows-bridge")
             if config.get("tokenizer"):
                 arguments.append(f"--tokenizer={config['tokenizer']}")
             self.worker = threading.Thread(target=self._execute, args=(job, arguments), daemon=True)
@@ -595,18 +656,7 @@ class Controller:
 
     def catalog_models(self) -> list[str]:
         """The catalogued model IDs, the registry's own source of truth."""
-        import yaml
-
-        catalog: list[str] = []
-        for path in sorted((self.root / "catalog" / "models").glob("*.yaml")):
-            try:
-                document = yaml.safe_load(path.read_text(encoding="utf-8"))
-                catalog.extend(entry["id"] for entry in document.get("models", [])
-                               if isinstance(entry, dict) and entry.get("modality") == "text-generation"
-                               and isinstance(entry.get("id"), str))
-            except (OSError, ValueError, AttributeError, yaml.YAMLError):
-                continue
-        return sorted(set(catalog))
+        return cli.catalog_model_ids(self.root)
 
     def local_report(self, job_id: str) -> dict:
         """A local record of what this machine measured.
@@ -684,6 +734,7 @@ class Controller:
             # comparisons, so they are an execution dimension rather than a
             # reason two results cannot be compared; the workload definition is
             # what has to match for a comparison to be controlled.
+            "transport": job.get("transport") or {"kind": "direct-loopback"},
             "comparability": self.comparison_context(job, tokenizer),
             "publication": self.publication_requirements(job_id),
         }
@@ -740,6 +791,10 @@ class Controller:
             "runtime_arguments": job.get("runtime_args") or [],
             "runner_host": "this machine; see the environment snapshot in the evidence bundle",
         }
+        if job.get("transport"):
+            execution.update(transport=job["transport"]["kind"], runner_host="WSL2",
+                             serving_host="Windows loopback", serving_hardware="unknown",
+                             transport_overhead="included, not independently calibrated")
         unknowns = sorted(
             key for group in (model, execution)
             for key, value in group.items() if value == "unknown"
@@ -781,6 +836,220 @@ class Controller:
             ],
         }
 
+    def proposal_status(self, data: dict) -> dict:
+        """Whether this model needs a proposal, and what the proposal still lacks.
+
+        The proposal path existed and had no way to tell a contributor where
+        they stood in it: whether one was needed at all, what was missing, what
+        would be written locally, or what a reviewer would be asked to decide.
+        Those are four different questions and this answers them together.
+
+        Nothing here makes a model eligible. The proposal is a request, the
+        catalog is the answer, and the two stay apart.
+        """
+        from . import model_proposal
+
+        catalog = self.catalog_models()
+        model = text_field(data, "model", optional=True) or ""
+        served = text_field(data, "served_model_id", optional=True) or ""
+        declaration = data.get("proposal")
+        if declaration is not None and not isinstance(declaration, dict):
+            raise UIError("The model proposal must be an object.")
+
+        catalogued = model in catalog
+        conflict = None if not model else model_proposal.conflicts(model, catalog)
+        status = {
+            "model": model or None,
+            "served_model_id": served or None,
+            "catalogued": catalogued,
+            "required": bool(model) and not catalogued,
+            "conflict": conflict if not catalogued else None,
+            "catalog": catalog,
+            "missing": [],
+            "error": None,
+            "document": None,
+            "saved_as": model_proposal.FILENAME,
+            "review_note": (
+                "A proposal asks a reviewer to consider this model for the catalog. It is "
+                "decided separately from this result: merging the result would not add the "
+                "model, and accepting the model would not accept the result."),
+        }
+        if catalogued:
+            status["summary"] = f"{model} is already catalogued. No proposal is needed."
+            return status
+        if not model:
+            status["summary"] = "Choose the canonical model identity first."
+            return status
+        if declaration is None:
+            status["summary"] = (
+                f"{model} is not in the OmoBench catalog. Running this benchmark and saving "
+                "its evidence need nothing from the catalog; submitting it publicly needs "
+                "either a catalogued identity or a proposal.")
+            status["missing"] = ["family", "parameter_class", "source", "licence", "rationale",
+                                 "weights_publicly_downloadable"]
+            return status
+
+        # Build it exactly as packaging would, so what is reported missing here
+        # is what packaging would refuse rather than a second opinion.
+        try:
+            status["document"] = model_proposal.build(
+                declaration, model_id=model, run_id="run-placeholder0",
+                submitter=text_field(data, "submitter", optional=True) or "pending")
+            status["summary"] = (
+                f"Ready to submit with this result, proposing {model} for review.")
+        except model_proposal.ProposalError as error:
+            status["error"] = str(error)
+            status["missing"] = [name for name in
+                                 ("family", "parameter_class", "source", "licence", "rationale")
+                                 if not str(declaration.get(name) or "").strip()]
+            if declaration.get("weights_publicly_downloadable") is not True:
+                status["missing"].append("weights_publicly_downloadable")
+            status["summary"] = f"The proposal for {model} is not complete yet."
+        return status
+
+    def workflow_state(self, data: dict | None = None) -> dict:
+        """Where this contributor is, and what stands between them and each gate.
+
+        One computation behind the stepper, the preflight list and the
+        publication checklist, because three surfaces that each decide for
+        themselves whether a run is ready is three chances to disagree.
+        """
+        values = data or {}
+        job_id = values.get("job")
+        job: dict = {}
+        if isinstance(job_id, str) and job_id:
+            with self.lock:
+                job = dict(self._get(job_id))
+
+        if type(values.get("windows_bridge", False)) is not bool:
+            raise UIError("Windows bridge selection must be a boolean.")
+        endpoint = text_field(values, "endpoint", optional=True)
+        tokenizer = self.tokenizer_source_of(values.get("tokenizer"))
+        model = text_field(values, "model", optional=True) or job.get("model")
+        served = self.last_server_check if (
+            self.last_server_check and self.last_server_check.get("endpoint") == endpoint) else None
+        loaded = self.last_tokenizer_report if (
+            self.last_tokenizer_report
+            and self.last_tokenizer_report.get("source") in {tokenizer, model}) else None
+
+        readiness = self.runner_readiness()
+        checks = workflow.run_checks(
+            setup_ok=readiness[0], setup_message=readiness[1],
+            endpoint=endpoint, server_check=(served or {}).get("report"),
+            tokenizer_report=loaded, tokenizer_source=tokenizer or model,
+            memory=cli.memory_pressure(),
+            bridged=bool(values.get("windows_bridge", False)),
+            sleep_prevention=execution.sleep_prevention_availability(),
+        ) + self.requirement_checks(job or self._preview_job(model, values), values)
+        proposal = self.proposal_status(values) if model else None
+        identity_settled = bool(model) and (
+            model in self.catalog_models() or bool((proposal or {}).get("document")))
+        return {
+            "stages": workflow.stages(
+                checks, endpoint_checked=served is not None,
+                identity_settled=identity_settled, job=job or None),
+            "checks": checks,
+            "blocking": {gate: [item["id"] for item in workflow.blocking(checks, gate)]
+                         for gate in workflow.GATES},
+            "proposal": proposal,
+            "completion": workflow.completion(
+                job, submit_blocked=bool(workflow.blocking(checks, "submit")),
+                package_blocked=bool(workflow.failing(checks, "package")),
+                evidence=self.evidence_location(job.get("id"))) if job else [],
+            "gates": {
+                "run": "What stands between this configuration and a benchmark that measures "
+                       "something.",
+                "package": "What stands between a finished run and a schema-valid bundle.",
+                "submit": "What stands between a valid bundle and the public registry. None of "
+                          "it can stop a benchmark or invalidate a bundle.",
+            },
+            "local_report": (
+                "Saving a local report needs none of this. It records the measurements this "
+                "machine made, for any model, on any hardware, with no sign-in -- along with "
+                "the workload, model and execution configuration that produced them."),
+            "has_run": bool(job),
+        }
+
+    def _preview_job(self, model: str | None, values: dict) -> dict:
+        """A stand-in for the run that has not happened yet.
+
+        Before a benchmark exists the packaging and submission checks still
+        have something to say, and what they say depends on the arrangement
+        the contributor has chosen: selecting the Windows bridge means the
+        serving machine will have to be described, and finding that out
+        afterwards is the problem this preview exists to solve.
+        """
+        job: dict = {"model": model}
+        if values.get("windows_bridge"):
+            job["transport"] = {"kind": "windows-stdio-http1-v1"}
+        return job
+
+    def evidence_summary(self, job_id: str) -> dict:
+        """What this run's packaged result says about how it came about."""
+        from . import evidence
+
+        run = self.run_directory(job_id)
+        path = run / "result.json"
+        if not path.is_file():
+            raise UIError("Package this run first; there is no normalized result to read yet.")
+        try:
+            return evidence.summarize(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError) as error:
+            raise UIError("Could not read this run's normalized result.") from error
+
+    def requirement_inputs(self, job: dict, data: dict | None) -> dict:
+        """The values the package and submit checks read, from the form or the job.
+
+        One place decides what a field's current value is, so the checklist, the
+        workflow stages and packaging never disagree about whether something
+        was entered.
+        """
+        values = data or {}
+
+        def text(name: str, fallback=None):
+            value = values.get(name)
+            return value if isinstance(value, str) else (job.get(name) if fallback is None else fallback)
+
+        return {
+            "model": text("model") or job["model"],
+            "revision": text("model_revision"),
+            "framework": text("framework"),
+            "framework_version": text("framework_version"),
+            "submitter": values.get("submitter") if isinstance(values.get("submitter"), str) else None,
+            "serving": values.get("serving") if isinstance(values.get("serving"), dict) else None,
+            "proposal": self.proposal_status(values) if values.get("proposal") is not None else None,
+        }
+
+    def evidence_location(self, job_id: str | None) -> str | None:
+        """Where this run's own files are, when they are there."""
+        if not job_id:
+            return None
+        try:
+            run = self.run_directory(job_id)
+        except UIError:
+            return None
+        return (run.relative_to(self.root).as_posix()
+                if run.is_dir() and (run / "guidellm.stdout.log").is_file() else None)
+
+    def requirement_checks(self, job: dict, data: dict | None = None) -> list[dict]:
+        """Every check that stands between this run and the public registry.
+
+        Packaging checks and submission checks both live here because both are
+        about what happens to measurements that already exist. What does not
+        live here is anything that could stop a benchmark: a run refused
+        because a model is awaiting catalog review would be a run refused for a
+        reason the runner does not have.
+        """
+        inputs = self.requirement_inputs(job, data)
+        return workflow.package_checks(
+            job=job, model=inputs["model"], revision=inputs["revision"],
+            framework=inputs["framework"], framework_version=inputs["framework_version"],
+            serving=inputs["serving"],
+        ) + workflow.submit_checks(
+            job=job, model=inputs["model"], catalog=self.catalog_models(),
+            proposal=inputs["proposal"], submitter=inputs["submitter"],
+        )
+
     def publication_requirements(self, job_id: str, data: dict | None = None) -> dict:
         """Everything the public registry needs that this run does not have yet.
 
@@ -791,73 +1060,23 @@ class Controller:
         """
         with self.lock:
             job = dict(self._get(job_id))
-        values = data or {}
+        checks = self.requirement_checks(job, data)
+        items = [workflow.as_requirement(item) for item in checks]
         catalog = self.catalog_models()
-        model = (values.get("model") if isinstance(values.get("model"), str) else None) or job["model"]
-        revision = values.get("model_revision") if isinstance(values.get("model_revision"), str) else job.get("model_revision")
-        framework = values.get("framework") if isinstance(values.get("framework"), str) else job.get("framework")
-        version = values.get("framework_version") if isinstance(values.get("framework_version"), str) else job.get("framework_version")
-        submitter = values.get("submitter") if isinstance(values.get("submitter"), str) else None
-        mutable = {"main", "master", "latest", "head"}
-
-        items = [{
-            "field": None,
-            "label": "Benchmark completed with measurements",
-            "ok": bool(job.get("summary")),
-            "detail": "This run produced measurements." if job.get("summary")
-                      else "Only a completed run can be packaged.",
-        }, {
-            "field": "model",
-            "label": "Canonical model ID is in the OmoBench catalog",
-            "ok": model in catalog,
-            "detail": (f"{model} is catalogued." if model in catalog else
-                       f"{model} is not currently eligible for the community registry: the catalog "
-                       f"({', '.join(catalog)}) is the registry's source of truth, and a model is added "
-                       "to it by a separate, reviewed change. You can still view and export this run's "
-                       "local report. Never substitute a different, catalogued model for the one you ran."),
-        }, {
-            "field": "model_revision",
-            "label": "Immutable revision of the actual weights source",
-            "ok": bool(revision) and revision.strip().lower() not in mutable,
-            "detail": ("Recorded." if revision and revision.strip().lower() not in mutable else
-                       "A commit SHA or other immutable revision of the repository the weights really "
-                       "came from. 'main', 'master' and 'latest' move, so they identify nothing. This is "
-                       "not the file's SHA-256 checksum and not the OmoBench source commit. When the "
-                       "weights come from a quantization repository, record that repository as the "
-                       "weights source and pin its own revision."),
-        }, {
-            "field": "framework_version",
-            "label": "Exact serving runtime version",
-            "ok": bool(framework) and bool(version),
-            "detail": ("Recorded." if framework and version else
-                       "The inference runtime and its exact version, for example llama.cpp build b10621. "
-                       "An application version (the LM Studio release, say) is a different thing from the "
-                       "llama.cpp build it embeds; record the runtime build, and do not guess one."),
-        }, {
-            "field": "submitter",
-            # Not yet typed is not the same as satisfied: with no value to look
-            # at, the honest answer is that this has not been checked.
-            "label": "Submitter identity",
-            "ok": None if submitter is None else bool(submitter.strip()),
-            "detail": ("Your GitHub username or organization, recorded in the bundle."
-                       if submitter is None or submitter.strip()
-                       else "Enter the GitHub username or organization to record in the bundle."),
-        }, {
-            "field": None,
-            "label": "Profile acceptance",
-            "ok": (None if not job.get("validation") else
-                   not any("acceptance:" in message for message in job["validation"].get("errors", []))),
-            "detail": ("Checked when you package this run."
-                       if not job.get("validation") else
-                       " ".join(message for message in job["validation"].get("errors", []) if "acceptance:" in message)
-                       or "Meets this profile's minimum successful requests and maximum error rate."),
-        }]
+        model = self.requirement_inputs(job, data)["model"]
         return {
             "model": model,
             "catalog": catalog,
             "catalogued": model in catalog,
             "items": items,
+            "checks": checks,
             "ready": all(item["ok"] is not False for item in items),
+            "blocks_packaging": [item["label"] for item in workflow.blocking(checks, "package")],
+            "blocks_submission": [item["label"] for item in workflow.blocking(checks, "submit")],
+            "completion": workflow.completion(
+                job, submit_blocked=bool(workflow.blocking(checks, "submit")),
+                package_blocked=bool(workflow.failing(checks, "package")),
+                evidence=self.evidence_location(job.get("id"))),
             "local_export_available": bool(job.get("summary")),
         }
 
@@ -867,6 +1086,152 @@ class Controller:
             text_field(data, "tokenizer", optional=True),
             served_model=text_field(data, "model", optional=True) or None,
         )
+
+    def tokenizer_preflight(self, data: dict) -> dict:
+        """Actually load the tokenizer, in the interpreter the benchmark uses.
+
+        The offline check above answers whether the files are where the loader
+        will look. This answers whether the loader can build a tokenizer from
+        them, which is the question a run dies on. It is a separate action
+        because it can take time and, above the lowest level, can reach the
+        network; the level is chosen here and reported back.
+        """
+        from . import tokenizer_preflight as preflight
+
+        network = data.get("network", preflight.NETWORK_NONE)
+        if network not in preflight.NETWORK_LEVELS:
+            raise UIError("Choose a supported tokenizer check level.")
+        source = text_field(data, "tokenizer", optional=True) or text_field(
+            data, "model", optional=True)
+        if not source:
+            raise UIError("Enter a tokenizer source, or the identifier your server answers to.")
+        with self.lock:
+            if self.busy or self.closing:
+                raise UIError("Wait for the active operation before checking the tokenizer.", 409)
+            self.busy = True
+        try:
+            report = preflight.preflight(source, network=network, timeout=300.0,
+                                         cancel=lambda: self.closing)
+        finally:
+            with self.lock:
+                self.busy = False
+        document = report.as_dict()
+        with self.lock:
+            self.last_tokenizer_report = document
+        return document
+
+    def tokenizer_download_plan(self, data: dict) -> dict:
+        """What an authorized tokenizer-only download would fetch, and where to.
+
+        Shown before anything is fetched. A download is a deliberate act with a
+        visible source and a visible destination, not something a check does on
+        the way past.
+        """
+        from . import tokenizer_preflight as preflight
+
+        source = text_field(data, "tokenizer")
+        try:
+            return preflight.download_plan(source)
+        except ValueError as error:
+            raise UIError(str(error)) from error
+
+    def serving_probe(self, data: dict) -> dict:
+        """Read the Windows serving machine's hardware, on that machine.
+
+        This exists for one arrangement: the model server on Windows, the
+        benchmark runner in WSL2. From in here the host's processor, memory and
+        accelerators are invisible or wrong, and publishing what WSL can see as
+        though it described the server is the mistake the whole schema exists
+        to prevent. The companion reads them where they live.
+
+        Finding a card is not evidence that inference used it, so nothing here
+        claims a role for one; and video memory is deliberately absent, because
+        Windows reports it capped and wrong for exactly the cards this matters
+        for.
+        """
+        from .bridge import helper_path
+        from .serving_metadata import HARDWARE_PROBE_KIND
+
+        if type(data.get("windows_bridge", False)) is not bool:
+            raise UIError("Windows bridge selection must be a boolean.")
+        try:
+            helper = helper_path()
+        except ValueError as error:
+            raise UIError(str(error)) from error
+        with self.lock:
+            if self.busy or self.closing:
+                raise UIError("Wait for the active operation before reading the serving hardware.", 409)
+            self.busy = True
+        try:
+            completed = subprocess.run([helper, "--hardware-probe-v1"],
+                                       capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise UIError("The companion did not answer. Open this panel through the updated "
+                          "Windows companion and try again.") from error
+        finally:
+            with self.lock:
+                self.busy = False
+        if completed.returncode != 0:
+            raise UIError("The companion could not read this machine's hardware. Enter the "
+                          "serving machine's details yourself instead.")
+        try:
+            document = json.loads(completed.stdout)
+        except ValueError as error:
+            raise UIError("The companion returned something this panel cannot read.") from error
+        if not isinstance(document, dict) or document.get("kind") != HARDWARE_PROBE_KIND:
+            raise UIError("The companion returned a document this panel does not recognise.")
+        with self.lock:
+            self.last_serving_probe = {key: document[key]
+                                       for key in ("kind", "os", "cpu", "ram_gb", "accelerators")
+                                       if key in document}
+        document["note"] = (
+            "Read on the Windows machine itself, so these are detected facts. Video memory is "
+            "not among them: Windows reports it capped and wrong for larger cards, so enter it "
+            "from the serving runtime's own hardware panel. Finding a card is not evidence that "
+            "inference used it; say which one served.")
+        return document
+
+    def model_suggestions(self, data: dict) -> dict:
+        """Catalog entries a served alias may mean. It never picks one."""
+        from .model_identity import suggest_catalog_models
+
+        catalog = self.catalog_models()
+        suggestion = suggest_catalog_models(
+            text_field(data, "served_model_id", optional=True) or "", catalog)
+        suggestion["catalog"] = catalog
+        suggestion["proposal_available"] = not suggestion["candidates"]
+        return suggestion
+
+    def weight_identity(self, data: dict) -> dict:
+        """Hash the weight files the contributor named, after listing them.
+
+        Listing reads no file contents. Hashing happens only once a person has
+        named the files, because a filename is not an identity and OmoBench
+        will not decide which bytes somebody ran.
+        """
+        from .model_identity import ModelIdentityError, manifest_revision, weight_files_in, weight_manifest
+
+        directory = Path(text_field(data, "directory")).expanduser()
+        names = data.get("files")
+        try:
+            if not names:
+                return {"directory": str(directory), "hashed": False,
+                        "candidates": [{"name": path.name, "bytes": path.stat().st_size}
+                                       for path in weight_files_in(directory)],
+                        "message": ("Nothing has been read yet. Select every file this model is "
+                                    "made of; a sharded model needs all of its shards, because "
+                                    "the identity covers the whole set.")}
+            if not isinstance(names, list) or len(names) > 128 or any(
+                    not isinstance(name, str) or not name or "/" in name or "\\" in name
+                    for name in names):
+                raise UIError("Select weight files by name, inside the folder you chose.")
+            manifest = weight_manifest([directory / name for name in names], root=directory)
+        except ModelIdentityError as error:
+            raise UIError(str(error)) from error
+        return {"directory": str(directory), "hashed": True, "manifest": manifest,
+                "revision": manifest_revision(manifest),
+                "message": (f"Hashed {len(manifest['files'])} file(s). Record this revision; it "
+                            "identifies these exact bytes, not their names.")}
 
     def listing(self) -> list[dict]:
         with self.lock:
@@ -884,6 +1249,81 @@ class Controller:
             job["status"] = status
             self._save(job)
             return job
+
+    @staticmethod
+    def tokenizer_source_of(value) -> str | None:
+        """The tokenizer source, however the caller spelled it.
+
+        The connect form sends a plain string; a provenance declaration sends
+        the object that will be recorded in the result. One key meaning two
+        shapes is a trap for anyone driving these endpoints, so both are read
+        rather than one being refused.
+        """
+        if isinstance(value, str):
+            return value.strip() or None
+        if isinstance(value, dict):
+            source = value.get("source")
+            return source.strip() if isinstance(source, str) and source.strip() else None
+        if value is None:
+            return None
+        raise UIError("A tokenizer is either its source, or an object with a source.")
+
+    def serving_declaration(self, job: dict, data: dict) -> dict | None:
+        """Build the provenance declaration the packager reads, from the form.
+
+        Returns None when there is nothing to declare and the run was a plain
+        single-host one, so the existing schema 1.0 output stays byte for byte
+        what it was. A bridged run has no such option: it is only describable
+        with this, and the packager says so if it is missing.
+        """
+        declaration: dict = {}
+        for name in ("serving", "weights", "proposal"):
+            value = data.get(name)
+            if value is None:
+                continue
+            if not isinstance(value, dict):
+                raise UIError(f"{name} must be an object.")
+            declaration[name] = value
+        tokenizer = data.get("tokenizer")
+        if isinstance(tokenizer, dict):
+            declaration["tokenizer"] = tokenizer
+        elif self.tokenizer_source_of(tokenizer):
+            # A bare source, as the connect form sends it. Nothing loaded it
+            # here, and the record says exactly that.
+            declaration["tokenizer"] = {"source": self.tokenizer_source_of(tokenizer),
+                                        "kind": "huggingface", "loaded": "not-checked"}
+        served = text_field(data, "served_model_id", optional=True)
+        if served:
+            declaration["served_model_id"] = served
+        if data.get("probe"):
+            # The page asks for the probe by name; it never supplies one. What
+            # is recorded as detected is what this panel read for itself, not a
+            # document that made a round trip through a browser.
+            probe = self.last_serving_probe
+            if not probe:
+                raise UIError("No serving hardware has been read on this machine yet. Use "
+                              "'Read the serving hardware' first, or describe it yourself.")
+            declaration.setdefault("serving", {})["probe"] = dict(probe)
+        status = data.get("catalog_status")
+        if status is not None:
+            if status not in {"catalogued", "proposed"}:
+                raise UIError("Catalog status must be 'catalogued' or 'proposed'.")
+            declaration["catalog_status"] = status
+        if not declaration:
+            # Nothing was declared at all. A direct run keeps its existing
+            # schema 1.0 output; a bridged one reaches the packager without a
+            # declaration, which refuses it and says what it needs and why.
+            return None
+        if job.get("transport"):
+            declaration.setdefault("serving", {})
+            declaration["serving"].setdefault("relationship", "windows-host-wsl-runner")
+        else:
+            declaration.setdefault("serving", {})
+            declaration["serving"].setdefault("relationship", "same-host")
+        if job.get("tokenizer") and "tokenizer" not in declaration:
+            declaration["tokenizer"] = {
+                "source": job["tokenizer"], "kind": "huggingface", "loaded": "not-checked"}
+        return declaration
 
     def package(self, job_id: str, data: dict) -> dict:
         from .ui_submission import validate_bundle
@@ -918,6 +1358,23 @@ class Controller:
                 f"--profile={job['profile']}",
                 f"--execution-device={job['execution_device']}",
             ]
+            declaration = self.serving_declaration(job, data)
+            if declaration is not None:
+                # Kept beside the evidence so the same declaration can be read
+                # back, reviewed, and reused if this run is packaged again.
+                path = run / "provenance.json"
+                path.write_text(json.dumps(declaration, indent=2) + "\n", encoding="utf-8")
+                arguments.append(f"--provenance={path}")
+                # These describe the machine the runner's snapshot came from.
+                # Under a declaration the serving machine is described there
+                # instead, so accepting both would leave two answers to one
+                # question; refuse rather than quietly drop one.
+                if optional.get("cpu") or memory is not None:
+                    raise UIError(
+                        "CPU description and GPU memory under 'Hardware details' describe the "
+                        "machine this panel detected. You are describing the serving machine "
+                        "above, so put its processor and accelerator memory there and leave "
+                        "these blank.")
             arguments.extend(f"--{key.replace('_', '-')}={value}" for key, value in {**values, **optional}.items() if value)
             arguments.extend(f"--runtime-arg={value}" for value in runtime_args)
             if memory is not None:
@@ -950,17 +1407,28 @@ class Controller:
         try:
             setup = cli.guidellm_runner_preflight()
             native_windows = sys.platform == "win32"
-            return server_check(
-                data,
-                can_execute=not native_windows and setup.ok,
-                runner_message=("Start this panel from WSL2, Linux or macOS to execute benchmarks. "
-                                "The panel itself works here for setup and review."
-                                if native_windows else setup.message),
-                # Only worth importing when metadata already agrees, and never
-                # on a platform that cannot run a benchmark at all.
-                runner_health=(cli.runner_health_check(timeout=120, cancel=lambda: self.closing)
-                               if setup.ok and not native_windows else None),
-            )
+            with self._bridge_request(data) as (checked, headers):
+                report = server_check(
+                    checked,
+                    can_execute=not native_windows and setup.ok,
+                    runner_message=("Start this panel from WSL2, Linux or macOS to execute benchmarks. "
+                                    "The panel itself works here for setup and review."
+                                    if native_windows else setup.message),
+                    # Only worth importing when metadata already agrees, and never
+                    # on a platform that cannot run a benchmark at all.
+                    **({"_headers": headers} if headers else {}),
+                    runner_health=(cli.runner_health_check(timeout=120, cancel=lambda: self.closing)
+                                   if setup.ok and not native_windows else None),
+                )
+                with self.lock:
+                    # Tied to the address it describes, so a later question
+                    # about a different endpoint is answered as unchecked
+                    # rather than with this.
+                    self.last_server_check = {
+                        "endpoint": text_field(data, "endpoint", optional=True),
+                        "report": report,
+                    }
+                return report
         finally:
             with self.lock:
                 self.busy = False
@@ -1107,6 +1575,7 @@ class UIHandler(BaseHTTPRequestHandler):
                       "/guided.js": ("guided.js", "text/javascript; charset=utf-8"),
                       "/community.js": ("community.js", "text/javascript; charset=utf-8"),
                       "/dashboard.js": ("dashboard.js", "text/javascript; charset=utf-8"),
+                      "/workflow.js": ("workflow.js", "text/javascript; charset=utf-8"),
                       "/guided.css": ("guided.css", "text/css; charset=utf-8"),
                       "/dashboard.css": ("dashboard.css", "text/css; charset=utf-8"),
                       "/favicon.svg": ("favicon.svg", "image/svg+xml"),
@@ -1123,6 +1592,9 @@ class UIHandler(BaseHTTPRequestHandler):
                 return self._json(controller.setup())
             if self.path == "/api/runs":
                 return self._json(controller.listing())
+            match = re.fullmatch(r"/api/runs/(job-[a-f0-9]{16}|saved-job-[a-f0-9]{16})/evidence", self.path)
+            if match:
+                return self._json(controller.evidence_summary(match[1]))
             match = re.fullmatch(r"/api/runs/(job-[a-f0-9]{16})(/bundle)?", self.path)
             if match:
                 if match[2]:
@@ -1177,6 +1649,20 @@ class UIHandler(BaseHTTPRequestHandler):
                 return self._json(controller.connection(data))
             if self.path == "/api/tokenizer-check":
                 return self._json(controller.tokenizer_check(data))
+            if self.path == "/api/tokenizer-preflight":
+                return self._json(controller.tokenizer_preflight(data))
+            if self.path == "/api/tokenizer-download-plan":
+                return self._json(controller.tokenizer_download_plan(data))
+            if self.path == "/api/model-suggestions":
+                return self._json(controller.model_suggestions(data))
+            if self.path == "/api/serving-probe":
+                return self._json(controller.serving_probe(data))
+            if self.path == "/api/workflow":
+                return self._json(controller.workflow_state(data))
+            if self.path == "/api/model-proposal":
+                return self._json(controller.proposal_status(data))
+            if self.path == "/api/weight-identity":
+                return self._json(controller.weight_identity(data))
             if self.path == "/api/server-check":
                 return self._json(controller.server_check(data))
             if self.path == "/api/runs":

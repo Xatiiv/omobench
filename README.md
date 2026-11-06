@@ -20,7 +20,8 @@ first-class, publishable OmoBench results, provided the model is in the
   prepare a submission, with no server address, model revision, runtime argument,
   or shell command to type. See [Guided CPU setup](docs/guided-launcher.md).
 - **Already run your own model server?** Open `/advanced` in the same panel, or
-  see the [Browser control guide](docs/browser-control.md) and
+  see the [Browser control guide](docs/browser-control.md), the
+  [guided workflow](docs/guided-workflow.md) and
   [CPU demo walkthrough](docs/local-demo.md) for that workflow.
 - **On Windows, prefer not to use a terminal?** The
   [Windows installer](docs/windows-installer.md) installs OmoBench, finds or
@@ -143,9 +144,14 @@ incorrect identifiers, streaming errors, and interrupted runs.
 ## What is supported today
 
 - Locally served models compatible with streaming `/v1/chat/completions` can be
-  tried; public submissions must pass catalog eligibility checks.
+  tried; public submissions must pass catalog eligibility checks, or carry a
+  model proposal asking for the model to be reviewed for the catalog.
 - The panel accepts localhost model servers without authentication headers or
-  redirects. Run it in the same OS/WSL environment as the server.
+  redirects, normally in the same OS/WSL environment as the server. A model
+  server on Windows measured from WSL2 through the explicit bridge is also
+  supported: the result then records the serving host and the runner as the two
+  environments they are, and includes the bridge's latency in every
+  measurement. See [provenance.md](docs/provenance.md).
 - Runtime records distinguish `vllm`, `sglang`, `llama.cpp`, `lmstudio`, and
   `openai-compatible-other` with a meaningful server description.
 - NVIDIA, AMD, Intel, and other GPU metadata are supported through best-effort
@@ -218,12 +224,18 @@ guidellm-benchmarks.json.gz
 guidellm.stdout.log
 environment.json
 reproduce.md
+model-proposal.json   (only when the bundle proposes a model for the catalog)
 ```
 
 The packager records model/runtime/hardware metadata, an immutable model revision,
 profile hash, and artifact hashes. Validation checks the schema, catalog,
 obviously mutable revision labels, artifact paths/hashes, and duplicates. These
 checks do not independently prove GPU usage or every workload acceptance rule.
+
+A result packaged with serving provenance (schema 1.1) also records what served
+the model separately from what measured it, how each serving fact was
+established, the weight identity, the tokenizer that counted the tokens, and
+the transport. Schema 1.0 results are unchanged and stay valid.
 
 The panel's community submission flow signs in through GitHub in the browser,
 reviews the exact evidence and destination, then uploads to your public fork
@@ -277,6 +289,7 @@ than substituting `next build`.
 | [docs/quickstart.md](docs/quickstart.md) | Installation, updates, and direct CLI commands |
 | [docs/model-server.md](docs/model-server.md) | Starting a server, model identifiers, CPU/GPU settings |
 | [docs/browser-control.md](docs/browser-control.md) | Panel controls, recovery, packaging, and submission |
+| [docs/guided-workflow.md](docs/guided-workflow.md) | The six stages, what may stop a run against what may stop a submission, and which comparisons answer which question |
 | [docs/local-demo.md](docs/local-demo.md) | CPU demonstration and website-only demo |
 | [docs/guided-launcher.md](docs/guided-launcher.md) | Reviewed, managed CPU setup, run, and submission review, the panel's default page |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Common setup and runtime failures |

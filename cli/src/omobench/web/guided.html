@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="/guided.css">
   <script src="/dashboard.js" defer></script>
   <script src="/community.js" defer></script>
+  <script src="/workflow.js" defer></script>
   <script src="/guided.js" defer></script>
 </head>
 <body>
@@ -24,18 +25,34 @@
         <h1>Your benchmark, in focus.</h1>
         <p class="intro">Choose a reviewed CPU test, watch your setup perform and explore the results.<br class="desktop-break"> Everything runs locally, using the same fixed profiles and CLI engine.</p>
       </div><a class="workspace-link" href="/advanced">Connect your own server <span aria-hidden="true">↗</span></a></div>
-      <nav class="stepper" id="stepper" aria-label="Guided steps">
-        <button type="button" class="step-tab" data-screen="choose">1 · Choose your test</button>
-        <button type="button" class="step-tab" data-screen="run">2 · Prepare and run</button>
-        <button type="button" class="step-tab" data-screen="results">3 · Your results</button>
-        <button type="button" class="step-tab" data-screen="share">4 · Share results</button>
+      <nav class="stepper" id="stepper" aria-label="Benchmark workflow">
+        <button type="button" class="step-tab" data-stage="connect" data-screen="choose">01 · Connect <span class="step-state"></span></button>
+        <button type="button" class="step-tab" data-stage="identify" data-screen="choose">02 · Identify <span class="step-state"></span></button>
+        <button type="button" class="step-tab" data-stage="check" data-screen="run">03 · Check <span class="step-state"></span></button>
+        <button type="button" class="step-tab" data-stage="run" data-screen="run">04 · Run <span class="step-state"></span></button>
+        <button type="button" class="step-tab" data-stage="review" data-screen="results">05 · Review <span class="step-state"></span></button>
+        <button type="button" class="step-tab" data-stage="submit" data-screen="share">06 · Submit <span class="step-state"></span></button>
       </nav>
       <div id="notice" class="notice" role="status" hidden></div>
 
       <!-- Screen 1: Choose your test -->
       <section class="screen" id="screen-choose">
-        <section class="panel">
-          <div class="section-head"><div><span class="step">1</span><h2>Choose your test</h2></div></div>
+        <section class="panel" id="start-choice">
+          <div class="section-head"><div><span class="step">01</span><h2>How do you want to benchmark?</h2></div></div>
+          <p class="hint">Both routes run the same fixed profile through the same engine, record the same evidence, and are reviewed against the same requirements. They differ only in who starts the model server.</p>
+          <div class="choice-grid">
+            <button type="button" class="choice-card" id="choose-managed" aria-pressed="false">
+              <strong>Use the managed setup</strong>
+              <span>OmoBench downloads one reviewed model and runtime, verifies them against their pinned hashes, and starts the server for you. CPU only.</span>
+            </button>
+            <a class="choice-card" href="/advanced" id="choose-own">
+              <strong>Use a model server you already run</strong>
+              <span>Point OmoBench at a server you started yourself — llama.cpp, vLLM, LM Studio, a Windows server through the WSL bridge. CPU or GPU.</span>
+            </a>
+          </div>
+        </section>
+        <section class="panel" id="recipe-panel">
+          <div class="section-head"><div><span class="step">02</span><h2>Choose your test</h2></div></div>
           <p id="runner-status" class="muted">Checking this environment…</p>
           <div id="recipe-list" class="recipe-grid"></div>
         </section>
@@ -55,6 +72,7 @@
             <dl class="kv" id="summary-facts"></dl>
             <p id="platform-message" class="notice"></p>
             <p id="space-message" class="muted"></p>
+            <ul class="status-checklist" id="environment-notes" hidden></ul>
             <div class="actions"><button id="change-location-button" type="button" class="secondary">Change location</button></div>
             <div id="storage-location-editor" hidden>
               <label>Storage folder
@@ -95,7 +113,16 @@
       <section class="screen" id="screen-share" hidden>
         <section class="panel">
           <div class="section-head"><div><span class="step">4</span><h2>Share results</h2></div></div>
-          <ul class="status-checklist" id="status-checklist"></ul>
+          <section id="completion" hidden>
+            <h3>Where this run has got to</h3>
+            <p class="hint">Six separate things, each shown only once something confirms it. A validated bundle is not a submission, and an open pull request is not an accepted result.</p>
+            <ul class="status-checklist" id="completion-steps"></ul>
+          </section>
+          <details id="evidence-summary" hidden>
+            <summary>What this evidence says <span class="hint">Every recorded fact, and where it came from</span></summary>
+            <p class="hint" id="evidence-qualifications"></p>
+            <div id="evidence-sections"></div>
+          </details>
 
           <h3>Publication requirements</h3>
           <p class="hint">What the public registry needs beyond a completed benchmark. None of this affects the local report on the previous screen.</p>

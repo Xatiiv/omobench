@@ -11,11 +11,18 @@ import { makeDocument, makeElement } from "./dom_stub.mjs";
 const guidedPath = process.argv[2];
 const source = readFileSync(guidedPath, "utf8");
 
-const stepTabs = ["choose", "run", "results", "share"].map((screen) => {
-  const tab = makeElement(`step-${screen}`);
+// Six stages across four screens, exactly as guided.html declares them: two
+// stages can share a screen, so a tab is addressed by the stage it stands for
+// rather than by its position.
+const STAGE_SCREENS = [["connect", "choose"], ["identify", "choose"], ["check", "run"],
+                       ["run", "run"], ["review", "results"], ["submit", "share"]];
+const stepTabs = STAGE_SCREENS.map(([stage, screen]) => {
+  const tab = makeElement(`step-${stage}`);
+  tab.dataset.stage = stage;
   tab.dataset.screen = screen;
   return tab;
 });
+const tabFor = (stage) => stepTabs.find((tab) => tab.dataset.stage === stage);
 const document = makeDocument({ selectors: { ".step-tab": stepTabs } });
 
 const context = createContext({
@@ -51,6 +58,7 @@ const context = createContext({
 // browser loads it (dashboard.js, then community.js, then the page script).
 runInContext(readFileSync(join(dirname(guidedPath), "dashboard.js"), "utf8"), context);
 runInContext(readFileSync(join(dirname(guidedPath), "community.js"), "utf8"), context);
+runInContext(readFileSync(join(dirname(guidedPath), "workflow.js"), "utf8"), context);
 document.getElementById("submission-mode").value = "community";
 runInContext(source, context, { filename: guidedPath });
 
@@ -212,6 +220,57 @@ const localReportFixture = {
   server: { model_identifier: "Fixture/Model", execution_device: "cpu" },
   measurements: savedSummary.results,
 };
+// The one workflow computation both pages read: six stages, every check with
+// the gate it belongs to, and the six completion states. Shaped like the real
+// answer for this rejected fixture run -- packaged, and refused by the
+// registry on its own acceptance thresholds.
+const workflowFixture = {
+  stages: [
+    { id: "connect", label: "Connect", state: "done" },
+    { id: "identify", label: "Identify", state: "done" },
+    { id: "check", label: "Check", state: "done" },
+    { id: "run", label: "Run", state: "done" },
+    { id: "review", label: "Review", state: "blocked" },
+    { id: "submit", label: "Submit", state: "todo" },
+  ],
+  checks: [
+    { id: "measurements", label: "Benchmark completed with measurements", state: "ok",
+      observed: "12 successful", source: "this run's evidence", blocks: "package", recovery: "", detail: "" },
+    { id: "weights-revision", label: "Immutable revision of the actual weights source", state: "blocked",
+      observed: "main", source: "you", blocks: "package", recovery: "Record a commit SHA.", detail: "" },
+    { id: "acceptance", label: "Profile acceptance", state: "blocked", observed: "not met",
+      source: "this run's evidence", blocks: "submit", recovery: "", detail: "" },
+    { id: "local", label: "Saving a local report", state: "ok", observed: null,
+      source: "this machine", blocks: null, recovery: "", detail: "" },
+  ],
+  blocking: { run: [], package: ["weights-revision"], submit: ["acceptance"] },
+  proposal: null,
+  completion: [
+    { id: "benchmark", label: "Benchmark completed", state: "done", detail: "This run produced measurements." },
+    { id: "evidence", label: "Evidence saved on this machine", state: "done", detail: "Kept at .omobench-runs/fixture." },
+    { id: "package", label: "Bundle validated", state: "failed", detail: "The bundle could not be built." },
+    { id: "ready", label: "Ready to submit", state: "blocked", detail: "The registry still needs something." },
+    { id: "submitted", label: "Submitted for review", state: "pending", detail: "Not submitted." },
+    { id: "published", label: "Accepted and published", state: "pending", detail: "This panel does not observe it." },
+  ],
+  gates: { run: "run gate note", package: "package gate note", submit: "submit gate note" },
+  local_report: "local report note",
+};
+const evidenceFixture = {
+  schema_version: "1.1",
+  qualifications: ["Detection is not verification."],
+  sections: [{ id: "model", title: "Which model, and which weights",
+               rows: [{ label: "Canonical model", value: "Fixture/Model", recorded: true,
+                        source: "stated by the contributor", note: null }] }],
+};
+// Browsing saved runs must execute nothing and upload nothing. The test of
+// that is what a request *does*, not which verb it uses: asking the panel
+// where a run got to carries the form, so it is a POST that reads, and the
+// panel's own request guard classifies it the same way.
+const READING_POSTS = new Set(["/api/workflow"]);
+const readOnly = (requests) => requests.every(
+  (request) => request.method === "GET" || READING_POSTS.has(request.path));
+
 const historyRequests = [];
 context.fetch = async (path, options) => {
   historyRequests.push({ path, method: options?.method || "GET" });
@@ -223,6 +282,8 @@ context.fetch = async (path, options) => {
   else if (path === `/api/runs/${saved.benchmark_job_id}`) data = savedDetail;
   else if (path.endsWith("/requirements")) data = requirementsFixture;
   else if (path.endsWith("/local-report")) data = localReportFixture;
+  else if (path === "/api/workflow") data = workflowFixture;
+  else if (path.endsWith("/evidence")) data = evidenceFixture;
   else throw new Error(`unexpected request: ${path}`);
   return { ok: true, json: async () => data };
 };
@@ -236,6 +297,18 @@ results.historyOpened = {
   jobId: runInContext("benchmarkJobId", context),
 };
 await context.enterShareScreen();
+// The same six completion states and the same stepper the advanced panel
+// renders, from the same answer: this page does not keep its own idea of
+// where a run got to.
+results.sharedWorkflow = {
+  completion: get("completion-steps").children.map(
+    (li) => li.className.replace("status-item ", "") + ":" + li.children[0].textContent),
+  completionVisible: !get("completion").hidden,
+  evidenceVisible: !get("evidence-summary").hidden,
+  evidenceSections: get("evidence-sections").children.map((node) => node.children[0].textContent),
+  stepper: stepTabs.map((tab) => tab.dataset.stage + ":"
+    + ["done", "current", "todo", "blocked"].filter((state) => tab.classList.contains(`stage-${state}`)).join(",")),
+};
 results.historyRejected = {
   message: get("validation-result").textContent,
   reviewHidden: get("prepare-review-button").hidden,
@@ -278,7 +351,7 @@ saved.kind = "smoke"; saved.status = "completed"; saved.benchmark_job_id = null;
 saved.result = { message: "No inference was performed" };
 await context.openTerminalRun(saved.id);
 results.historySmoke = { heading: get("progress-heading").textContent, resultVisible: !get("screen-results").hidden };
-results.historyReadOnly = historyRequests.every((request) => request.method === "GET");
+results.historyReadOnly = readOnly(historyRequests);
 
 // Real click handlers: history -> tab 2 -> recipe card. The next-run draft
 // must remain separate from historical metadata, including absent old paths.
@@ -308,7 +381,7 @@ await context.loadRecipes();
 runInContext("selectedRecipeId = null;", context);
 await context.loadRecentRuns();
 await get("recent-list").children[0].trigger("click");
-await stepTabs[1].trigger("click");
+await tabFor("check").trigger("click");
 results.historyPrepareWithoutSelection = {
   choosing: !get("screen-choose").hidden,
   notice: get("notice").textContent,
@@ -330,7 +403,7 @@ for (const historicRecipe of [null, "removed-historic-recipe"]) {
   saved.storage_dir = historicRecipe ? "/fixture/old-run" : "";
   await context.loadRecentRuns();
   await get("recent-list").children[0].trigger("click");
-  await stepTabs[1].trigger("click");
+  await tabFor("check").trigger("click");
   results[historicRecipe ? "historyManagedDraft" : "historyLegacyDraft"] = {
     selectedRecipe: runInContext("selectedRecipeId", context),
     value: get("storage-dir").value,
@@ -339,7 +412,7 @@ for (const historicRecipe of [null, "removed-historic-recipe"]) {
     review: reviewRequests.at(-1),
   };
 }
-results.historyNoExecution = historyRequests.every((request) => request.method === "GET");
+results.historyNoExecution = readOnly(historyRequests);
 // Historical display/export must not borrow metadata from the selected new test.
 saved.recipe = null;
 delete saved.model; delete saved.profile; delete saved.execution_device;
@@ -352,9 +425,51 @@ runInContext('activeKind = "run"; activeJobId = "mrun-fixture";', context);
 const reviewsBeforeActiveTab = reviewRequests.length;
 get("summary-panel").hidden = true;
 get("progress-panel").hidden = false;
-await stepTabs[1].trigger("click");
+await tabFor("check").trigger("click");
 results.historyActiveTab = {
   noReview: reviewRequests.length === reviewsBeforeActiveTab,
   progressVisible: !get("progress-panel").hidden && !get("screen-run").hidden,
 };
+// What this environment has left, on the screen where a managed run is
+// actually started -- not only on the advanced panel's gate lists. Rendered
+// by the shared view, from the same /api/workflow answer.
+const environmentFixture = {
+  checks: [
+    { id: "memory", label: "Memory to spare in the WSL environment running this panel",
+      state: "attention", observed: "0.26 GB available of 7.49 GB allocated to this WSL environment",
+      source: "this machine", blocks: "run", recovery: "Severe: fixture recovery",
+      detail: "fixture memory detail", field: null, severity: "severe" },
+    { id: "wsl-host", label: "What this reading cannot see", state: "attention",
+      observed: "a WSL distribution; its Windows host is not readable from in here",
+      source: "this machine", blocks: null, recovery: "fixture host recovery",
+      detail: "fixture host detail", field: null, severity: null },
+    { id: "runner", label: "The benchmark runner can start here", state: "ok",
+      observed: "ready", source: "this machine", blocks: "run", recovery: "", detail: "",
+      field: null, severity: null },
+  ],
+};
+runInContext(
+  "selectedRecipeId = 'fixture-recipe'; recipesById = { 'fixture-recipe': "
+  + "{ model_id: 'Fixture/Model', benchmark_profile: 'chat-small-extended-v1',"
+  + " execution_device: 'cpu' } };", context);
+const environmentRequests = [];
+context.fetch = async (path, options) => {
+  environmentRequests.push({ path, method: options?.method || "GET" });
+  if (path !== "/api/workflow") throw new Error(`unexpected request: ${path}`);
+  return { ok: true, json: async () => environmentFixture };
+};
+await context.renderEnvironmentNotes();
+results.environmentNotes = {
+  hidden: get("environment-notes").hidden,
+  items: get("environment-notes").children.map((li) => ({
+    className: li.className,
+    text: li.children.map((part) => part.textContent),
+  })),
+  requests: environmentRequests.map((entry) => `${entry.method} ${entry.path}`),
+};
+// A page that cannot reach the panel still reviews: none of this stops a run.
+context.fetch = async () => { throw new Error("offline"); };
+await context.renderEnvironmentNotes();
+results.environmentNotesSurviveFailure = get("environment-notes").children.length;
+
 process.stdout.write(JSON.stringify(results));

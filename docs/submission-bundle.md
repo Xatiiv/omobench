@@ -13,7 +13,8 @@ packaging (CLI or panel) to produce a schema-ready bundle instead.
 
 There are two submission routes: **Review & submit** in `omobench ui`, or the
 [manual PR workflow](#manual-pull-request-workflow). Both preserve the same five
-evidence files and go through CI and maintainer review. Packaging stays local;
+evidence files — six when the bundle also proposes a model for the catalog —
+and go through CI and maintainer review. Packaging stays local;
 uploading a branch/PR makes evidence visible according to GitHub repository
 permissions. The website registry updates after merge and a build containing it.
 
@@ -32,11 +33,24 @@ with a clear error instead of silently accepting or rejecting every
 submission.
 
 The API identifier used during a run may be an alias. Packaging must use the
-canonical catalog ID of the model actually served. Adding an alias does not
-make a different model eligible. New eligible models can be added through a
-catalog YAML change, without changing the runner; the browser uploader does not
-automatically make that source change. The catalog's `initial_runtimes` field
-is planning information, not an enforced runtime allowlist.
+canonical catalog ID of the model actually served, and schema 1.1 records the
+alias separately as `model.served_model_id` so the two are never confused.
+Adding an alias does not make a different model eligible.
+
+An uncatalogued model has a route to review without a hand-written catalog
+change first: a schema 1.1 bundle may carry `model-proposal.json`, bound to
+that model, that run and that submitter, with `model.catalog_status` set to
+`proposed`. The validator checks the proposal and its relationship to the
+result, and rejects a second proposal for the same model. It does not make the
+model eligible: `catalog/models/*.yaml` remains the only source of eligible
+models, and accepting a proposal is a separate, reviewed catalog change. The
+catalog's `initial_runtimes` field is planning information, not an enforced
+runtime allowlist.
+
+Schema 1.1 also records what served the model, separately from what measured
+it, along with the weight identity, the tokenizer that counted the tokens, and
+the transport. See [provenance.md](provenance.md). Schema 1.0 is unchanged and
+stored 1.0 bundles keep exactly the meaning they were written with.
 
 ## Immutable model revisions
 
@@ -211,6 +225,58 @@ a new configuration. Existing `result.json` files without
 the same run once with a source and once without produces two different
 configurations. Omitting `--model-source` leaves `model` exactly as before, the fingerprint for a run packaged without a source is unaffected by this
 option's existence.
+
+## Evidence that does not name you
+
+A benchmark run writes down more than it measures. The runner records the
+address it connected to and the path it wrote its own report to; the
+reproduce instructions quote the command, output path and all. Left alone,
+those publish a loopback port, a home directory and a checkout layout, and on
+a server configured with a key they can publish the key.
+
+Runs made from a current checkout are redacted as they are written — before
+the raw report is compressed, and therefore before it is hashed, so the
+published bytes and the recorded hash still agree. Four kinds of thing go:
+
+| In the evidence | Becomes |
+| --- | --- |
+| The endpoint this run was measured against | `<LOCAL_ENDPOINT>` |
+| Any URL carrying credentials, host and all | `<LOCAL_ENDPOINT>` |
+| Any other loopback address | `<LOCAL_ENDPOINT>` |
+| An `api_key`, `access_token`, `secret` … field, or a `Bearer` header | `<REDACTED_CREDENTIAL>` |
+| The staging directory, the checkout, a home directory | `<RUN_DIRECTORY>`, `<CHECKOUT>`, `<HOME>` |
+
+Measurements are never touched. A field name like `prompt_tokens` or
+`first_output_token_iteration` is not a credential and is left exactly as the
+runner wrote it.
+
+### Evidence collected before that
+
+Redaction at write time cannot reach backwards, and a run that already
+happened is hours of real measurement that nothing would be gained by taking
+again. Pass it through the same rules into a copy:
+
+```bash
+omobench scan-evidence --run-dir .omobench-runs/ui/job-<id>/run-<id>
+omobench redact --run-dir .omobench-runs/ui/job-<id>/run-<id> \
+                --output-dir .omobench-runs/run-<id>-redacted
+```
+
+`redact` reads the original and never writes to it. It prints each
+distributable file's hash before and after, unpacks and repacks the
+compressed report rather than skipping it, copies a file with nothing to
+redact byte for byte so its hash does not move for no reason, and then scans
+what it produced — a redaction nobody checked is not a redaction. Package
+from the copy as usual.
+
+`scan-evidence` changes nothing and can be run on anything, including a
+bundle somebody else produced. `omobench repackage` refuses evidence that
+still carries this material rather than rewriting it, because it copies bytes
+and records their hashes as proof the derived bundle carries the same
+measurements.
+
+Neither command knows what a prompt or a model's own output may contain.
+Review the five files before submitting either way.
 
 ## Repeats and duplicates
 

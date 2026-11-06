@@ -12,31 +12,26 @@ tested, checked against its metadata and published.
 - Historical profile reconciliation uses two exact, reviewed byte snapshots.
   Evidence and profile comparison keys are unchanged.
 
-## Windows–WSL bridge implementation prerequisite
+## Windows–WSL bridge
 
-The current proposal combines opaque byte forwarding with stripping an HTTP
-header containing a bridge token. Those are different protocol layers. A raw
-TCP relay cannot safely remove per-request headers on a persistent connection
-without parsing HTTP framing; HTTP/2 makes that distinction more important.
-This must be resolved before a bridge is enabled in a downloadable installer.
-
-The implementation must choose and test either an authenticated transport below
-HTTP with explicit runner integration, or a limited HTTP-aware frontend with
-correct request framing and secret stripping. It must not simply strip the
-first header block and then forward a persistent stream. Tests must include
-multiple requests per connection, malformed/duplicate authentication headers,
-HTTP/2 behaviour and pipelining, in addition to the existing 14-case plan.
-The frontend's protocol and overhead must be recorded in local reports.
-
-The existing rule remains: one explicitly selected Windows loopback destination,
-no LAN listener/firewall changes, no redirects, independent concurrent streams,
-and no automatic public submission while serving-host provenance is unrepresented.
+The [experimental bridge](bridge-frontend-status.md) now has an explicit panel
+opt-in, a bounded multiplexed Windows stdio helper and both runner integrations.
+It parses HTTP/1.1 and strips its own token on every single-request connection.
+The public registry accepts bridged measurements under schema 1.1, which records
+the Windows serving host and the WSL runner as the two environments they are and
+marks the bridge's latency as included in every measured number and never
+subtracted. What it will not accept is a bridged run that describes its serving
+machine from inside WSL: the serving side has to be declared or read on the
+Windows machine itself. See [provenance.md](provenance.md).
+The existing redirect restriction remains in place. Windows–WSL behaviour and
+overhead still require real-machine verification before a general support claim:
+nothing here measures what the bridge costs.
 
 ## Required external verification
 
 - Windows build and installer/companion harnesses on CI.
 - Actual Windows–WSL NAT transport and overhead checks on a Windows machine,
-  once the bridge is implemented. Linux fixtures cannot establish these.
+  with the new companion. Linux and Windows-only CI fixtures cannot establish these.
 - Updated installer on the second PC, using isolated test destinations first.
 - An eligible real benchmark bundle, reviewed by its owner, for the genuine
   community submission and registry/comparison test. Never submit synthetic

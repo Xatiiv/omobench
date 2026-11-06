@@ -30,6 +30,9 @@ class FakeGitHub:
         self.ref = None
         self.pulls = []
         self.fail_once = False
+        # GitHub accepted the pull request and the answer never arrived. The
+        # submission exists; the client has no idea.
+        self.lose_the_response = False
         self.existing_directory = False
         self.repo = {"full_name": "example/omobench", "default_branch": "main",
                      "owner": {"login": "example"}, "permissions": {"push": True}}
@@ -63,6 +66,9 @@ class FakeGitHub:
                 self.fail_once = False
                 raise UIError("Temporary PR failure")
             self.pulls = [{"html_url": "https://github.com/example/omobench/pull/5"}]
+            if self.lose_the_response:
+                self.lose_the_response = False
+                raise UIError("Connection reset while reading the response")
             return self.pulls[0]
         raise AssertionError(path)
 
@@ -170,6 +176,34 @@ class SubmissionTests(unittest.TestCase):
         self.assertEqual(len([p for p, _ in github.calls if p.endswith("/git/refs")]), 1)
         self.assertEqual(len([p for p, _ in github.calls if p.endswith("/git/commits")]), 1)
         self.assertEqual(len(github.pulls), 1)
+
+    def test_a_lost_response_does_not_become_a_second_pull_request(self):
+        """The worst failure is the ambiguous one: it worked, and you cannot tell.
+
+        A connection that drops while reading the answer leaves a submission
+        open on GitHub and nothing locally that knows it. The retry has to
+        discover it rather than open a second pull request for the same run --
+        two pull requests for one bundle is a reviewer's problem, and a
+        contributor would have no way to withdraw the one they never saw.
+        """
+        github = FakeGitHub()
+        github.lose_the_response = True
+        state = {}
+        _, _, digest = bundle_snapshot(self.root, self.run)
+        with patch("omobench.ui_submission.GitHub", return_value=github):
+            with self.assertRaisesRegex(UIError, "Connection reset"):
+                submit_pull_request(self.root, self.run, "example/omobench", digest, state, lambda: None)
+            # Nothing local recorded a submission, which is exactly the danger.
+            self.assertIsNone(state.get("pull_request_url"))
+            submit_pull_request(self.root, self.run, "example/omobench", digest, state, lambda: None)
+        self.assertEqual(state["pull_request_url"], "https://github.com/example/omobench/pull/5")
+        creations = [path for path, payload in github.calls
+                     if path.endswith("/pulls") and payload is not None]
+        self.assertEqual(len(creations), 1, "the retry opened a second pull request")
+        self.assertEqual(len(github.pulls), 1)
+        # And the evidence was uploaded once: the branch and commit are reused.
+        self.assertEqual(len([p for p, _ in github.calls if p.endswith("/git/refs")]), 1)
+        self.assertEqual(len([p for p, _ in github.calls if p.endswith("/git/commits")]), 1)
 
     def test_remote_collisions_are_never_overwritten(self):
         _, _, digest = bundle_snapshot(self.root, self.run)

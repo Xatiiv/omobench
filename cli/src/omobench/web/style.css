@@ -29,3 +29,38 @@ pre{font-size:11px;background:#080f1c}
 .github-device code { display: block; width: fit-content; margin: .5rem 0 1rem; color: var(--accent); font-size: clamp(1.6rem, 5vw, 2.2rem); letter-spacing: .12em; user-select: all; }
 .github-auth details { margin-top: 1rem; }
 .github-auth a { overflow-wrap: anywhere; }
+
+/* Label/value pairs, the same shape the guided page uses for them. */
+.kv{margin:0;font-size:13px}
+.kv dt{color:var(--muted);margin-top:14px}
+.kv dd{margin:4px 0 0;overflow-wrap:anywhere}
+
+/* The six stages, and the three gates they pass through. A stage is coloured
+   by what is true, not by what was clicked: done, where you are, something in
+   the way, and not yet reached. */
+.stepper{display:flex;flex-wrap:wrap;gap:8px;margin:18px 0 6px}
+.step-tab{background:transparent;border:1px solid #40516e;color:var(--muted);font-size:12px;font-weight:550;padding:8px 13px;border-radius:999px}
+.step-tab:hover:not(:disabled){background:#1d2c43;color:var(--text)}
+.step-tab.stage-done{border-color:#4b6a8f;color:var(--text)}
+.step-tab.stage-done::before{content:"✓ ";color:var(--accent)}
+.step-tab.stage-current{border-color:var(--accent);color:var(--text);background:#1b2c46}
+.step-tab.stage-blocked{border-color:#825549;color:var(--error)}
+.step-tab.stage-todo{opacity:.65}
+
+.preflight{margin:22px 0 6px;padding:18px;border:1px solid var(--line);border-radius:10px;background:#0e1829}
+.preflight h3{margin:0 0 6px;font-size:14px}
+.preflight h4{margin:18px 0 2px;font-size:13px;font-weight:600;display:flex;align-items:baseline;gap:10px}
+.gate-count{font:11px ui-monospace,SFMono-Regular,monospace;font-weight:400}
+.gate-count.waiting{color:var(--accent)}
+.gate-count.clear{color:var(--muted)}
+.status-item .recovery{color:#f3d7a6;margin-top:4px}
+
+/* A fact nobody recorded reads as absent rather than as blank. */
+.kv dd .sub-check{display:block;color:var(--muted);font-size:11px;margin-top:3px}
+.kv dd.unrecorded{color:var(--muted);font-style:italic}
+#evidence-sections h4{margin:20px 0 4px;font-size:13px}
+
+/* Identify: which model this is, which is two questions rather than one. */
+.identity{margin:22px 0 6px;padding:18px;border:1px solid var(--line);border-radius:10px;background:#0e1829}
+.identity h3{margin:0 0 6px;font-size:14px}
+.identity .actions{margin-top:12px}

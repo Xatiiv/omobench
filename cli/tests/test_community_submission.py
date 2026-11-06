@@ -264,4 +264,186 @@ class CommunityTests(unittest.TestCase):
         controller.busy = False
 
 
+class ProposedModelSubmissionTests(unittest.TestCase):
+    """Submitting a result for a model the catalog does not have yet.
+
+    Everything here runs against the same isolated fake GitHub the other
+    community tests use. No request leaves the machine and no submission is
+    created anywhere real.
+    """
+
+    setUp = fixtures.SubmissionTests.setUp
+    tearDown = fixtures.SubmissionTests.tearDown
+    change_result = fixtures.SubmissionTests.change_result
+
+    PROPOSAL = {
+        "schema_version": "model-proposal-1.0",
+        "status": "proposed",
+        "proposed_id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-99B",
+        "family": "DeepSeek",
+        "parameter_class": "99B",
+        "modality": "text-generation",
+        "source": "https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-99B",
+        "licence": "MIT",
+        "licence_url": None,
+        "weights_publicly_downloadable": True,
+        "proposed_by": "local-tester",
+        "proposed_at": "2026-11-03T09:00:00+00:00",
+        "for_run_id": "run-fixture-1234",
+        "rationale": "Measured on an AMD desktop; the catalog has no entry for it.",
+        "initial_runtimes": ["lmstudio"],
+    }
+
+    SERVING_ENVIRONMENT = {
+        "metadata_version": "serving-environment-v1",
+        "relationship": "same-host",
+        "runner": {"os": "Test Linux", "kind": "native", "python_version": "3.12.3",
+                   "cpu": "Test CPU", "ram_gb": 64.0},
+        "serving": {
+            "host": {"os": {"value": "Test Linux", "provenance": "detected"},
+                     "cpu": {"value": "Test CPU", "provenance": "detected"},
+                     "ram_gb": {"value": 64.0, "provenance": "detected"}},
+            "accelerators": [{"vendor": "nvidia", "model": "NVIDIA Test GPU", "memory_gb": 24.0,
+                              "count": 2, "role": "inference", "provenance": "detected"}],
+            "placement": {"mode": "gpu-only", "detail": None, "provenance": "contributor-declared"},
+            "runtime": {"application": None,
+                        "engine": {"name": "vllm", "version": "0.11.0",
+                                   "provenance": "contributor-declared"},
+                        "settings": []},
+        },
+        "transport": {"kind": "direct", "protocol": "HTTP/1.1", "bridge_version": None,
+                      "overhead": "none-direct"},
+    }
+
+    NO_PROPOSAL = object()
+
+    def propose(self, *, proposal=None, model_id="deepseek-ai/DeepSeek-R1-Distill-Qwen-99B"):
+        """Turn the packaged fixture into a bundle that proposes its model."""
+        def change(result):
+            result["schema_version"] = "1.1"
+            result["environment"] = copy.deepcopy(self.SERVING_ENVIRONMENT)
+            result["model"].update(id=model_id, catalog_status="proposed",
+                                   served_model_id="deepseek-r1-distill-qwen-99b")
+        self.change_result(change)
+        if proposal is self.NO_PROPOSAL:
+            return
+        document = copy.deepcopy(self.PROPOSAL) if proposal is None else proposal
+        (self.run / "model-proposal.json").write_text(json.dumps(document), encoding="utf-8")
+
+    def prepare(self, api=None, state=None):
+        api = api or FakeAPI()
+        session = Session(api)
+        preview, review = prepare_community(self.root, self.run, session, state or {})
+        return api, session, preview, review
+
+    def test_a_proposal_travels_with_the_result_as_a_sixth_file(self):
+        self.propose()
+        api, session, preview, review = self.prepare()
+        self.assertTrue(preview["can_submit"], preview)
+        self.assertEqual(len(preview["files"]), 6)
+        self.assertTrue(any(file["path"].endswith("model-proposal.json")
+                            for file in preview["files"]))
+
+    def test_submission_writes_only_into_the_result_bundle_prefix(self):
+        """One prefix, six files: nothing touches the catalog or anything else."""
+        self.propose()
+        api, session, preview, review = self.prepare()
+        with patch("subprocess.run", side_effect=AssertionError("no git or gh")):
+            submit_community(self.root, self.run, session, review, {}, lambda: None)
+        tree = next(payload for path, payload in api.writes if path.endswith("/git/trees"))
+        prefix = preview["files"][0]["path"].rsplit("/", 1)[0]
+        self.assertEqual(len(tree["tree"]), 6)
+        for element in tree["tree"]:
+            self.assertTrue(element["path"].startswith(prefix + "/"), element["path"])
+            self.assertEqual(element["mode"], "100644")
+        self.assertEqual(
+            sorted(element["path"].rsplit("/", 1)[1] for element in tree["tree"]),
+            ["environment.json", "guidellm-benchmarks.json.gz", "guidellm.stdout.log",
+             "model-proposal.json", "reproduce.md", "result.json"])
+
+    def test_the_uploaded_proposal_is_the_file_on_disk_byte_for_byte(self):
+        self.propose()
+        api, session, preview, review = self.prepare()
+        submit_community(self.root, self.run, session, review, {}, lambda: None)
+        blobs = [base64.b64decode(payload["content"])
+                 for path, payload in api.writes if path.endswith("/git/blobs")]
+        self.assertIn((self.run / "model-proposal.json").read_bytes(), blobs)
+
+    def test_the_pull_request_says_the_model_is_proposed_not_catalogued(self):
+        self.propose()
+        _, _, preview, _ = self.prepare()
+        self.assertIn("proposes `deepseek-ai/DeepSeek-R1-Distill-Qwen-99B`", preview["body"])
+        self.assertIn("merging this result does not make it one", preview["body"])
+
+    def test_an_uncatalogued_model_without_a_proposal_cannot_be_prepared(self):
+        self.propose(proposal=self.NO_PROPOSAL)
+        with self.assertRaises(UIError) as raised:
+            self.prepare()
+        self.assertIn("model-proposal.json", str(raised.exception))
+
+    def test_a_proposal_for_a_model_the_result_did_not_measure_is_refused(self):
+        self.propose(proposal={**self.PROPOSAL, "proposed_id": "Qwen/Qwen3-32B"})
+        with self.assertRaises(UIError) as raised:
+            self.prepare()
+        self.assertIn("Bundle validation failed", str(raised.exception))
+
+    def test_a_proposal_from_another_account_is_refused(self):
+        self.propose(proposal={**self.PROPOSAL, "proposed_by": "somebody-else"})
+        with self.assertRaises(UIError) as raised:
+            self.prepare()
+        self.assertIn("Bundle validation failed", str(raised.exception))
+
+    def test_a_proposal_that_calls_itself_accepted_is_refused(self):
+        self.propose(proposal={**self.PROPOSAL, "status": "accepted"})
+        with self.assertRaises(UIError) as raised:
+            self.prepare()
+        self.assertIn("Bundle validation failed", str(raised.exception))
+
+    def test_a_proposal_for_a_catalogued_model_is_refused(self):
+        self.propose(model_id="Qwen/Qwen3-4B",
+                     proposal={**self.PROPOSAL, "proposed_id": "Qwen/Qwen3-4B"})
+        with self.assertRaises(UIError) as raised:
+            self.prepare()
+        self.assertIn("Bundle validation failed", str(raised.exception))
+
+    def test_the_bundle_binding_covers_the_proposal(self):
+        """Editing the proposal after review invalidates that review."""
+        self.propose()
+        api, session, preview, review = self.prepare()
+        (self.run / "model-proposal.json").write_text(
+            json.dumps({**self.PROPOSAL, "rationale": "Changed after review."}), encoding="utf-8")
+        with self.assertRaises(UIError):
+            submit_community(self.root, self.run, session, review, {}, lambda: None)
+        self.assertFalse(api.writes)
+
+    def test_signing_out_after_review_stops_the_upload(self):
+        self.propose()
+        api, session, preview, review = self.prepare()
+        session.close()
+        with self.assertRaises(UIError):
+            submit_community(self.root, self.run, session, review, {}, lambda: None)
+        self.assertFalse(api.writes)
+
+    def test_a_different_account_cannot_submit_a_reviewed_proposal(self):
+        self.propose()
+        api, session, preview, review = self.prepare()
+        session.account = {"login": "someone-else", "id": 99}
+        with self.assertRaises(UIError):
+            submit_community(self.root, self.run, session, review, {}, lambda: None)
+        self.assertFalse(api.writes)
+
+    def test_nothing_is_written_into_the_local_registry(self):
+        self.propose()
+        api, session, preview, review = self.prepare()
+        submit_community(self.root, self.run, session, review, {}, lambda: None)
+        self.assertEqual(list((self.root / "results").iterdir()), [])
+
+    def test_a_catalogued_result_still_uploads_exactly_five_files(self):
+        """The ordinary route is unchanged by any of this."""
+        api, session, preview, review = self.prepare()
+        self.assertEqual(len(preview["files"]), 5)
+        submit_community(self.root, self.run, session, review, {}, lambda: None)
+        tree = next(payload for path, payload in api.writes if path.endswith("/git/trees"))
+        self.assertEqual(len(tree["tree"]), 5)
+
 if __name__ == "__main__": unittest.main()

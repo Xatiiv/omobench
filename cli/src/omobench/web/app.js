@@ -64,6 +64,20 @@ async function api(path, data, binary = false) {
 function updateButtons() {
   const busy = pending || jobs.some((job) => activeStates.has(job.status));
   $("start-run").disabled = busy || !setup?.can_execute;
+  // Advisory, never a gate. Only an actual runner constraint stops a run, and
+  // an unloaded tokenizer or an uncatalogued model is not one -- the
+  // measurements would be just as real. What this does is make sure nobody
+  // spends an hour discovering it.
+  const outstanding = workflow ? workflow.blocking.run.length : 0;
+  $("run-caution").hidden = !outstanding;
+  if (outstanding) {
+    const labels = workflow.checks
+      .filter((item) => item.blocks === "run" && item.state !== "ok")
+      .map((item) => item.label);
+    $("run-caution").textContent =
+      `${outstanding} thing(s) are not established yet: ${labels.join("; ")}. `
+      + "You can still start the benchmark; these are the ones that would stop it or waste it.";
+  }
   $("test-connection").disabled = busy;
   $("package-button").disabled = busy || !setup?.can_validate;
   $("prepare-button").disabled = busy;
@@ -89,15 +103,55 @@ function option(value, label = value) {
   return el;
 }
 
+function fact(list, term, description) {
+  const dt = document.createElement("dt"), dd = document.createElement("dd");
+  dt.textContent = term; dd.textContent = description;
+  list.append(dt, dd);
+}
+
+// What this profile will do, and what its result has to clear, before it runs
+// rather than in a validator message afterwards. Everything shown is read from
+// the profile's own declaration; nothing here predicts how long a particular
+// machine will take.
 function profileDetail() {
   if (!setup) return;
-  const spec = setup.profiles[$("profile").value];
+  const id = $("profile").value;
+  const spec = setup.profiles[id];
+  const brief = (setup.profile_briefings || {})[id] || {};
   const load = spec.profile.includes("streams=16") ? "16 streams" : "1 stream";
   // max_requests is the runner's total request budget, including warmup and
-  // cooldown -- never label it "measured requests" here. The profile's own
-  // declared measured-request target (execution.measured_requests) is not
-  // part of this setup payload; only show it once it is.
+  // cooldown -- never label it "measured requests" here.
   $("profile-detail").textContent = `${spec.input_tokens.toLocaleString()} input tokens · ${spec.output_tokens} requested output tokens · ${load} · maximum ${spec.max_requests} total requests, including warmup and cooldown · up to ${spec.max_duration_seconds / 60} min`;
+
+  const facts = $("profile-facts");
+  facts.replaceChildren();
+  if (brief.measured_requests) {
+    fact(facts, "What it executes", `${brief.warmup_requests} warmup + ${brief.measured_requests} measured`
+      + ` + ${brief.cooldown_requests} cooldown = ${brief.total_requests} requests.`
+      + " Warmup and cooldown are excluded from every number.");
+  }
+  fact(facts, "When it stops", `Whichever comes first: the ${spec.max_requests}-request budget,`
+    + ` or ${spec.max_duration_seconds / 60} minutes.`);
+  if (brief.seconds_per_request_budget) {
+    fact(facts, "Time the budget allows",
+      `${brief.seconds_per_request_budget.toFixed(0)} seconds per request on average.`
+      + " That is the ceiling divided by the request budget, not an estimate for your machine.");
+  }
+  if (brief.request_timeout_seconds) {
+    fact(facts, "Stalled request", `A request that goes ${brief.request_timeout_seconds} seconds`
+      + " without producing its next chunk fails. A slow but steady response is not a stall.");
+  }
+
+  $("profile-qualifies").textContent = brief.minimum_successful_requests
+    ? `To qualify for the public registry this profile needs at least ${brief.minimum_successful_requests}`
+      + ` successful measured requests and an error rate no higher than ${brief.maximum_error_rate_percent}%.`
+      + " A benchmark that finishes is not automatically a result the registry takes."
+    : "";
+  $("profile-ceiling").textContent = "If the ceiling arrives before the request budget is done, the"
+    + " request still streaming is cancelled, and a cancelled request counts as attempted and not"
+    + " successful — so a run that ends on the clock usually misses the error rate above."
+    + (brief.longer_alternative
+      ? ` ${brief.longer_alternative} is the same workload with a longer ceiling.` : "");
 }
 
 async function refreshSetup() {
@@ -149,6 +203,12 @@ function renderRun(job, telemetry = null) {
   if (job.id !== selected) return;
   $("run-panel").hidden = false;
   $("run-title").textContent = job.model;
+  $("run-transport").hidden = !job.transport;
+  $("run-transport").textContent = job.transport
+    ? "Measured through the Windows bridge: the model ran on Windows, the benchmark runner in WSL. "
+      + "The bridge's own latency is inside every number here and is never subtracted. This run can "
+      + "be submitted once you describe the machine that served the model, below."
+    : "";
   $("run-status").textContent = `${job.execution_device.toUpperCase()} · ${job.status}`;
   const duration = Math.max(0, Math.floor((new Date(job.finished_at || Date.now()) - new Date(job.created_at)) / 1000));
   $("run-meta").textContent = `${job.profile} · ${Math.floor(duration / 60)}m ${duration % 60}s · ${new Date(job.created_at).toLocaleString()}`
@@ -244,6 +304,10 @@ async function selectRun(id) {
   const telemetry = await api(`/api/runs/${id}/telemetry`).catch(() => null);
   if (selected !== id) return;
   renderRun(job, telemetry); renderJobs();
+  // Reopening a saved run recomputes where it got to and what its evidence
+  // says, rather than leaving the previous run's answers on screen.
+  await refreshWorkflow();
+  await refreshEvidence(id);
 }
 
 function download(blob, name) {
@@ -299,15 +363,136 @@ function renderServerCheck(report) {
   $("server-check-limits").hidden = false;
 }
 
+
+// --- Where you are, and what is in the way --------------------------------
+// One request answers all of it: the six stages, and every check grouped by
+// whether it would stop a run, a package or a submission. Three surfaces
+// deciding for themselves whether a run is ready is three chances to disagree.
+let workflow = null;
+
+// The shared stages, gates, completion states and evidence summary. The guided
+// page mounts the same component; the rules themselves live server-side.
+const workflowView = new WorkflowView();
+
+function workflowRequest() {
+  const data = Object.fromEntries(new FormData($("package-form")));
+  const enriched = withProvenance(data);
+  enriched.endpoint = $("endpoint").value;
+  enriched.tokenizer = $("tokenizer").value;
+  enriched.windows_bridge = $("windows-bridge").checked;
+  enriched.model = $("package-model").value.trim() || $("model").value.trim();
+  if (selected) enriched.job = selected;
+  return enriched;
+}
+
+function renderWorkflow(report) {
+  workflow = report;
+  workflowView.render(report);
+  renderCatalogStatus(report.proposal);
+}
+
+async function refreshWorkflow() {
+  renderWorkflow(await api("/api/workflow", workflowRequest()));
+}
+
+// The checks describe what is in the form, so they follow the form. Without
+// this the panel tells you a revision is missing while it is on screen, and
+// only catches up when something else happens to ask.
+let workflowTimer = null, workflowPending = false;
+function scheduleWorkflowRefresh() {
+  clearTimeout(workflowTimer);
+  workflowTimer = setTimeout(async () => {
+    if (workflowPending) return scheduleWorkflowRefresh();
+    workflowPending = true;
+    try { await refreshWorkflow(); } catch { /* the next edit asks again */ }
+    finally { workflowPending = false; }
+  }, 700);
+}
+["run-form", "package-form"].forEach((id) => {
+  $(id).addEventListener("input", scheduleWorkflowRefresh);
+  $(id).addEventListener("change", scheduleWorkflowRefresh);
+});
+
+// Moving between stages reveals, it never resets: every field stays exactly as
+// it was typed, so fixing something earlier costs nothing later.
+document.querySelectorAll(".step-tab").forEach((tab) => {
+  tab.addEventListener("click", () => {
+    const target = $(tab.dataset.target);
+    if (!target || target.hidden) {
+      notice("That step is not available yet. The checks above say what it is waiting for.");
+      return;
+    }
+    const open = target.closest("details");
+    if (open) open.open = true;
+    target.scrollIntoView({behavior: "smooth", block: "start"});
+  });
+});
+
+// --- Catalogued, or proposed ----------------------------------------------
+function renderCatalogStatus(proposal) {
+  if (!proposal || !proposal.model) { $("catalog-status").hidden = true; return; }
+  $("catalog-status").hidden = false;
+  $("catalog-status-summary").textContent = proposal.summary;
+  $("catalog-status").classList.toggle("error", Boolean(proposal.conflict));
+  const rows = [
+    ["Is this model in the catalog?", proposal.catalogued ? "Yes" : "No"],
+    ["Does it need a proposal to be submitted?", proposal.required ? "Yes" : "No"],
+  ];
+  if (proposal.conflict) rows.push(["Conflict", proposal.conflict]);
+  $("catalog-status-items").replaceChildren(...rows.map(([label, value]) => {
+    const li = document.createElement("li");
+    li.className = "status-item pending";
+    const strong = document.createElement("strong"), span = document.createElement("span");
+    strong.textContent = label; span.textContent = value;
+    li.append(strong, span);
+    return li;
+  }));
+  $("catalog-status-review").textContent = proposal.review_note;
+  // Opened only when it is needed, and never closed over the contributor's work.
+  if (proposal.required && $("model-proposal-section").hidden) {
+    $("model-proposal-section").hidden = false;
+  }
+}
+
+$("check-proposal").addEventListener("click", () => action(async () => {
+  const data = workflowRequest();
+  const status = await api("/api/model-proposal", data);
+  $("proposal-status").hidden = false;
+  $("proposal-status").classList.toggle("error", Boolean(status.error));
+  $("proposal-status-summary").textContent = status.summary;
+  $("proposal-missing").replaceChildren(...(status.missing || []).map((field) => {
+    const li = document.createElement("li");
+    li.className = "status-item fail";
+    const strong = document.createElement("strong");
+    strong.textContent = `Still needed: ${field.replace(/_/g, " ")}`;
+    li.append(strong);
+    return li;
+  }));
+  // What lands on this machine, and what a reviewer would be asked to decide.
+  $("proposal-saved").textContent = status.document
+    ? `Saved beside the evidence as ${status.saved_as} and uploaded with it. ${status.review_note}`
+    : status.review_note;
+  $("proposal-preview").hidden = !status.document;
+  if (status.document) $("proposal-json").textContent = JSON.stringify(status.document, null, 2);
+}));
+
+// --- Six states, none of them assumed -------------------------------------
+async function refreshEvidence(jobId) {
+  workflowView.renderEvidence(await api(`/api/runs/${jobId}/evidence`).catch(() => null));
+}
+
 $("test-connection").addEventListener("click", () => action(async () => {
   $("connection-result").textContent = "Checking the address, this environment, the server, its model list and one streaming request…";
   renderServerCheck(await api("/api/server-check", {
     endpoint: $("endpoint").value, model: $("model").value, tokenizer: $("tokenizer").value,
+    windows_bridge: $("windows-bridge").checked,
   }));
+  await refreshWorkflow();
 }));
 $("run-form").addEventListener("submit", (event) => {
   event.preventDefault(); action(async () => {
     const data = Object.fromEntries(new FormData(event.target)); data.device_confirmed = $("device-confirmed").checked;
+    data.windows_bridge = $("windows-bridge").checked;
     const job = await api("/api/runs", data); jobs = await api("/api/runs");
     await selectRun(job.id); $("run-panel").scrollIntoView({behavior: "smooth"});
   });
@@ -322,8 +507,9 @@ $("download-summary").addEventListener("click", () => action(async () => {
   download(new Blob([JSON.stringify(report, null, 2) + "\n"], {type: "application/json"}), `${selected}-local-report.json`);
 }));
 $("check-requirements").addEventListener("click", () => action(async () => {
-  const data = Object.fromEntries(new FormData($("package-form")));
+  const data = withProvenance(Object.fromEntries(new FormData($("package-form"))));
   renderRequirements(await api(`/api/runs/${selected}/requirements`, data));
+  await refreshWorkflow();
 }));
 const TOKENIZER_CHECK_LABELS = {
   syntax: "Identifier accepted",
@@ -343,19 +529,213 @@ $("check-tokenizer").addEventListener("click", () => action(async () => {
   if (!report.checks) $("tokenizer-result").textContent = report.message;
   $("tokenizer-result").classList.toggle("error", !report.ok);
 }));
+// --- The machine that served the model ---------------------------------
+// Where inference happened is not always where this panel is running, and on a
+// bridged run it definitely is not. None of this is filled in from the runner:
+// what WSL can see of its Windows host says nothing about what served the
+// model, so every field here is the contributor's own statement and is
+// recorded as one.
+const ACCELERATOR_ROLES = ["inference", "present-not-used", "unknown"];
+
+function parseAccelerators(value) {
+  return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+    const parts = line.split(",").map((part) => part.trim());
+    if (parts.length < 2) throw new Error(`Each accelerator needs at least a vendor and a model: "${line}"`);
+    const [vendor, model, memory, count, role] = parts;
+    const entry = {vendor: vendor.toLowerCase(), model, count: count ? Number(count) : 1,
+                   role: role || "unknown"};
+    entry.memory_gb = memory ? Number(memory) : null;
+    if (entry.memory_gb !== null && !(entry.memory_gb > 0)) throw new Error(`Accelerator memory must be a number of gigabytes: "${line}"`);
+    if (!Number.isInteger(entry.count) || entry.count < 1) throw new Error(`Accelerator count must be a whole number: "${line}"`);
+    if (!ACCELERATOR_ROLES.includes(entry.role)) throw new Error(`An accelerator's role is one of ${ACCELERATOR_ROLES.join(", ")}: "${line}"`);
+    return entry;
+  });
+}
+
+function parseSettings(value) {
+  return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+    const index = line.indexOf("=");
+    if (index < 1) throw new Error(`Each serving setting is "name = value": "${line}"`);
+    return {name: line.slice(0, index).trim(), value: line.slice(index + 1).trim()};
+  });
+}
+
+function servingDeclaration(data) {
+  const host = {};
+  if ($("serving-os").value.trim()) host.os = $("serving-os").value.trim();
+  if ($("serving-cpu").value.trim()) host.cpu = $("serving-cpu").value.trim();
+  if ($("serving-ram-gb").value) host.ram_gb = Number($("serving-ram-gb").value);
+  // The engine is what executed the weights. The framework above is how
+  // OmoBench classifies the server, and for an application that embeds an
+  // engine the two are different things -- LM Studio is not llama.cpp.
+  const engine = {name: $("serving-engine").value.trim() || data.framework,
+                  version: data.framework_version};
+  const serving = {host, accelerators: parseAccelerators($("serving-accelerators").value),
+                   runtime: {engine, settings: parseSettings($("serving-settings").value)}};
+  const placement = $("serving-placement").value;
+  if (placement !== "unknown") {
+    serving.placement = {mode: placement};
+    const detail = $("serving-placement-detail").value.trim();
+    if (detail) serving.placement.detail = detail;
+  }
+  if ($("serving-application").value.trim()) {
+    serving.runtime.application = {name: $("serving-application").value.trim(),
+                                   version: $("serving-application-version").value.trim()};
+  }
+  return serving;
+}
+
+function weightsDeclaration() {
+  const raw = $("weights-manifest").value.trim();
+  if (!raw) return null;
+  let manifest;
+  try { manifest = JSON.parse(raw); } catch { throw new Error("The weight manifest is not valid JSON. Paste what `omobench weights` printed, unchanged."); }
+  return {kind: "local-files", manifest};
+}
+
+function proposalDeclaration() {
+  if ($("model-proposal-section").hidden) return null;
+  return {
+    family: $("proposal-family").value.trim(),
+    parameter_class: $("proposal-parameter-class").value.trim(),
+    source: $("proposal-source").value.trim(),
+    licence: $("proposal-licence").value.trim(),
+    rationale: $("proposal-rationale").value.trim(),
+    weights_publicly_downloadable: $("proposal-public").checked,
+  };
+}
+
+// Everything the packager needs beyond the schema 1.0 fields, collected in one
+// place so the two forms cannot disagree about what was declared.
+function withProvenance(data) {
+  const enriched = {...data};
+  enriched.served_model_id = $("served-model-id").value.trim();
+  enriched.serving = servingDeclaration(data);
+  const weights = weightsDeclaration();
+  if (weights) enriched.weights = weights;
+  const proposal = proposalDeclaration();
+  if (proposal) { enriched.proposal = proposal; enriched.catalog_status = "proposed"; }
+  // A request for the probe the panel read itself, not a document from here.
+  if (servingProbeRead) enriched.probe = true;
+  delete enriched.serving_os; delete enriched.serving_cpu; delete enriched.serving_ram_gb;
+  delete enriched.serving_placement; delete enriched.serving_placement_detail;
+  delete enriched.serving_accelerators; delete enriched.serving_application;
+  delete enriched.serving_engine;
+  delete enriched.serving_application_version; delete enriched.serving_settings;
+  delete enriched.weights_manifest; delete enriched.proposal_family;
+  delete enriched.proposal_parameter_class; delete enriched.proposal_source;
+  delete enriched.proposal_licence; delete enriched.proposal_rationale;
+  return enriched;
+}
+
+// Asks the companion to read the Windows machine's hardware, where it lives.
+// What comes back fills the fields; what it cannot know stays empty rather
+// than being guessed at, and the page never sends a probe document of its own.
+let servingProbeRead = false;
+$("read-serving-hardware").addEventListener("click", () => action(async () => {
+  $("serving-probe-result").textContent = "Asking the companion to read this machine's hardware…";
+  const probe = await api("/api/serving-probe", {windows_bridge: $("windows-bridge").checked});
+  servingProbeRead = true;
+  if (probe.os) $("serving-os").value = probe.os;
+  if (probe.cpu) $("serving-cpu").value = probe.cpu;
+  if (probe.ram_gb) $("serving-ram-gb").value = String(probe.ram_gb);
+  const lines = (probe.accelerators || []).map((device) =>
+    // Memory is left out on purpose: see the note the probe returns.
+    [device.vendor, device.model, "", String(device.count ?? 1), "unknown"].join(", "));
+  if (lines.length) $("serving-accelerators").value = lines.join("\n");
+  $("serving-probe-result").textContent = probe.note;
+}));
+
+$("suggest-model").addEventListener("click", () => action(async () => {
+  const alias = $("served-model-id").value.trim() || $("model").value.trim();
+  const report = await api("/api/model-suggestions", {served_model_id: alias});
+  $("model-suggestions").hidden = false;
+  $("model-suggestion-message").textContent = report.message;
+  // Offered, never applied: a serving alias is not evidence of which weights
+  // were loaded, so the choice stays the contributor's.
+  $("model-suggestion-list").replaceChildren(...report.candidates.map((candidate) => {
+    const li = document.createElement("li"), reason = document.createElement("span");
+    const use = document.createElement("button");
+    use.type = "button"; use.className = "secondary"; use.textContent = `Use ${candidate.id}`;
+    use.addEventListener("click", () => {
+      $("package-model").value = candidate.id;
+      $("model-proposal-section").hidden = true;
+    });
+    li.textContent = candidate.id; reason.className = "sub-check";
+    reason.textContent = candidate.reason; li.append(reason, use); return li;
+  }));
+  $("model-proposal-section").hidden = report.candidates.length > 0
+    || report.catalog.includes($("package-model").value.trim());
+}));
+
+const PREFLIGHT_LABELS = {
+  syntax: "Usable identifier",
+  files: "Files where the loader looks",
+  loaded: "Loaded by the runner's own interpreter",
+  compatibility: "Matches the served weights",
+};
+
+function renderPreflight(report) {
+  $("tokenizer-preflight").hidden = false;
+  $("tokenizer-preflight").classList.toggle("error", !report.ok);
+  $("tokenizer-preflight-message").textContent = report.message;
+  $("tokenizer-preflight-checks").replaceChildren(...(report.checks || []).map((check) => {
+    const li = document.createElement("li"), detail = document.createElement("span");
+    li.textContent = `${PREFLIGHT_LABELS[check.id] || check.id}: ${check.state}`;
+    detail.className = "sub-check"; detail.textContent = check.detail;
+    li.append(detail); return li;
+  }));
+  $("tokenizer-suggestion").hidden = !report.suggestion;
+  if (report.suggestion) {
+    $("tokenizer-suggestion-reason").textContent = report.suggestion.reason;
+    $("tokenizer-use-suggestion").onclick = () => { $("tokenizer").value = report.suggestion.source; };
+  }
+  // A download is a separate, named act with a visible source and destination.
+  $("tokenizer-download").hidden = report.ok || report.kind === "invalid";
+}
+
+$("load-tokenizer").addEventListener("click", () => action(async () => {
+  $("tokenizer-preflight").hidden = false;
+  $("tokenizer-preflight-message").textContent = "Loading the tokenizer in the runner's interpreter. Closing the panel stops it.";
+  $("tokenizer-preflight-checks").replaceChildren();
+  renderPreflight(await api("/api/tokenizer-preflight", {
+    tokenizer: $("tokenizer").value, model: $("model").value, network: "metadata",
+  }));
+  await refreshWorkflow();
+}));
+
+$("tokenizer-download-confirm").addEventListener("click", () => action(async () => {
+  const source = $("tokenizer").value.trim() || $("model").value.trim();
+  const plan = await api("/api/tokenizer-download-plan", {tokenizer: source});
+  $("tokenizer-download-plan").textContent =
+    `From ${plan.source} into ${plan.destination}. ${plan.downloads} ${plan.never_downloads}`;
+  renderPreflight(await api("/api/tokenizer-preflight", {
+    tokenizer: source, model: $("model").value, network: "download",
+  }));
+}));
+
 $("package-form").addEventListener("submit", (event) => {
   event.preventDefault(); action(async () => {
-    const data = Object.fromEntries(new FormData(event.target));
+    const data = withProvenance(Object.fromEntries(new FormData(event.target)));
     data.runtime_args = data.runtime_args.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
     const currentJob = jobs.find((job) => job.id === selected);
     data.gpu_memory_gb = data.gpu_memory_gb && currentJob?.execution_device !== "cpu" ? Number(data.gpu_memory_gb) : null;
     if (data.framework !== "openai-compatible-other") data.server_description = "";
     preview = null; $("submission-preview").hidden = true; $("submit-confirmed").checked = false;
     renderRequirements(await api(`/api/runs/${selected}/requirements`, data));
-    if (!requirements.ready) {
-      throw new Error("This run is not ready for a community submission. The checklist above lists every missing requirement. Your measurements are kept either way.");
+    // Packaging is gated on what packaging needs, and nothing else. A model
+    // awaiting catalog review, or a submitter nobody has typed yet, belongs to
+    // the registry's gate: the bundle built from this evidence is just as
+    // valid without them, and refusing to build it would throw the run away
+    // over a decision somebody else has to make.
+    if (requirements.blocks_packaging.length) {
+      throw new Error("This evidence cannot be packaged yet: "
+        + requirements.blocks_packaging.join("; ")
+        + ". The checklist above says what each one needs. Your measurements are kept either way.");
     }
     renderRun(await api(`/api/runs/${selected}/package`, data));
+    await refreshWorkflow();
+    await refreshEvidence(selected);
   });
 });
 const community = new CommunitySubmission(api, () => {
@@ -411,6 +791,7 @@ async function init() {
     community.refresh();
     await refreshSetup(); jobs = await api("/api/runs"); renderJobs();
     if (jobs.length) await selectRun(jobs[0].id);
+    else await refreshWorkflow();
     poll();
   } catch (error) { notice(error.message, true); $("runner-status").hidden = true; }
 }

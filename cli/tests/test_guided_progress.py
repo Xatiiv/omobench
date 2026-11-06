@@ -25,7 +25,7 @@ def _render_states() -> dict:
         raise unittest.SkipTest("Node is not available in this environment")
     completed = subprocess.run(
         [node, str(HARNESS), str(GUIDED_JS)],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True, encoding="utf-8", timeout=120,
     )
     if completed.returncode != 0:
         raise AssertionError(f"guided.js harness failed:\n{completed.stderr}")
@@ -228,6 +228,59 @@ class GuidedLocalExportTests(unittest.TestCase):
         self.assertEqual(export["requests"], ["GET /api/runs/job-aaaaaaaaaaaaaaaa/local-report"])
         self.assertTrue(export["name"].endswith("-local-report.json"))
         self.assertEqual(export["kind"], "omobench-local-report")
+
+    def test_the_guided_page_renders_the_same_workflow_as_the_advanced_panel(self):
+        """Two ways to start, one workflow.
+
+        The guided page used to keep its own four-item idea of where a run had
+        got to, next to the advanced panel's six. Two surfaces answering "is
+        this done yet" separately is two chances to disagree, and the one a
+        contributor happened to be looking at decided what they believed.
+        Both now render the one answer the panel computes.
+        """
+        state = self.states["sharedWorkflow"]
+        self.assertTrue(state["completionVisible"])
+        self.assertEqual(state["completion"], [
+            "ok:Benchmark completed",
+            "ok:Evidence saved on this machine",
+            "fail:Bundle validated",
+            "fail:Ready to submit",
+            "pending:Submitted for review",
+            "pending:Accepted and published",
+        ])
+        self.assertEqual(state["stepper"], [
+            "connect:done", "identify:done", "check:done",
+            "run:done", "review:blocked", "submit:todo"])
+
+    def test_the_guided_page_shows_the_same_evidence_summary(self):
+        """The evidence a contributor is about to publish, in the place they
+        are about to publish it from."""
+        state = self.states["sharedWorkflow"]
+        self.assertTrue(state["evidenceVisible"])
+        self.assertEqual(state["evidenceSections"], ["Which model, and which weights"])
+
+    def test_the_review_screen_says_what_this_environment_has_left(self):
+        """Said where the run is started, not only on the advanced panel.
+
+        A managed run is begun from this screen, so the reading belongs on
+        it -- severe pressure marked as severe, and the note about what a
+        reading taken inside WSL cannot cover. Both come from the same
+        /api/workflow answer the gate lists use and through the same
+        renderer, so the two pages cannot drift.
+        """
+        notes = self.states["environmentNotes"]
+        self.assertFalse(notes["hidden"])
+        self.assertEqual(notes["requests"], ["POST /api/workflow"])
+        self.assertEqual([item["className"] for item in notes["items"]],
+                         ["status-item pending severe", "status-item pending"])
+        severe, host = notes["items"]
+        self.assertEqual(severe["text"][0], "Severe")
+        self.assertIn("allocated to this WSL environment", " ".join(severe["text"]))
+        self.assertIn("not readable from in here", " ".join(host["text"]))
+
+    def test_a_panel_it_cannot_reach_does_not_stop_the_review(self):
+        """None of this blocks a run, so none of it may block the screen."""
+        self.assertEqual(self.states["environmentNotesSurviveFailure"], 2)
 
     def test_the_share_screen_lists_every_publication_requirement(self):
         checklist = self.states["publicationChecklist"]

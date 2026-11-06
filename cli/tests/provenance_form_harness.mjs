@@ -1,0 +1,172 @@
+// Loads the real cli/src/omobench/web/app.js in a VM context with the shared
+// DOM stand-in and drives its serving-provenance form directly, so the
+// declaration the panel builds is checked where CI can see it.
+//
+// Run by cli/tests/test_provenance_form.py, which asserts on the JSON printed.
+import { readFileSync } from "node:fs";
+import { createContext, runInContext } from "node:vm";
+import { makeDocument } from "./dom_stub.mjs";
+
+const appPath = process.argv[2];
+
+const document = makeDocument();
+const get = (id) => document.getElementById(id);
+
+get("package-form").formValues = {};
+class HarnessFormData {
+  constructor(form) { this.entries = Object.entries(form.formValues || {}); }
+  [Symbol.iterator]() { return this.entries[Symbol.iterator](); }
+}
+
+// Synthetic throughout: an LM Studio alias, an AMD desktop that does not exist.
+const CATALOG = ["Qwen/Qwen3-4B", "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"];
+const requests = [];
+const responses = {
+  "/api/setup": {
+    environment: { cpu: "Fixture CPU", ram_gb: 32, gpus: [], operating_system: "Fixture Linux" },
+    profiles: { "chat-small-v1": { profile: "synchronous", input_tokens: 1024, output_tokens: 256, max_requests: 50, max_duration_seconds: 900 } },
+    frameworks: ["lmstudio", "llama.cpp", "vllm", "openai-compatible-other"],
+    catalog: CATALOG, can_execute: true, can_validate: true, runner_message: "ready",
+  },
+  "/api/runs": [],
+  "/api/github/session": { available: false, signed_in: false },
+};
+
+const context = createContext({
+  document, console, URLSearchParams, Date, Math, JSON, Number, Set, Map, Object,
+  Array, String, Boolean, Promise, Error, isNaN, parseInt, parseFloat,
+  FormData: HarnessFormData, Blob: class {},
+  URL: { createObjectURL: () => "blob:fixture", revokeObjectURL: () => {} },
+  setTimeout: () => 0,
+  clearTimeout: () => {},
+  location: { hash: "", pathname: "/advanced", href: "http://127.0.0.1:8799/advanced" },
+  history: { replaceState: () => {} },
+  sessionStorage: { getItem: () => "test-token", setItem: () => {}, removeItem: () => {} },
+  fetch: async (path, options) => {
+    const body = options?.body ? JSON.parse(options.body) : null;
+    requests.push({ path, body });
+    const match = Object.keys(responses).find((key) => path.startsWith(key));
+    return {
+      ok: true, status: 200,
+      json: async () => (typeof responses[match] === "function"
+        ? responses[match](body) : responses[match] ?? {}),
+      blob: async () => ({}),
+    };
+  },
+});
+context.globalThis = context;
+context.self = context;
+
+const source = readFileSync(appPath, "utf8")
+  // The page imports its shared dashboard component; the stand-in supplies a
+  // no-op so this harness exercises the provenance form and nothing else.
+  .replace(/^import .*$/gm, "")
+  .replace(/\bBenchmarkDashboard\b/g, "HarnessDashboard");
+context.HarnessDashboard = class {
+  constructor() {}
+  mount() {} update() {} reset() {} appendLog() {} setStages() {}
+};
+// The shared workflow view is the real one: this harness is about the form
+// the page builds, and the view only renders what the panel is told.
+context.WorkflowView = class {
+  constructor() {}
+  render() {} renderGates() {} renderStages() {} renderCompletion() {} renderEvidence() {}
+};
+context.CommunitySubmission = class {
+  constructor() {} refresh() {} ticket() { return { mode: "community" }; }
+  current() { return true; } destination() { return ""; } payload() { return {}; }
+};
+runInContext(source, context, { filename: appPath });
+
+function fill(values) {
+  for (const [id, value] of Object.entries(values)) {
+    const element = get(id);
+    if (typeof value === "boolean") element.checked = value;
+    else element.value = value;
+  }
+}
+
+const states = {};
+
+// A bridged AMD desktop, declared in full.
+fill({
+  "served-model-id": "deepseek-r1-distill-qwen-14b",
+  "serving-os": "Windows 11 Pro 10.0.26200",
+  "serving-cpu": "AMD Ryzen 7 9800X3D",
+  "serving-ram-gb": "64",
+  "serving-placement": "gpu-only",
+  "serving-placement-detail": "",
+  "serving-accelerators": "amd, AMD Radeon RX 9070, 16, 1, inference",
+  "serving-engine": "llama.cpp",
+  "serving-application": "LM Studio",
+  "serving-application-version": "0.3.31",
+  "serving-settings": "context_length = 8192\ngpu_layers = 49",
+  "weights-manifest": "",
+});
+get("model-proposal-section").hidden = true;
+get("package-form").formValues = {
+  model: "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B", model_revision: "a".repeat(40),
+  framework: "lmstudio", framework_version: "b10621", submitter: "fixture-user",
+  runtime_args: "",
+};
+states.bridged = context.withProvenance(
+  Object.fromEntries(new HarnessFormData(get("package-form"))));
+
+// A card that was installed but idle, and a split placement.
+fill({
+  "serving-accelerators":
+    "amd, AMD Radeon RX 9070, 16, 1, inference\nintel, Intel Arc A770, 16, 1, present-not-used",
+  "serving-placement": "cpu-gpu-offload",
+  "serving-placement-detail": "32 of 49 layers on GPU",
+});
+states.mixed = context.withProvenance(
+  Object.fromEntries(new HarnessFormData(get("package-form"))));
+
+// Nothing declared about the serving side at all.
+fill({
+  "served-model-id": "", "serving-os": "", "serving-cpu": "", "serving-ram-gb": "",
+  "serving-placement": "unknown", "serving-placement-detail": "",
+  "serving-accelerators": "", "serving-engine": "", "serving-application": "",
+  "serving-application-version": "", "serving-settings": "",
+});
+states.empty = context.withProvenance(
+  Object.fromEntries(new HarnessFormData(get("package-form"))));
+
+// A proposal, once the section is open.
+get("model-proposal-section").hidden = false;
+fill({
+  "proposal-family": "DeepSeek", "proposal-parameter-class": "14B",
+  "proposal-source": "https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-99B",
+  "proposal-licence": "MIT", "proposal-rationale": "Measured on an AMD desktop.",
+  "proposal-public": true,
+});
+states.proposed = context.withProvenance(
+  Object.fromEntries(new HarnessFormData(get("package-form"))));
+get("model-proposal-section").hidden = true;
+
+// Malformed input is refused in the page rather than sent on.
+states.errors = {};
+for (const [name, value] of Object.entries({
+  tooFewFields: "amd",
+  badRole: "amd, AMD Radeon RX 9070, 16, 1, definitely-inference",
+  badMemory: "amd, AMD Radeon RX 9070, lots, 1, inference",
+  badCount: "amd, AMD Radeon RX 9070, 16, 1.5, inference",
+})) {
+  fill({ "serving-accelerators": value });
+  try {
+    context.withProvenance(Object.fromEntries(new HarnessFormData(get("package-form"))));
+    states.errors[name] = "accepted";
+  } catch (error) { states.errors[name] = error.message; }
+}
+fill({ "serving-accelerators": "", "serving-settings": "context_length" });
+try {
+  context.withProvenance(Object.fromEntries(new HarnessFormData(get("package-form"))));
+  states.errors.badSetting = "accepted";
+} catch (error) { states.errors.badSetting = error.message; }
+fill({ "serving-settings": "", "weights-manifest": "{not json" });
+try {
+  context.withProvenance(Object.fromEntries(new HarnessFormData(get("package-form"))));
+  states.errors.badManifest = "accepted";
+} catch (error) { states.errors.badManifest = error.message; }
+
+console.log(JSON.stringify(states, null, 2));

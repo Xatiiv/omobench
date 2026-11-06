@@ -73,6 +73,17 @@ jobs:
         shell: pwsh
         run: ./windows/companion/build.ps1 -Test
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Test the real Windows bridge helper over private stdio
+        shell: pwsh
+        run: |
+          python -m pip install -e './cli[ui,bridge]'
+          $env:OMOBENCH_TEST_BRIDGE_EXE = (Resolve-Path './windows/companion/build/OmoBenchCompanion.exe').Path
+          python -m unittest discover -s cli/tests -p test_bridge_integration.py -v
+          if ($LASTEXITCODE -ne 0) { throw 'Windows bridge integration failed.' }
+
       # No -Revision here. The script derives it from the checked-out commit
       # and refuses a supplied value that disagrees with it.
       - name: Build the installer and run its tests

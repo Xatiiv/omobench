@@ -309,20 +309,32 @@ class RunGuidellmCommandFallbackTests(unittest.TestCase):
 
     def _fake_subprocess_run(self, expected: list[str]):
         """Stands in for the real process launch, asserting the argv actually
-        executed is this interpreter's guidellm, never a PATH lookup."""
+        executed is this interpreter's guidellm, never a PATH lookup.
 
-        def fake_subprocess_run(cmd, *, stdout, **_kwargs):
+        The plain path launches with Popen rather than run(), so the execution
+        supervisor has a process to stop; what this test is about is
+        unchanged -- which argv runs, and how many times.
+        """
+
+        def fake_popen(cmd, *, stdout, **_kwargs):
             self.assertEqual(cmd, expected)
             stdout.write("plain subprocess ran\n")
-            return type("Result", (), {"returncode": 0})()
+            return type("Process", (), {
+                "returncode": 0,
+                "pid": 4242,
+                "stdin": None,
+                "communicate": lambda self, **_kw: ("", ""),
+                "poll": lambda self: 0,
+                "wait": lambda self, timeout=None: 0,
+            })()
 
-        return fake_subprocess_run
+        return fake_popen
 
     def test_telemetry_dir_none_runs_the_verified_runner_without_touching_telemetry(self):
         expected = cli.guidellm_runner_invocation(self.COMMAND)
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "log.txt"
-            with patch("omobench.cli.subprocess.run", side_effect=self._fake_subprocess_run(expected)) as run_mock:
+            with patch("omobench.cli.subprocess.Popen", side_effect=self._fake_subprocess_run(expected)) as run_mock:
                 outcome = cli.run_guidellm_command(
                     self.COMMAND, log_path=log_path, root=Path(tmp),
                     profile_id="chat-small-v1", telemetry_dir=None,
@@ -342,7 +354,7 @@ class RunGuidellmCommandFallbackTests(unittest.TestCase):
             telemetry_dir = Path(tmp) / "telemetry"
             with patch("omobench.cli.shutil.which", return_value="/some/unrelated/bin/guidellm"), patch(
                 "omobench.telemetry.run_generative_benchmark_with_telemetry", return_value=0
-            ) as telemetry_mock, patch("omobench.cli.subprocess.run") as run_mock:
+            ) as telemetry_mock, patch("omobench.cli.subprocess.Popen") as run_mock:
                 outcome = cli.run_guidellm_command(
                     self.COMMAND, log_path=log_path, root=Path(tmp),
                     profile_id="chat-small-v1", telemetry_dir=telemetry_dir,
@@ -359,7 +371,7 @@ class RunGuidellmCommandFallbackTests(unittest.TestCase):
             with patch(
                 "omobench.telemetry.run_generative_benchmark_with_telemetry",
                 side_effect=telemetry.TelemetryUnavailable("simulated setup-time failure"),
-            ), patch("omobench.cli.subprocess.run", side_effect=self._fake_subprocess_run(expected)) as run_mock:
+            ), patch("omobench.cli.subprocess.Popen", side_effect=self._fake_subprocess_run(expected)) as run_mock:
                 outcome = cli.run_guidellm_command(
                     self.COMMAND, log_path=log_path, root=Path(tmp),
                     profile_id="chat-small-v1", telemetry_dir=telemetry_dir,
@@ -380,7 +392,7 @@ class RunGuidellmCommandFallbackTests(unittest.TestCase):
             telemetry_dir = Path(tmp) / "telemetry"
             with patch.object(
                 Path, "mkdir", side_effect=PermissionError("simulated permission error"),
-            ), patch("omobench.cli.subprocess.run", side_effect=self._fake_subprocess_run(expected)) as run_mock:
+            ), patch("omobench.cli.subprocess.Popen", side_effect=self._fake_subprocess_run(expected)) as run_mock:
                 outcome = cli.run_guidellm_command(
                     self.COMMAND, log_path=log_path, root=Path(tmp),
                     profile_id="chat-small-v1", telemetry_dir=telemetry_dir,
