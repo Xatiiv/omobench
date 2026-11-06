@@ -1,21 +1,96 @@
-catalog_version: 1
+catalog_version: 2
 inclusion_policy: >-
   Publicly downloadable open weights with a published licence that permits use
   and publication of benchmark results. OmoBench does not redistribute weights.
+  "Publicly downloadable" means obtainable by anybody willing to accept the
+  publisher's terms, which a gate open to all satisfies and a gate restricted
+  to approved organisations does not. Each model is judged on its own terms.
+#
+# THIS FILE IS THE AUTHORITATIVE MODEL IDENTITY AND ELIGIBILITY RECORD.
+#
+# A model has one identity, one publisher and one licence. It has many ways of
+# being run -- quantisations, runtimes, context lengths, placements -- and
+# those belong in catalog/workloads/, whose recipes reference these ids and
+# repeat none of these facts. Duplicating a licence across six recipes is how
+# five of them end up wrong.
+#
+# Membership is a recommendation, not a condition of submission: see
+# docs/model-eligibility.md. What membership buys is that a reviewer does not
+# have to re-establish the licence and the modality, which is exactly why they
+# are recorded here and nowhere else.
+#
+# `verified` is the day somebody read the model's own card. Null means the
+# entry is carried from an earlier list and has not been re-read.
 models:
   - id: Qwen/Qwen3-4B
-    family: Qwen
+    family: Qwen3
     parameter_class: 4B
     modality: text-generation
     source: https://huggingface.co/Qwen/Qwen3-4B
     licence: Apache-2.0
+    licence_url: https://www.apache.org/licenses/LICENSE-2.0
+    publisher: Qwen
+    gated: false
+    context_tokens: 32768
+    verified: 2026-11-06
     initial_runtimes: [vllm, sglang, llama.cpp]
+  - id: Qwen/Qwen3-8B
+    family: Qwen3
+    parameter_class: 8B
+    modality: text-generation
+    source: https://huggingface.co/Qwen/Qwen3-8B
+    licence: Apache-2.0
+    licence_url: https://www.apache.org/licenses/LICENSE-2.0
+    publisher: Qwen
+    gated: false
+    context_tokens: 32768
+    verified: 2026-11-06
+    initial_runtimes: [vllm, sglang, llama.cpp]
+  - id: mistralai/Mistral-7B-Instruct-v0.3
+    family: Mistral
+    parameter_class: 7B
+    modality: text-generation
+    source: https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3
+    licence: Apache-2.0
+    licence_url: https://www.apache.org/licenses/LICENSE-2.0
+    publisher: Mistral AI
+    gated: false
+    # The model card states no context length; the sidebar's "7B params" is
+    # the only parameter figure given.
+    context_tokens: null
+    verified: 2026-11-06
+    initial_runtimes: [vllm, llama.cpp]
+  - id: microsoft/phi-4
+    family: Phi
+    parameter_class: 14B
+    modality: text-generation
+    source: https://huggingface.co/microsoft/phi-4
+    licence: MIT
+    licence_url: https://opensource.org/license/mit
+    publisher: Microsoft
+    gated: false
+    context_tokens: 16384
+    # The card says 14B, the repository sidebar says 15B. Both are the
+    # publisher's; the card is used.
+    verified: 2026-11-06
+    initial_runtimes: [vllm, llama.cpp]
   - id: meta-llama/Llama-3.1-8B-Instruct
-    family: Llama
+    family: Llama 3.1
     parameter_class: 8B
     modality: text-generation
     source: https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct
     licence: Llama-3.1-Community
+    licence_url: https://github.com/meta-llama/llama-models/blob/main/models/llama3_1/LICENSE
+    publisher: Meta
+    # Gated, and eligible on its own terms: the gate is open to anybody
+    # willing to accept the licence, which is what obtainability asks. This
+    # says nothing about any other gated model.
+    gated: true
+    gate_note: >-
+      Hugging Face requires you to agree to share your contact information and
+      accept the Llama 3.1 Community License before the files appear.
+    context_tokens: 131072
+    verified: 2026-11-06
     initial_runtimes: [vllm, sglang, llama.cpp]
   - id: deepseek-ai/DeepSeek-R1-Distill-Qwen-14B
     family: DeepSeek
@@ -23,6 +98,9 @@ models:
     modality: text-generation
     source: https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-14B
     licence: MIT
+    # Carried from the first list and not re-read; licence and parameter class
+    # are unverified here.
+    verified: null
     initial_runtimes: [vllm, sglang]
   - id: mistralai/Mistral-Small-3.1-24B-Instruct-2503
     family: Mistral
@@ -30,6 +108,7 @@ models:
     modality: text-generation
     source: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503
     licence: Apache-2.0
+    verified: null
     initial_runtimes: [vllm, sglang]
   - id: Qwen/Qwen3-32B
     family: Qwen
@@ -37,4 +116,5 @@ models:
     modality: text-generation
     source: https://huggingface.co/Qwen/Qwen3-32B
     licence: Apache-2.0
+    verified: null
     initial_runtimes: [vllm, sglang]

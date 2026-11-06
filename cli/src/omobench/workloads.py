@@ -1,24 +1,35 @@
 """Curated workloads, read against the hardware in front of you.
 
 OmoBench measures hardware. A model is the load you put on a machine to find
-out what it does, so the question this module answers is not "which model is
-best" -- it answers nothing of the kind, and nothing here ranks anything -- but
-"what can this machine be asked to run, and what would that tell me".
+out what it does, so the question here is not which model is best -- nothing
+in this module ranks anything -- but what this machine can be asked to run,
+and how much of that is actually known.
 
-Two distinctions the whole module exists to keep:
+Identity lives elsewhere. `catalog/models/` is the authoritative record of
+what a model is: one id, one publisher, one licence, one modality. This module
+reads the recipes in `catalog/workloads/`, each of which names one of those
+models and describes one way of running it. A licence is never copied into a
+recipe, because a licence copied six times is a licence wrong five times.
 
-**Expected to fit is not benchmarked.** Fit is arithmetic about memory, done
-from the weight size, the profile's context and a stated runtime overhead. It
-predicts nothing about speed, nothing about whether a run will meet its
-profile's acceptance thresholds, and nothing about the quality of what comes
-out. A machine that fits a workload can still fail to finish it -- that has
-already happened here, twice. Only a result establishes that a machine ran
-something.
+Three distinctions the module exists to keep.
 
-**Serving hardware is not runner hardware.** What matters for fit is the memory
-available where the model is *served*. On a bridged run that is a different
-computer from the one this panel is in, and nothing visible from the runner
-describes it. The caller says which it is passing; this module never guesses.
+**Loading is not completing, and failing is not a requirement.** A server that
+starts in 4.3 GB can be holding 7 GB by the time a profile is half done. The
+only large figure this project has measured is the one a process had reached
+when the kernel killed it, which is a lower bound on a failure and tells
+nobody what success would have cost. So `completion_requirement_gb` is null
+everywhere, and fit verdicts say "unknown" rather than inventing one.
+
+**One observation is not a model of anything.** The growth ratio measured here
+came from one engine, one model and one run that failed. It is offered as a
+hint so a reader knows growth happens at all, and it never produces a verdict.
+
+**Environments are not machines.** A WSL distribution has an allocation, and
+within it an amount currently available -- different numbers, and neither is
+the physical computer's. On a bridged run the Windows server and the WSL
+runner are two environments on *one* physical host, sharing its RAM: the
+runner's footprint does not stop mattering just because it is on the other
+side of a bridge.
 """
 from __future__ import annotations
 
@@ -29,31 +40,12 @@ from typing import Any
 CPU_RAM_TIERS_GB = (8, 16, 32, 64)
 GPU_VRAM_TIERS_GB = (4, 8, 12, 16, 20)
 
-# Anything at or above the largest named tier is reported as that tier "or
-# larger" rather than invented as a new one.
-LARGEST_GPU_TIER_GB = GPU_VRAM_TIERS_GB[-1]
-
 CATALOG = Path("catalog") / "workloads" / "text-generation-v1.yaml"
+MODELS = Path("catalog") / "models"
 
-
-def load(root: Path) -> dict[str, Any]:
-    """The curated workload catalog, or an empty one when it cannot be read.
-
-    A missing catalog is not an error that should stop a benchmark: a
-    contributor connecting their own server needs none of it.
-    """
-    try:
-        import yaml
-
-        document = yaml.safe_load((root / CATALOG).read_text(encoding="utf-8"))
-    except (OSError, ValueError, ImportError):
-        return {"families": [], "excluded": [], "estimate_basis": {}}
-    if not isinstance(document, dict):
-        return {"families": [], "excluded": [], "estimate_basis": {}}
-    document.setdefault("families", [])
-    document.setdefault("excluded", [])
-    document.setdefault("estimate_basis", {})
-    return document
+# What a fit answer can say. "unknown" is the honest answer far more often
+# than a recommendation list would like.
+FITS, MARGINAL, TOO_LARGE, UNKNOWN = "fits", "marginal", "too-large", "unknown"
 
 
 def _as_text(value: Any) -> str | None:
@@ -61,6 +53,50 @@ def _as_text(value: Any) -> str | None:
     if value is None:
         return None
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
+def _read_yaml(path: Path) -> Any:
+    try:
+        import yaml
+
+        return yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, ImportError):
+        return None
+
+
+def models(root: Path) -> dict[str, dict[str, Any]]:
+    """The authoritative identity record, by model id.
+
+    Read from the same files the registry validator reads, so the panel and
+    the registry cannot disagree about what a model is.
+    """
+    found: dict[str, dict[str, Any]] = {}
+    directory = root / MODELS
+    if not directory.is_dir():
+        return found
+    for path in sorted(directory.glob("*.yaml")):
+        document = _read_yaml(path)
+        if not isinstance(document, dict):
+            continue
+        for entry in document.get("models") or []:
+            if isinstance(entry, dict) and isinstance(entry.get("id"), str):
+                found[entry["id"]] = entry
+    return found
+
+
+def load(root: Path) -> dict[str, Any]:
+    """The workload recipes, or an empty set when they cannot be read.
+
+    A missing catalog is not an error that should stop a benchmark: a
+    contributor connecting their own server needs none of it.
+    """
+    document = _read_yaml(root / CATALOG)
+    if not isinstance(document, dict):
+        return {"recipes": [], "excluded": [], "estimate_basis": {}}
+    document.setdefault("recipes", [])
+    document.setdefault("excluded", [])
+    document.setdefault("estimate_basis", {})
+    return document
 
 
 def tier_for(gigabytes: float | None, tiers: tuple[int, ...]) -> int | None:
@@ -76,160 +112,187 @@ def tier_for(gigabytes: float | None, tiers: tuple[int, ...]) -> int | None:
     return met[-1] if met else None
 
 
-def fits(requirement_gb: float | None, available_gb: float | None,
-         load_gb: float | None = None) -> str:
-    """Four answers, and two of them are not "no".
+def assess(
+    *,
+    load_memory_gb: float | None,
+    completion_requirement_gb: float | None,
+    available_gb: float | None,
+    weights_gb: float | None = None,
+) -> dict[str, Any]:
+    """Two separate questions, because they have separate answers.
 
-    "unknown" is a real answer: a fit nobody could compute is not a fit that
-    failed, and saying so is the difference between "this will not run" and
-    "nothing here knows".
-
-    "marginal" is the one this project learned the hard way. Qwen3-4B Q4_K_M
-    loads into 4.3 GB on a 7.49 GB machine, serves perfectly well, and was
-    killed by the kernel 34 requests into a profile once it had grown to
-    7 GB. Reporting that as "fits" promises something that did not happen;
-    reporting it as "too large" denies something that plainly did. It loads,
-    and it may not finish.
+    Will it load, and will it finish. The first is often knowable; the second
+    is knowable only from a completed benchmark, and this project does not yet
+    have one. A recommendation list that answered the second from arithmetic
+    would be making it up, so when it does not know it says so.
     """
-    if requirement_gb is None or available_gb is None:
-        return "unknown"
-    if available_gb >= requirement_gb:
-        return "fits"
-    if load_gb is not None and available_gb >= load_gb:
-        return "marginal"
-    return "too-large"
+    loads = UNKNOWN
+    floor = load_memory_gb if load_memory_gb is not None else weights_gb
+    if floor is not None and available_gb is not None:
+        loads = FITS if available_gb >= floor else TOO_LARGE
+
+    completes = UNKNOWN
+    if completion_requirement_gb is not None and available_gb is not None:
+        completes = FITS if available_gb >= completion_requirement_gb else TOO_LARGE
+
+    # The headline. It is deliberately conservative about claiming success and
+    # deliberately unwilling to claim failure from a number nobody measured.
+    if loads == TOO_LARGE:
+        verdict = TOO_LARGE
+    elif loads == FITS and completes == FITS:
+        verdict = FITS
+    elif loads == FITS:
+        # It will start. Whether it survives a profile is the open question,
+        # and on this project's own hardware the answer was no.
+        verdict = MARGINAL
+    else:
+        verdict = UNKNOWN
+    return {"verdict": verdict, "loads": loads, "completes": completes}
 
 
 def describe(
     root: Path,
     *,
-    serving_ram_gb: float | None = None,
+    serving_available_gb: float | None = None,
+    serving_allocation_gb: float | None = None,
     serving_vram_gb: float | None = None,
+    physical_ram_gb: float | None = None,
     placement: str = "cpu-only",
     bridged: bool = False,
 ) -> dict[str, Any]:
-    """Every curated workload, annotated against the serving hardware given.
+    """Every curated recipe, annotated against the serving environment given.
 
-    `serving_ram_gb` and `serving_vram_gb` describe the machine that will
-    *serve* the model, which on a bridged run is not this one. Either may be
-    None, and None produces "unknown" rather than a guess.
+    `serving_available_gb` is what is free in the environment that will serve
+    the model *now*; `serving_allocation_gb` is the ceiling that environment
+    has. They are different numbers and the panel shows both. `physical_ram_gb`
+    is the computer's own, which on a bridged run both environments are
+    sharing.
     """
     document = load(root)
+    identities = models(root)
     device = "gpu" if placement != "cpu-only" and serving_vram_gb is not None else "cpu"
-    available = serving_vram_gb if device == "gpu" else serving_ram_gb
+    available = serving_vram_gb if device == "gpu" else serving_available_gb
     tiers = GPU_VRAM_TIERS_GB if device == "gpu" else CPU_RAM_TIERS_GB
     basis = document.get("estimate_basis") or {}
-    runner_allowance = basis.get("runner_allowance_gb") or 0.0
-    # The runner's own footprint counts only where it shares the machine with
-    # the server. On a bridged run it is somewhere else entirely, and charging
-    # the serving host for it would be inventing a constraint.
-    shares_host = not bridged and device == "cpu"
+    hint = basis.get("growth_hint") or {}
+
+    by_family: dict[str, dict[str, Any]] = {}
+    for recipe in document["recipes"]:
+        if not isinstance(recipe, dict):
+            continue
+        identity = identities.get(recipe.get("model")) or {}
+        family = identity.get("family") or "Uncatalogued"
+        group = by_family.setdefault(family, {
+            "family": family,
+            "publisher": identity.get("publisher"),
+            "licence": identity.get("licence"),
+            "licence_url": identity.get("licence_url"),
+            "gated": bool(identity.get("gated")),
+            "gate_note": identity.get("gate_note"),
+            "verified": _as_text(identity.get("verified")),
+            "models": {},
+        })
+        model_id = recipe.get("model")
+        entry = group["models"].setdefault(model_id, {
+            "id": model_id,
+            "parameter_class": identity.get("parameter_class"),
+            "source": identity.get("source"),
+            "context_tokens": identity.get("context_tokens"),
+            "known_identity": bool(identity),
+            "options": [],
+        })
+        verdict = assess(
+            load_memory_gb=recipe.get("load_memory_gb"),
+            completion_requirement_gb=recipe.get("completion_requirement_gb"),
+            available_gb=available,
+            weights_gb=recipe.get("weights_gb"),
+        )
+        entry["options"].append({
+            "quantisation": recipe.get("quantisation"),
+            "runtime": recipe.get("runtime"),
+            "artefact": recipe.get("artefact"),
+            "managed_recipe": recipe.get("managed_recipe"),
+            "prepared": recipe.get("managed_recipe") is not None,
+            # Four quantities, each saying whether anybody measured it.
+            "weights_gb": recipe.get("weights_gb"),
+            "weights_measured": bool(recipe.get("weights_measured")),
+            "load_memory_gb": recipe.get("load_memory_gb"),
+            "load_measured": bool(recipe.get("load_measured")),
+            "observed_before_failure_gb": recipe.get("observed_before_failure_gb"),
+            "observation_note": recipe.get("observation_note"),
+            # Null everywhere, and that is the point: no profile has completed
+            # on measured hardware, so nothing here knows what completing costs.
+            "completion_requirement_gb": recipe.get("completion_requirement_gb"),
+            "growth_hint_applies": recipe.get("growth_hint_applies", True)
+                                   and recipe.get("runtime") == hint.get("applies_to"),
+            "benchmark": recipe.get("benchmark") or "never-run",
+            "benchmark_note": recipe.get("benchmark_note"),
+            **verdict,
+        })
 
     families = []
-    for family in document["families"]:
-        variants = []
-        for variant in family.get("variants") or []:
-            options = []
-            for option in variant.get("quantisations") or []:
-                # Four different numbers, and the one that decides is the
-                # last one anybody thinks of. A model that loads is not a
-                # model that fits: Qwen3-4B Q4_K_M loads into 4.3 GB and was
-                # holding 6.99 GB when the kernel killed it 34 requests into
-                # a profile. Fit is judged on sustained memory, plus the
-                # runner's own footprint when the runner shares the machine.
-                load_memory = option.get("load_memory_gb")
-                sustained = option.get("sustained_memory_gb") or load_memory
-                requirement = None
-                if sustained is not None:
-                    requirement = round(sustained + (runner_allowance if shares_host else 0.0), 1)
-                options.append({
-                    "quantisation": option.get("label"),
-                    "runtime": option.get("runtime"),
-                    # Kept apart on purpose, and each says whether anybody
-                    # measured it. A reader who cannot tell a measured figure
-                    # from arithmetic cannot judge the fit either.
-                    "weights_gb": option.get("weights_gb"),
-                    "weights_measured": bool(option.get("weights_measured")),
-                    "load_memory_gb": load_memory,
-                    "sustained_memory_gb": sustained,
-                    "memory_measured": bool(option.get("memory_measured")),
-                    "memory_note": option.get("memory_note"),
-                    "growth_model": option.get("growth_model") or "llama.cpp-observed",
-                    # What has actually happened on real hardware, which is
-                    # not the same claim as fitting and is usually less than
-                    # anybody assumes.
-                    "benchmark": option.get("benchmark") or "never-run",
-                    "benchmark_note": option.get("benchmark_note"),
-                    "recipe": option.get("recipe"),
-                    "prepared": option.get("recipe") is not None,
-                    "requires_gb": requirement,
-                    # The tier row this belongs under in the panel's filter:
-                    # the smallest named size that covers the requirement.
-                    # Presentation, never the comparison.
-                    "tier_gb": next((tier for tier in tiers if requirement is not None
-                                     and tier >= requirement), None),
-                    "fit": fits(requirement, available, load_memory),
-                    "offload_required": (
-                        device == "gpu" and requirement is not None
-                        and available is not None and available < requirement),
-                })
-            variants.append({
-                "id": variant.get("id"),
-                "parameter_class": variant.get("parameter_class"),
-                "source": variant.get("source"),
-                "context_tokens": variant.get("context_tokens"),
-                "quantisations": options,
-            })
-        families.append({
-            "family": family.get("family"),
-            "publisher": family.get("publisher"),
-            "licence": family.get("licence"),
-            "licence_url": family.get("licence_url"),
-            "gated": bool(family.get("gated")),
-            "gate_note": family.get("gate_note"),
-            # YAML turns an unquoted 2026-11-06 into a date object, which no
-            # JSON encoder will take. The panel wants the day it was read, not
-            # a Python type, so it leaves here as the string it looks like.
-            "source_verified": _as_text(family.get("source_verified")),
-            "source_note": family.get("source_note"),
-            "variants": variants,
-        })
+    for group in by_family.values():
+        group = dict(group)
+        group["models"] = list(group["models"].values())
+        families.append(group)
 
     return {
         "families": families,
         "excluded": [{**entry, "checked": _as_text(entry.get("checked"))}
                      for entry in document["excluded"] if isinstance(entry, dict)],
-        "hardware": {
-            "device": device,
-            "placement": placement,
-            "serving_ram_gb": serving_ram_gb,
-            "serving_vram_gb": serving_vram_gb,
-            # What the machine actually has, and separately the tier row it
-            # sits in. A 7.49 GB machine is short of the 8 GB tier and can
-            # still run plenty; only the first number decides anything.
-            "available_gb": available,
-            "tier_gb": tier_for(available, tiers),
-            "runner_shares_host": shares_host,
-            "runner_allowance_gb": runner_allowance if shares_host else 0.0,
-            "tiers": list(tiers),
-            "known": available is not None,
-        },
-        "estimate_basis": document["estimate_basis"],
-        # Said here, once, so every surface that renders this can repeat it
-        # rather than inventing its own wording for the same caveat.
+        "hardware": describe_hardware(
+            device=device, placement=placement, bridged=bridged, tiers=tiers,
+            available=available, serving_available_gb=serving_available_gb,
+            serving_allocation_gb=serving_allocation_gb, serving_vram_gb=serving_vram_gb,
+            physical_ram_gb=physical_ram_gb),
+        "estimate_basis": basis,
+        "growth_hint": hint,
         "qualifications": [
-            "Expected to fit is arithmetic about memory, not a benchmark result: it predicts "
-            "nothing about speed, about meeting a profile's acceptance thresholds, or about the "
-            "quality of what the model produces.",
-            "Loading is not fitting. A server that starts in 4.3 GB can be holding 7 GB by the "
-            "end of a profile, and fit here is judged on the second figure. Where that figure "
-            "was not measured it is one observed growth ratio applied to an estimate.",
-            "'Marginal' means it will load and serve and may not finish: that is exactly what "
-            "happened here, to the workload this panel shipped as its recommended one.",
-            "A machine that fits a workload can still fail to finish one.",
-            "These sizes describe the machine that serves the model. On a bridged run that is a "
-            "different computer from the one this panel is in.",
+            "Fit is arithmetic about memory, not a benchmark result: it predicts nothing about "
+            "speed, about meeting a profile's acceptance thresholds, or about the quality of "
+            "what a model produces.",
+            "Loading is not completing. 'Marginal' means it should start and nothing here knows "
+            "whether it will finish -- which on this project's own hardware it did not.",
+            "No curated workload has a measured completion requirement. The one large figure "
+            "measured here is what a server had reached when the kernel killed it, which is a "
+            "lower bound on a failure and not a specification for success.",
+            "The growth figure in estimate_basis is one observation of one engine running one "
+            "model, from a run that failed. It is a hint that growth happens, not a model of "
+            "how much.",
+            "An environment's allocation is not the memory currently free in it, and neither is "
+            "the physical computer's total. On a bridged run the serving environment and the "
+            "runner are two environments on one computer, sharing its RAM.",
             "The curated list is a recommendation. Any compatible model can be benchmarked, and "
             "submitted on the requirements in docs/model-eligibility.md.",
         ],
+    }
+
+
+def describe_hardware(**facts: Any) -> dict[str, Any]:
+    """The machine, said in the terms that are actually true of it."""
+    available = facts["available"]
+    bridged, device = facts["bridged"], facts["device"]
+    note = (
+        "The model server and this runner are separate environments on the same physical "
+        "computer, so they draw on the same RAM. Memory the runner holds is not available to "
+        "the server, whichever side of the bridge it is on."
+        if bridged else
+        "This environment both serves the model and runs the benchmark, so the two share "
+        "whatever it has."
+    )
+    return {
+        "device": device,
+        "placement": facts["placement"],
+        "bridged": bridged,
+        # Kept apart deliberately: a WSL allocation is a ceiling, not free
+        # memory, and neither is the computer's own total.
+        "serving_available_gb": facts["serving_available_gb"],
+        "serving_allocation_gb": facts["serving_allocation_gb"],
+        "serving_vram_gb": facts["serving_vram_gb"],
+        "physical_ram_gb": facts["physical_ram_gb"],
+        "decides_on_gb": available,
+        "tier_gb": tier_for(available, facts["tiers"]),
+        "tiers": list(facts["tiers"]),
+        "known": available is not None,
+        "shared_host_note": note,
     }

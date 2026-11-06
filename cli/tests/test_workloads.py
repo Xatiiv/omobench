@@ -1,11 +1,13 @@
 """Curated workloads, read against hardware.
 
 OmoBench measures hardware, so the question is what a machine can be asked to
-run. These check the two distinctions the module exists to keep: expected to
-fit is not benchmarked, and serving hardware is not runner hardware.
+run. These pin the distinctions the module exists to keep: identity lives in
+one place, loading is not completing, a failure is not a requirement, one
+observation is not a model, and an environment is not a computer.
 """
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 
@@ -14,193 +16,196 @@ from omobench import workloads
 ROOT = Path(__file__).resolve().parents[2]
 
 
-class CatalogTests(unittest.TestCase):
-    def test_the_shipped_catalog_loads_and_names_its_families(self) -> None:
-        document = workloads.load(ROOT)
-        names = [family["family"] for family in document["families"]]
-        self.assertIn("Qwen3", names)
-        self.assertGreaterEqual(len(names), 5, "five families were researched")
+class IdentityTests(unittest.TestCase):
+    """One authoritative record, referenced rather than copied."""
 
-    def test_a_missing_catalog_is_not_an_error(self) -> None:
-        """A contributor connecting their own server needs none of it."""
-        document = workloads.load(Path("/nonexistent-checkout"))
-        self.assertEqual(document["families"], [])
+    def test_identity_comes_from_the_model_catalog(self) -> None:
+        identities = workloads.models(ROOT)
+        self.assertIn("Qwen/Qwen3-4B", identities)
+        self.assertEqual(identities["Qwen/Qwen3-4B"]["licence"], "Apache-2.0")
 
-    def test_every_memory_figure_says_whether_it_was_measured(self) -> None:
-        for family in workloads.load(ROOT)["families"]:
-            for variant in family["variants"]:
-                for option in variant["quantisations"]:
-                    where = f"{variant['id']} {option['label']}"
-                    for key in ("weights_gb", "load_memory_gb", "sustained_memory_gb"):
-                        self.assertIn(key, option, where)
-                    self.assertIn("weights_measured", option, where)
-                    self.assertIn("memory_measured", option, where)
-                    self.assertIn(option.get("benchmark", "never-run"),
-                                  {"never-run", "not-qualified", "qualified"}, where)
+    def test_no_recipe_carries_a_licence_of_its_own(self) -> None:
+        """A licence copied into six recipes is a licence wrong in five."""
+        for recipe in workloads.load(ROOT)["recipes"]:
+            for field in ("licence", "licence_url", "source", "publisher", "parameter_class"):
+                self.assertNotIn(field, recipe,
+                                 f"{recipe['model']} {recipe['quantisation']} duplicates {field}")
 
-    def test_loading_and_sustaining_are_different_numbers(self) -> None:
-        """The distinction version 1 of the catalog did not make."""
-        for family in workloads.load(ROOT)["families"]:
-            for variant in family["variants"]:
-                for option in variant["quantisations"]:
-                    self.assertGreater(option["load_memory_gb"], option["weights_gb"])
-                    self.assertGreaterEqual(option["sustained_memory_gb"],
-                                            option["load_memory_gb"])
+    def test_every_recipe_names_a_model_the_catalog_knows(self) -> None:
+        identities = workloads.models(ROOT)
+        for recipe in workloads.load(ROOT)["recipes"]:
+            self.assertIn(recipe["model"], identities)
 
-    def test_a_family_nobody_re_read_says_so(self) -> None:
-        """Carried-over records and fresh readings are different things."""
-        families = {f["family"]: f for f in workloads.load(ROOT)["families"]}
-        self.assertIsNone(families["DeepSeek"]["source_verified"])
-        self.assertIn("not read in this pass", families["DeepSeek"]["source_note"])
-        self.assertEqual(str(families["Qwen3"]["source_verified"]), "2026-11-06")
+    def test_legacy_catalog_lookup_still_works(self) -> None:
+        """The registry validator reads these same files; the entries it
+        needed before must still be there and still be shaped the same."""
+        identities = workloads.models(ROOT)
+        for legacy in ("Qwen/Qwen3-4B", "meta-llama/Llama-3.1-8B-Instruct",
+                       "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+                       "mistralai/Mistral-Small-3.1-24B-Instruct-2503", "Qwen/Qwen3-32B"):
+            entry = identities[legacy]
+            for required in ("id", "modality", "source", "licence"):
+                self.assertTrue(str(entry.get(required, "")).strip(), f"{legacy}.{required}")
 
-    def test_a_gated_family_is_marked_and_explained(self) -> None:
-        families = {f["family"]: f for f in workloads.load(ROOT)["families"]}
-        self.assertTrue(families["Llama 3.1"]["gated"])
-        self.assertIn("accept the Llama 3.1 Community License",
-                      families["Llama 3.1"]["gate_note"])
-        self.assertFalse(families["Qwen3"]["gated"])
+    def test_an_entry_nobody_re_read_says_so(self) -> None:
+        identities = workloads.models(ROOT)
+        self.assertIsNone(identities["deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"].get("verified"))
+        self.assertIsNotNone(identities["Qwen/Qwen3-4B"].get("verified"))
 
-    def test_an_excluded_model_keeps_its_reason_on_the_record(self) -> None:
-        excluded = {entry["id"]: entry for entry in workloads.load(ROOT)["excluded"]}
-        self.assertIn("google/gemma-3-4b-it", excluded)
-        self.assertIn("multimodal", excluded["google/gemma-3-4b-it"]["reason"])
+    def test_a_gated_model_is_marked_and_explained(self) -> None:
+        identities = workloads.models(ROOT)
+        meta = identities["meta-llama/Llama-3.1-8B-Instruct"]
+        self.assertTrue(meta["gated"])
+        self.assertIn("accept the Llama 3.1 Community License", meta["gate_note"])
+        self.assertFalse(identities["Qwen/Qwen3-4B"]["gated"])
 
 
-class TierTests(unittest.TestCase):
-    def test_a_machine_belongs_to_the_largest_tier_it_meets(self) -> None:
-        for gigabytes, expected in ((7.5, None), (8, 8), (12, 8), (16, 16), (31, 16), (64, 64),
-                                    (128, 64)):
-            self.assertEqual(workloads.tier_for(gigabytes, workloads.CPU_RAM_TIERS_GB), expected,
-                             gigabytes)
+class HonestyTests(unittest.TestCase):
+    """What the catalog refuses to claim."""
 
-    def test_rounding_up_would_be_flattery(self) -> None:
-        self.assertEqual(workloads.tier_for(15.9, workloads.CPU_RAM_TIERS_GB), 8)
+    def test_no_recipe_claims_a_completion_requirement(self) -> None:
+        """Nothing has completed a profile on measured hardware, so nothing
+        knows what completing costs."""
+        for recipe in workloads.load(ROOT)["recipes"]:
+            self.assertIsNone(recipe.get("completion_requirement_gb"),
+                              f"{recipe['model']} {recipe['quantisation']}")
 
-    def test_unknown_memory_produces_no_tier(self) -> None:
-        self.assertIsNone(workloads.tier_for(None, workloads.CPU_RAM_TIERS_GB))
+    def test_the_oom_figure_is_labelled_a_failure_not_a_requirement(self) -> None:
+        recipe = next(r for r in workloads.load(ROOT)["recipes"]
+                      if r["model"] == "Qwen/Qwen3-4B" and r["quantisation"] == "Q4_K_M")
+        self.assertEqual(recipe["observed_before_failure_gb"], 6.99)
+        self.assertIn("lower bound on a failure", recipe["observation_note"])
+        self.assertIsNone(recipe["completion_requirement_gb"])
 
-    def test_unknown_is_a_real_answer_and_not_a_failure(self) -> None:
-        self.assertEqual(workloads.fits(8, None), "unknown")
-        self.assertEqual(workloads.fits(None, 64), "unknown")
-        self.assertEqual(workloads.fits(8, 8), "fits")
-        self.assertEqual(workloads.fits(16, 8), "too-large")
+    def test_the_growth_hint_states_that_it_is_one_observation(self) -> None:
+        hint = workloads.load(ROOT)["estimate_basis"]["growth_hint"]
+        self.assertIn("ONE observation", hint["source"])
+        self.assertIn("no second data point", hint["uncertainty"])
+        self.assertEqual(hint["applies_to"], "llama.cpp")
 
-    def test_marginal_is_the_answer_this_project_learned_the_hard_way(self) -> None:
-        """Loads and serves, and may not finish. Reporting it as "fits"
-        promises what did not happen; "too large" denies what plainly did."""
-        self.assertEqual(workloads.fits(8.2, 7.49, 4.3), "marginal")
-        self.assertEqual(workloads.fits(8.2, 7.49, 9.0), "too-large")
-        self.assertEqual(workloads.fits(8.2, 9.0, 4.3), "fits")
-
-
-class DescribeTests(unittest.TestCase):
-    def options(self, document, model_id, label):
+    def test_the_hint_is_not_offered_for_an_engine_it_does_not_describe(self) -> None:
+        """vLLM pre-allocates its KV cache; the llama.cpp ratio is the wrong
+        shape and is not quietly reused."""
+        document = workloads.describe(ROOT, serving_available_gb=64.0)
         for family in document["families"]:
-            for variant in family["variants"]:
-                if variant["id"] != model_id:
-                    continue
-                for option in variant["quantisations"]:
-                    if option["quantisation"] == label:
-                        return option
-        raise AssertionError(f"{model_id} {label} not in the catalog")
+            for model in family["models"]:
+                for option in model["options"]:
+                    if option["runtime"] == "vllm":
+                        self.assertFalse(option["growth_hint_applies"], option["quantisation"])
 
-    def test_a_small_machine_is_told_what_fits_and_what_does_not(self) -> None:
-        document = workloads.describe(ROOT, serving_ram_gb=8.0)
-        self.assertEqual(document["hardware"]["tier_gb"], 8)
-        self.assertEqual(document["hardware"]["available_gb"], 8.0)
-        self.assertEqual(self.options(document, "Qwen/Qwen3-4B", "Q4_K_M")["fit"], "marginal")
-        self.assertEqual(self.options(document, "microsoft/phi-4", "Q4_K_M")["fit"], "too-large")
 
-    def test_a_larger_machine_may_still_run_a_smaller_workload(self) -> None:
-        """Tiers are recommendations, not restrictions."""
-        document = workloads.describe(ROOT, serving_ram_gb=64.0)
-        for label in ("Q4_K_M", "Q8_0", "F16"):
-            self.assertEqual(self.options(document, "Qwen/Qwen3-4B", label)["fit"], "fits", label)
+class AssessTests(unittest.TestCase):
+    """Two questions with separate answers: will it load, will it finish."""
 
-    def test_hardware_nobody_established_produces_unknown_not_no(self) -> None:
-        document = workloads.describe(ROOT)
-        self.assertFalse(document["hardware"]["known"])
-        self.assertEqual(self.options(document, "Qwen/Qwen3-4B", "Q4_K_M")["fit"], "unknown")
+    def test_a_known_load_on_a_big_machine_still_cannot_promise_completion(self) -> None:
+        answer = workloads.assess(load_memory_gb=4.3, completion_requirement_gb=None,
+                                  available_gb=64.0)
+        self.assertEqual(answer["loads"], "fits")
+        self.assertEqual(answer["completes"], "unknown")
+        self.assertEqual(answer["verdict"], "marginal")
 
-    def test_this_laptop_is_told_the_truth_about_the_workload_that_killed_it(self) -> None:
-        """The whole of requirement 6, in one case with real evidence behind it.
+    def test_too_small_to_load_is_a_flat_no(self) -> None:
+        answer = workloads.assess(load_memory_gb=11.0, completion_requirement_gb=None,
+                                  available_gb=8.0)
+        self.assertEqual(answer["verdict"], "too-large")
 
-        7.49 GB of serving memory, a workload that loads into 4.3 GB and had
-        grown to 6.99 GB when the kernel killed it 34 requests into a profile.
-        Not "fits" -- that is the promise that failed. Not "too large" --
-        it demonstrably loaded and served. Marginal, with the runner's own
-        1.2 GB counted because the runner shared the machine.
-        """
-        document = workloads.describe(ROOT, serving_ram_gb=7.49)
-        self.assertTrue(document["hardware"]["runner_shares_host"])
-        option = self.options(document, "Qwen/Qwen3-4B", "Q4_K_M")
-        self.assertEqual(option["fit"], "marginal")
-        self.assertEqual(option["load_memory_gb"], 4.3)
-        self.assertEqual(option["sustained_memory_gb"], 7.0)
-        self.assertEqual(option["requires_gb"], 8.2, "sustained plus the runner beside it")
-        self.assertTrue(option["memory_measured"])
-        self.assertEqual(option["benchmark"], "not-qualified")
-        self.assertIn("killed by the kernel", option["benchmark_note"])
+    def test_a_measured_completion_requirement_would_allow_a_yes(self) -> None:
+        """None exists yet; the path is tested so it works when one does."""
+        answer = workloads.assess(load_memory_gb=4.3, completion_requirement_gb=9.0,
+                                  available_gb=16.0)
+        self.assertEqual(answer["verdict"], "fits")
+        self.assertEqual(answer["completes"], "fits")
 
-    def test_a_bridged_run_is_not_charged_for_the_runner(self) -> None:
-        """The runner is on another machine, so charging the serving host for
-        it would be inventing a constraint."""
-        same = workloads.describe(ROOT, serving_ram_gb=7.49)
-        bridged = workloads.describe(ROOT, serving_ram_gb=7.49, bridged=True)
-        self.assertFalse(bridged["hardware"]["runner_shares_host"])
-        self.assertEqual(self.options(same, "Qwen/Qwen3-4B", "Q4_K_M")["requires_gb"], 8.2)
-        self.assertEqual(self.options(bridged, "Qwen/Qwen3-4B", "Q4_K_M")["requires_gb"], 7.0)
+    def test_unknown_memory_produces_unknown_and_not_a_refusal(self) -> None:
+        answer = workloads.assess(load_memory_gb=4.3, completion_requirement_gb=None,
+                                  available_gb=None)
+        self.assertEqual(answer["verdict"], "unknown")
+        self.assertEqual(answer["loads"], "unknown")
 
-    def test_gpu_placement_reads_vram_rather_than_system_memory(self) -> None:
-        """Serving hardware is not runner hardware, and VRAM is not RAM."""
-        document = workloads.describe(ROOT, serving_ram_gb=64.0, serving_vram_gb=4.0,
+    def test_a_recipe_with_no_measured_load_falls_back_to_the_weight_file(self) -> None:
+        answer = workloads.assess(load_memory_gb=None, completion_requirement_gb=None,
+                                  available_gb=8.0, weights_gb=9.1)
+        self.assertEqual(answer["verdict"], "too-large", "the weights alone do not fit")
+
+
+class HardwareTests(unittest.TestCase):
+    """An environment is not a computer, and an allocation is not free memory."""
+
+    def test_allocation_and_available_are_reported_separately(self) -> None:
+        document = workloads.describe(ROOT, serving_available_gb=6.4,
+                                      serving_allocation_gb=7.49, physical_ram_gb=15.46)
+        hardware = document["hardware"]
+        self.assertEqual(hardware["serving_available_gb"], 6.4)
+        self.assertEqual(hardware["serving_allocation_gb"], 7.49)
+        self.assertEqual(hardware["physical_ram_gb"], 15.46)
+        self.assertEqual(hardware["decides_on_gb"], 6.4, "what is free decides, not the ceiling")
+
+    def test_a_bridged_run_says_both_environments_share_one_computer(self) -> None:
+        """The runner's memory does not stop mattering because it is on the
+        other side of a bridge: it is the same physical RAM."""
+        document = workloads.describe(ROOT, serving_available_gb=20.0, bridged=True,
+                                      physical_ram_gb=32.0)
+        note = document["hardware"]["shared_host_note"]
+        self.assertIn("same physical computer", note)
+        self.assertIn("not available to the server", note)
+
+    def test_a_same_host_run_says_so_too(self) -> None:
+        document = workloads.describe(ROOT, serving_available_gb=7.0)
+        self.assertIn("both serves the model and runs the benchmark",
+                      document["hardware"]["shared_host_note"])
+
+    def test_gpu_placement_decides_on_vram(self) -> None:
+        document = workloads.describe(ROOT, serving_available_gb=64.0, serving_vram_gb=8.0,
                                       placement="gpu-only")
         self.assertEqual(document["hardware"]["device"], "gpu")
-        self.assertEqual(document["hardware"]["tier_gb"], 4)
-        # 4 GB of VRAM cannot even load a workload that needs 4.3 GB to start,
-        # so this is a flat no rather than a marginal yes.
-        self.assertEqual(self.options(document, "Qwen/Qwen3-4B", "Q4_K_M")["fit"], "too-large")
-        self.assertEqual(self.options(document, "Qwen/Qwen3-4B", "F16")["fit"], "too-large")
-        self.assertTrue(self.options(document, "Qwen/Qwen3-4B", "F16")["offload_required"])
+        self.assertEqual(document["hardware"]["decides_on_gb"], 8.0)
 
-    def test_a_cpu_only_run_never_reports_offload(self) -> None:
-        document = workloads.describe(ROOT, serving_ram_gb=8.0)
-        self.assertFalse(self.options(document, "microsoft/phi-4", "Q4_K_M")["offload_required"])
+    def test_hardware_nobody_established_is_unknown_not_a_refusal(self) -> None:
+        document = workloads.describe(ROOT)
+        self.assertFalse(document["hardware"]["known"])
+        for family in document["families"]:
+            for model in family["models"]:
+                for option in model["options"]:
+                    self.assertEqual(option["verdict"], "unknown")
 
-    def test_a_prepared_workload_is_distinguished_from_one_you_must_serve(self) -> None:
-        document = workloads.describe(ROOT, serving_ram_gb=16.0)
-        prepared = self.options(document, "Qwen/Qwen3-4B", "Q4_K_M")
+
+class ShapeTests(unittest.TestCase):
+    def test_recipes_group_by_family_and_then_by_model(self) -> None:
+        document = workloads.describe(ROOT, serving_available_gb=16.0)
+        families = {family["family"]: family for family in document["families"]}
+        self.assertIn("Qwen3", families)
+        qwen = {model["id"]: model for model in families["Qwen3"]["models"]}
+        self.assertEqual(sorted(qwen), ["Qwen/Qwen3-4B", "Qwen/Qwen3-8B"])
+        labels = [option["quantisation"] for option in qwen["Qwen/Qwen3-4B"]["options"]]
+        self.assertEqual(labels, ["Q4_K_M", "Q8_0", "F16"])
+
+    def test_a_prepared_recipe_is_distinguished_from_one_you_must_serve(self) -> None:
+        document = workloads.describe(ROOT, serving_available_gb=16.0)
+        qwen = next(model for family in document["families"] for model in family["models"]
+                    if model["id"] == "Qwen/Qwen3-4B")
+        prepared = next(o for o in qwen["options"] if o["quantisation"] == "Q4_K_M")
         self.assertTrue(prepared["prepared"])
-        self.assertEqual(prepared["recipe"], "qwen3-4b-cpu-v2")
-        self.assertFalse(self.options(document, "microsoft/phi-4", "Q4_K_M")["prepared"])
+        self.assertEqual(prepared["managed_recipe"], "qwen3-4b-cpu-v2")
 
-    def test_the_answer_can_actually_be_sent_to_a_browser(self) -> None:
-        """YAML turns an unquoted date into a date object, which no JSON
-        encoder will take. The endpoint returned 400 until this was pinned."""
-        import json
-
-        document = workloads.describe(ROOT, serving_ram_gb=16.0)
-        json.dumps(document)
-        verified = {f["family"]: f["source_verified"] for f in document["families"]}
-        self.assertEqual(verified["Qwen3"], "2026-11-06")
-        self.assertIsNone(verified["DeepSeek"])
+    def test_the_answer_can_be_sent_to_a_browser(self) -> None:
+        json.dumps(workloads.describe(ROOT, serving_available_gb=16.0))
 
     def test_the_answer_carries_its_own_caveats(self) -> None:
-        """Every surface repeats these rather than inventing its own wording."""
-        qualifications = " ".join(workloads.describe(ROOT)["qualifications"])
-        self.assertIn("not a benchmark result", qualifications)
-        self.assertIn("can still fail to finish one", qualifications)
-        self.assertIn("different computer", qualifications)
-        self.assertIn("recommendation", qualifications)
+        text = " ".join(workloads.describe(ROOT)["qualifications"])
+        self.assertIn("Loading is not completing", text)
+        self.assertIn("lower bound on a failure", text)
+        self.assertIn("one observation", text)
+        self.assertIn("allocation is not the memory currently free", text)
 
     def test_nothing_here_ranks_anything(self) -> None:
-        """A bigger or faster model is not a better one, and this says nothing
-        about the quality of what any of them produces."""
-        document = workloads.describe(ROOT, serving_ram_gb=64.0)
-        text = str(document).lower()
-        for word in ("best", "better", "recommended_model", "score", "rank"):
+        document = workloads.describe(ROOT, serving_available_gb=64.0)
+        text = json.dumps(document).lower()
+        for word in ("best", "better", "score", "rank"):
             self.assertNotIn(word, text, word)
+
+    def test_an_excluded_model_keeps_its_reason_on_the_record(self) -> None:
+        excluded = {entry["id"]: entry for entry in workloads.describe(ROOT)["excluded"]}
+        self.assertIn("multimodal", excluded["google/gemma-3-4b-it"]["reason"])
 
 
 if __name__ == "__main__":

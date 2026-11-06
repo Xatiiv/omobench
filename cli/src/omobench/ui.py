@@ -913,13 +913,15 @@ class Controller:
         Hardware first, because that is the question OmoBench answers: a model
         here is the load you put on a machine, and the useful thing to know is
         which loads this machine can take. Nothing in the answer ranks
-        anything, and "expected to fit" never becomes "benchmarked".
+        anything, and no verdict is invented from a figure nobody measured.
 
-        The memory it reads is the *serving* side. On a bridged run that is a
-        different computer, so it comes from what the companion read on that
-        machine, and from nothing this panel can see of it. Where no probe has
-        run, the sizes are unknown -- which is reported as unknown, not as a
-        model that will not fit.
+        Three memory values, kept apart because they are three different
+        things. What is free in the serving environment right now, which is
+        what decides. That environment's ceiling, which on WSL is an
+        allocation and not free memory. And the physical computer's own total,
+        which on a bridged run both environments are drawing on at once --
+        a Windows server and a WSL runner are two environments on one machine,
+        and the runner's footprint is not somebody else's problem.
         """
         from . import workloads
 
@@ -929,34 +931,43 @@ class Controller:
         bridged = bool(values.get("windows_bridge", False))
         placement = text_field(values, "placement", optional=True) or "cpu-only"
 
-        ram_gb: float | None = None
+        physical_ram_gb: float | None = None
+        available_gb: float | None = None
+        allocation_gb: float | None = None
         vram_gb: float | None = None
         source = "not established"
+
+        probe = self.last_serving_probe if bridged else None
         if bridged:
-            probe = self.last_serving_probe
             if probe:
-                ram_gb = probe.get("ram_gb")
+                # The companion read this on the serving machine itself. It
+                # reports what is installed, not what is free.
+                allocation_gb = probe.get("ram_gb")
+                physical_ram_gb = probe.get("ram_gb")
                 memories = [device.get("memory_gb") for device in probe.get("accelerators") or []
                             if isinstance(device.get("memory_gb"), (int, float))]
                 vram_gb = max(memories) if memories else None
-                source = "read on the serving machine by the companion"
+                source = ("read on the serving machine by the companion; installed memory, not "
+                          "free memory")
             else:
                 source = ("the serving machine has not been read; nothing this panel can see of "
                           "a Windows host is evidence about it")
         else:
             reading = cli.memory_pressure()
             if reading:
-                ram_gb = reading["total_gb"]
-                source = f"this machine ({reading['total_means']}), which also serves the model"
+                available_gb = reading["available_gb"]
+                allocation_gb = reading["total_gb"]
+                source = (f"read in this environment: {reading['available_gb']} GB free of the "
+                          f"{reading['total_gb']} GB {reading['total_means']}")
             memories = [device.get("memory_gb") for device in cli.detect_gpus()
                         if isinstance(device.get("memory_gb"), (int, float))]
             vram_gb = max(memories) if memories else None
 
-        answer = workloads.describe(self.root, serving_ram_gb=ram_gb,
-                                    serving_vram_gb=vram_gb, placement=placement,
-                                    bridged=bridged)
+        answer = workloads.describe(
+            self.root, serving_available_gb=available_gb, serving_allocation_gb=allocation_gb,
+            serving_vram_gb=vram_gb, physical_ram_gb=physical_ram_gb,
+            placement=placement, bridged=bridged)
         answer["hardware"]["source"] = source
-        answer["hardware"]["bridged"] = bridged
         return answer
 
     def workflow_state(self, data: dict | None = None) -> dict:
