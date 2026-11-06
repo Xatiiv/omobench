@@ -153,13 +153,31 @@ environment it ran in had 0.26 GB of memory available with its swap entirely
 full.
 
 What that environment was is the point. The benchmark ran inside a WSL
-distribution with a 7.49 GB allocation on a computer with 15.46 GB installed,
-and that one allocation was holding the model server, the benchmark runner,
-a second panel, a website build and a site server at the same time. Measured
-since, on the same machine with nothing else running, the managed server by
-itself is resident at **4.30 GB and leaves 4.51 GB available with swap
-untouched**. The shortfall was what the environment was asked to hold, not
-what the model costs.
+distribution with a 7.49 GB allocation on a computer with 15.46 GB installed.
+Measured on the same machine with nothing else running, the managed server
+freshly started is resident at **4.30 GB, leaving 4.51 GB available with swap
+untouched** — which looks like ample room for a 2.5 GB model.
+
+It is not, and a later attempt proved why. **The server's resident set grows
+with the requests it serves.** Over a 50-minute run of the same profile it
+went from 4.30 GB to **6.99 GB**, consumed the distribution's 2 GB of swap on
+the way, dragged generation from about 8 tokens a second down to 0.83, and
+was then killed outright by the kernel:
+
+```
+Out of memory: Killed process 197464 (llama-server)
+  total-vm:12792992kB, anon-rss:6990392kB
+```
+
+Thirty consecutive requests had taken 48 to 73 seconds each before that. The
+four that followed took 308 to 335 seconds, and then the server stopped
+answering.
+
+So "4.30 GB resident" is a figure about a server that has just started, and
+nothing should be sized from it. What a long run needs is headroom for a
+footprint that keeps growing — on this hardware, more than a 7.49 GB
+allocation has to give once the runner, its tokenizer and the machine's own
+services are in it too.
 
 So a host like that does not need a profile with weaker criteria; the numbers
 it produced are not describing the inference stack. This is why the panel
