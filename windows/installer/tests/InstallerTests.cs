@@ -242,6 +242,7 @@ namespace OmoBench.Installer.Tests
                 SupportDetectionTests();
                 ManagedEnvironmentCommandTests();
                 ManagedEnvironmentStageTests();
+                ManagedUpgradeTests();
                 LinuxOwnershipTests();
                 ReviewRegressionTests();
                 RuntimePayloadTests();
@@ -811,6 +812,198 @@ namespace OmoBench.Installer.Tests
                 ManagedEnvironment.WslRunner = savedRunner;
                 ManagedEnvironment.Validator = savedValidator;
                 ManagedEnvironment.SourceRootOverride = savedSourceRoot;
+                try { Directory.Delete(sandbox, true); } catch (Exception) { }
+            }
+        }
+
+        // -- upgrading a managed installation ---------------------------------
+
+        private static void ManagedUpgradeTests()
+        {
+            Section("Upgrading a managed installation");
+
+            Func<string, int, DiscoveryCancel, ProcessResult> savedRunner = ManagedEnvironment.WslRunner;
+            Func<Configuration, EnvironmentCheckResult> savedValidator = ManagedEnvironment.Validator;
+            string savedSourceRoot = ManagedEnvironment.SourceRootOverride;
+            string savedEnvironmentRoot = ManagedEnvironment.EnvironmentRootOverride;
+            string savedConfigPath = Configuration.FilePathOverride;
+
+            string sandbox = Path.Combine(Path.GetTempPath(),
+                "omobench-upgrade-test-" + Guid.NewGuid().ToString("N"));
+            ManagedEnvironment.SourceRootOverride = Path.Combine(sandbox, "source");
+            ManagedEnvironment.EnvironmentRootOverride = "/tmp/omobench-upgrade-fixture";
+            Configuration.FilePathOverride = Path.Combine(sandbox, "companion.config");
+
+            string oldRevision = "1111111111111111111111111111111111111111";
+            string newRevision = "2222222222222222222222222222222222222222";
+            BuildInfo build = new BuildInfo
+            {
+                Version = "0.1.1",
+                Revision = newRevision,
+                BuiltAt = "2026-11-10T00:00:00Z",
+            };
+            string oldSource = ManagedEnvironment.SourceDirectory(oldRevision);
+            string newSource = ManagedEnvironment.SourceDirectory(newRevision);
+
+            try
+            {
+                // -- telling a managed source from somebody's own ---------------
+                Directory.CreateDirectory(oldSource);
+                Check("a source under the managed root is managed",
+                    ManagedEnvironment.IsManagedSource(oldSource));
+                Check("a checkout anywhere else is not",
+                    !ManagedEnvironment.IsManagedSource(Path.Combine(sandbox, "my-own-checkout")));
+                Check("and neither is a subdirectory of a managed one, which is not a source",
+                    !ManagedEnvironment.IsManagedSource(Path.Combine(oldSource, "cli")));
+                Check("nothing is managed when nothing is named",
+                    !ManagedEnvironment.IsManagedSource(null)
+                    && !ManagedEnvironment.IsManagedSource("   "));
+
+                // -- which revision a managed source holds ----------------------
+                Check("the directory name answers when no marker was written",
+                    ManagedEnvironment.RevisionOf(oldSource) == oldRevision);
+                File.WriteAllText(Path.Combine(oldSource, ManagedEnvironment.RevisionMarkerName),
+                    newRevision + "\n");
+                Check("a marker is preferred over the directory name",
+                    ManagedEnvironment.RevisionOf(oldSource) == newRevision);
+                File.WriteAllText(Path.Combine(oldSource, ManagedEnvironment.RevisionMarkerName),
+                    "main\n");
+                Check("a marker that is not a revision falls back to the name",
+                    ManagedEnvironment.RevisionOf(oldSource) == oldRevision);
+                Check("a checkout of somebody's own has no revision to report here",
+                    ManagedEnvironment.RevisionOf(Path.Combine(sandbox, "my-own-checkout")) == null);
+                File.Delete(Path.Combine(oldSource, ManagedEnvironment.RevisionMarkerName));
+
+                // -- the upgrade builds beside, never into ----------------------
+                FakeWsl good = new FakeWsl { UnpackInto = newSource };
+                ManagedEnvironment.WslRunner = good.Run;
+                ManagedEnvironment.Validator = configuration => new EnvironmentCheckResult
+                {
+                    Ok = true,
+                    Summary = "Ready: OmoBench imports from the selected checkout.",
+                };
+                PreparationResult upgraded = ManagedEnvironment.Upgrade("Ubuntu", build, null, null);
+                Check("an upgrade reports ready", upgraded.Ok);
+                Check("it says it is ready to switch to, not that it switched",
+                    (upgraded.Summary ?? "").Contains("ready to switch"));
+                Check("the new environment is its own, named by revision",
+                    upgraded.Configuration != null
+                    && upgraded.Configuration.PythonWslPath.Contains("/env/" + newRevision));
+                Check("so the environment in use was not written into",
+                    !upgraded.Configuration.PythonWslPath.EndsWith("managed-env/bin/python"));
+                Check("the previous source is still there, untouched",
+                    Directory.Exists(oldSource));
+                Check("the new source records which revision it holds",
+                    File.Exists(Path.Combine(newSource, ManagedEnvironment.RevisionMarkerName))
+                    && File.ReadAllText(Path.Combine(newSource,
+                        ManagedEnvironment.RevisionMarkerName)).Trim() == newRevision);
+                Check("and that is the revision the panel will report",
+                    ManagedEnvironment.RevisionOf(newSource) == newRevision);
+
+                // -- a first preparation is unchanged by any of this ------------
+                string freshSource = ManagedEnvironment.SourceDirectory(oldRevision + "0");
+                ManagedEnvironment.WslRunner = new FakeWsl { UnpackInto = freshSource }.Run;
+                PreparationResult fresh = ManagedEnvironment.Prepare("Ubuntu",
+                    new BuildInfo { Version = "0.1.1", Revision = oldRevision + "0" }, null, null);
+                Check("a first preparation still uses the single managed environment",
+                    fresh.Ok && fresh.Configuration.PythonWslPath.EndsWith("managed-env/bin/python"));
+
+                // -- failure switches nothing -----------------------------------
+                ManagedEnvironment.Validator = configuration => new EnvironmentCheckResult
+                {
+                    Ok = false,
+                    Summary = "OmoBench imports from somewhere else.",
+                };
+                ManagedEnvironment.WslRunner = new FakeWsl { UnpackInto = newSource }.Run;
+                PreparationResult failed = ManagedEnvironment.Upgrade("Ubuntu", build, null, null);
+                Check("an upgrade whose check fails is not ready", !failed.Ok);
+                Check("and offers no configuration to switch to", failed.Configuration == null);
+                Check("the previous source survives a failed upgrade", Directory.Exists(oldSource));
+
+                // -- cancellation switches nothing ------------------------------
+                DiscoveryCancel cancel = new DiscoveryCancel();
+                FakeWsl stopping = new FakeWsl { Cancelled = true, Cancel = cancel, UnpackInto = newSource };
+                ManagedEnvironment.WslRunner = stopping.Run;
+                PreparationResult cancelled = ManagedEnvironment.Upgrade("Ubuntu", build, cancel, null);
+                Check("a cancelled upgrade is cancelled and not ready",
+                    cancelled.Cancelled && !cancelled.Ok);
+                Check("and offers no configuration", cancelled.Configuration == null);
+                Check("the previous source survives a cancelled upgrade", Directory.Exists(oldSource));
+
+                // -- rollback ---------------------------------------------------
+                Configuration before = new Configuration
+                {
+                    Distribution = "Ubuntu",
+                    CheckoutWindowsPath = oldSource,
+                    PythonWslPath = "/home/sam/.local/share/omobench/managed-env/bin/python",
+                    Port = 8771,
+                };
+                before.Save();
+                Check("with nothing recorded yet there is nothing to go back to",
+                    Configuration.LoadPrevious() == null);
+                Check("the configuration in use is recorded before it is replaced",
+                    Configuration.SavePrevious());
+                Configuration after = new Configuration
+                {
+                    Distribution = "Ubuntu",
+                    CheckoutWindowsPath = newSource,
+                    PythonWslPath = "/home/sam/.local/share/omobench/env/" + newRevision + "/bin/python",
+                    Port = 8771,
+                };
+                after.Save();
+                Configuration recorded = Configuration.LoadPrevious();
+                Check("the recorded one is the pair that was working",
+                    recorded != null && recorded.CheckoutWindowsPath == oldSource);
+                Check("the port somebody chose travels with it", recorded.Port == 8771);
+                Check("rolling back succeeds", Configuration.Rollback());
+                Check("and the panel is pointed back at the previous source",
+                    Configuration.Load().CheckoutWindowsPath == oldSource);
+                Check("rolling back is itself reversible",
+                    Configuration.LoadPrevious() != null
+                    && Configuration.LoadPrevious().CheckoutWindowsPath == newSource);
+                Check("neither source was removed by any of it",
+                    Directory.Exists(oldSource) && Directory.Exists(newSource));
+
+                // -- importing previous runs ------------------------------------
+                string oldRuns = ManagedEnvironment.RunsDirectory(oldSource);
+                string newRuns = ManagedEnvironment.RunsDirectory(newSource);
+                Directory.CreateDirectory(Path.Combine(oldRuns, "ui", "job-aaaa"));
+                File.WriteAllText(Path.Combine(oldRuns, "ui", "job-aaaa", "result.json"), "{}");
+                Directory.CreateDirectory(Path.Combine(oldRuns, "keep-me"));
+                File.WriteAllText(Path.Combine(oldRuns, "keep-me", "evidence.txt"), "original");
+
+                ManagedEnvironment.RunImport survey = ManagedEnvironment.SurveyRuns(oldSource, newSource);
+                Check("a survey counts what would come across without copying it",
+                    survey.Ok && survey.Copied == 2 && !Directory.Exists(newRuns));
+
+                ManagedEnvironment.RunImport copied = ManagedEnvironment.CopyRuns(oldSource, newSource, false);
+                Check("an import copies the previous runs", copied.Ok && copied.Copied == 2);
+                Check("and they are readable in the new source",
+                    File.ReadAllText(Path.Combine(newRuns, "ui", "job-aaaa", "result.json")) == "{}");
+                Check("the originals are still where they were",
+                    File.Exists(Path.Combine(oldRuns, "ui", "job-aaaa", "result.json")));
+
+                // A collision is left alone and named. Evidence is never
+                // overwritten, not even by evidence of the same name.
+                File.WriteAllText(Path.Combine(newRuns, "keep-me", "evidence.txt"), "already here");
+                ManagedEnvironment.RunImport again = ManagedEnvironment.CopyRuns(oldSource, newSource, false);
+                Check("a second import copies nothing new", again.Ok && again.Copied == 0);
+                Check("it names what it skipped",
+                    again.Skipped.Contains("keep-me") && again.Skipped.Contains("ui"));
+                Check("and the file already there is exactly as it was",
+                    File.ReadAllText(Path.Combine(newRuns, "keep-me", "evidence.txt")) == "already here");
+
+                Check("nothing to bring across is not a failure",
+                    ManagedEnvironment.CopyRuns(
+                        Path.Combine(sandbox, "no-such-source"), newSource, false).Ok);
+            }
+            finally
+            {
+                ManagedEnvironment.WslRunner = savedRunner;
+                ManagedEnvironment.Validator = savedValidator;
+                ManagedEnvironment.SourceRootOverride = savedSourceRoot;
+                ManagedEnvironment.EnvironmentRootOverride = savedEnvironmentRoot;
+                Configuration.FilePathOverride = savedConfigPath;
                 try { Directory.Delete(sandbox, true); } catch (Exception) { }
             }
         }

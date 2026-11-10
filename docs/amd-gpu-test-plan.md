@@ -3,11 +3,16 @@
 Written for the person sitting at that machine. Every step says what to do,
 what a pass looks like, and what to write down if it does not pass.
 
-Nothing in this document has been run on an AMD GPU. The panel, the installer
-and the bridge have been exercised on this project's development laptop (Intel
-CPU, 4 GB of accelerator memory, WSL2 Ubuntu 24.04) and against fixtures. **The
-AMD path is untested**, which is the reason for this plan. Treat a failure here
-as new information, not as a regression.
+An AMD GPU benchmark has been run on this machine before, with an earlier
+build. What is untested is **this** build on it: the one panel, the workload
+selector, the requirement-based submission checks and the installer upgrade
+are all new since that run, and none of them has met an AMD GPU. Everything
+this project has verified of them was verified on its development laptop
+(Intel CPU, 4 GB of accelerator memory, WSL2 Ubuntu 24.04) and against
+fixtures.
+
+So treat a failure here as new information about the new code, not as a
+regression in AMD support that was already working.
 
 ## What you need
 
@@ -28,43 +33,24 @@ card reports. Those are the facts a result is worth nothing without.
 
 ## 0. Which code is actually running
 
-Worth doing first and again at the end, because the most likely way this test
-goes wrong is quietly measuring the old code.
+The panel says so itself. Open it and look at **This machine** in the sidebar:
+the **Panel source** row gives the first twelve characters of the revision and
+where that came from.
 
-The installer carries the OmoBench source inside it and unpacks it to
-`%LOCALAPPDATA%\OmoBench\source\<revision>` — **but only when it has nothing
-to reuse.** If this machine already has an OmoBench checkout and a Linux
-environment with OmoBench installed, the installer finds them and uses them,
-which is the behaviour step 2b asks you to confirm. In that case the panel
-runs *your checkout*, and installing a newer installer over the top changes
-nothing about which code serves the page.
+| It says | What that means |
+| --- | --- |
+| `79354f202b73 · installed` | A source the OmoBench installer unpacked, at that revision |
+| `79354f202b73 · checkout` | A checkout of your own, on that commit |
+| `79354f202b73 · checkout, edited since` | The same, with uncommitted changes, so what is running is not that commit exactly |
+| `Not recorded` | Neither — nothing here says which revision it is |
 
-So check all three:
+Hover it for the full path. Check this before you start and again at the end;
+the most likely way this test goes wrong is quietly measuring the old code.
 
-```powershell
-# What the installer says it is
-Get-Content "$env:LOCALAPPDATA\Programs\OmoBench\version.json"
-
-# What it unpacked, if it unpacked anything
-Get-ChildItem "$env:LOCALAPPDATA\OmoBench\source"
-```
-
-```bash
-# And, if the panel runs from a checkout of your own, what that checkout is
-git -C /path/to/your/omobench rev-parse HEAD
-git -C /path/to/your/omobench status --porcelain
-```
-
-Pass: the revision in `version.json`, the directory name under `source\`, and
-the checkout's `HEAD` (where one is in play) are the revision named at the top
-of this round of testing. If the checkout is behind, `git pull` it before going
-further — and if it has local changes, say so rather than discarding them.
-
-The page itself is the fourth check, and the quickest. This revision opens on
-**Your hardware** and **Choose a workload for this hardware**, with one
-selector. The previous one opened on a list of model cards headed *Choose your
-test* and kept a separate `/advanced` page. If you see model cards first, the
-panel is running the old code, whatever the version files say.
+The second check is the page itself. This revision opens on **Your hardware**
+and **Choose a workload for this hardware**, with one selector. The previous
+one opened on a list of model cards headed *Choose your test* and kept a
+separate `/advanced` page. Model cards first means you are on the old code.
 
 ## 1. Get the installer, and install it
 
@@ -145,40 +131,78 @@ Pass: the installer finishes by saying OmoBench is ready, and offers to open
 it. If it says it is ready before the environment check has passed, that is a
 bug — record the exact screen.
 
-## 2. The two source paths, and the upgrade
+## 2. Upgrading, and what the installer will not touch
 
-This is the part most worth testing, because it is where a second machine
-differs from the one the code was written on.
+Run `OmoBenchSetup.exe`. What it offers depends on what is already here, and
+the three cases are genuinely different.
 
-**2a. Nothing to reuse.** On a machine with no OmoBench checkout and no Linux
-environment containing it, the installer should offer **Prepare it for me**,
-unpack its carried source into
-`%LOCALAPPDATA%\OmoBench\source\<revision>`, create
-`~/.local/share/omobench/managed-env` inside Linux, install OmoBench and the
-pinned runner into it, and check the result before reporting success.
+### A source the installer created
 
-Pass: each stage is shown as it happens; the final check passes; nothing
-outside those two locations was written.
+You will see **An OmoBench installation is already here**, naming the revision
+it is running and the one this installer carries, with **Upgrade to
+&lt;revision&gt;** and **Keep current**.
 
-Also test **Stop** partway through preparation. Pass: it stops, says so, and
-leaves the rest untouched.
+Press **Upgrade**. It unpacks the new source beside the current one and builds
+it a Python environment of its own, then checks that environment. Only if the
+check passes does anything switch over.
 
-**2b. Something to reuse.** If you do have a checkout and an environment with
-OmoBench installed, the installer should find them, check them, and use them,
-downloading nothing and changing nothing of yours.
+Pass:
 
-Pass: it reports what it found, by path, and the paths are the ones you expect.
-Fail, and record it, if it rewrites, upgrades or repoints anything you
-maintain.
+- the stages run and the last one, *Check the finished environment*, passes;
+- the finish screen says **OmoBench is ready at revision &lt;revision&gt;**;
+- the panel's **Panel source** row now shows that revision, marked `installed`;
+- the previous source directory under `%LOCALAPPDATA%\OmoBench\source\` is
+  still there, and so is the Python environment it used.
 
-**2c. Upgrade.** Install a build, then build and install a newer one over it.
+Nothing asks you to clone anything, create a virtual environment or edit
+`companion.config`. If it does, that is a defect — say so.
 
-Pass: the second install reports the new version and new source revision; the
-Apps & features entry shows the new version; `omobench://` links still open the
-installed program; the previous managed source directory is either reused or
-replaced under `%LOCALAPPDATA%\OmoBench\source\<revision>` and nothing you
-maintain is touched. Record which of "reused" or "replaced" actually happens —
-that is a fact about the build, not a prediction.
+**Stopping it.** Press **Stop** partway through. Pass: it says nothing was
+switched over, and the panel still runs the revision it ran before. Press
+**Upgrade** again to continue; what pip already downloaded is reused.
+
+**When it fails.** If the new environment cannot be built — pull your network
+cable out during the install step, if you want to force it — pass is: the
+screen says the new revision is not ready and nothing was switched, and the
+panel still works exactly as it did.
+
+**Going back.** The settings in use before the upgrade are copied to
+`%APPDATA%\OmoBench\companion.config.previous` before anything changes. To
+return to the previous revision, re-select that checkout and interpreter in the
+companion's **Setup** window — both are still on disk. Nothing is deleted by
+upgrading or by rolling back.
+
+**Your previous runs.** The panel lists runs beside the source it is running
+from, so the new source starts with none. After a successful upgrade the finish
+screen offers **Copy N previous run(s)**. It copies; the originals stay where
+they are. A run whose name already exists at the destination is skipped and
+named, never overwritten. If you would rather not copy them, they remain
+readable in the old source directory.
+
+**Your models and storage folder are not involved.** They live wherever you
+pointed the download at, outside any source directory, and are untouched. The
+panel's *remembered* storage path is per-source, so type the same folder once
+and the already-verified files are reused rather than downloaded again.
+
+### A checkout of your own
+
+You will see **OmoBench is ready**, with your checkout named, and a plain
+statement that the installer has not changed it and will not — so installing
+this build has **not** moved the panel to the new revision.
+
+Pass: it says that, your checkout is untouched (`git status` unchanged), and
+the **Panel source** row still shows your commit.
+
+To test the new revision on such a machine, either update your checkout
+yourself, or point the companion's Setup window at a source the installer
+manages. Both remain available; neither is removed.
+
+### Nothing to reuse
+
+The installer offers **Prepare it for me**, which is the first-install path:
+it unpacks its carried source, creates one Python environment, installs
+OmoBench and the pinned runner, and checks the result before reporting ready.
+Pressing **Stop** leaves the rest untouched.
 
 ## 3. The panel, before any model
 
@@ -323,10 +347,16 @@ interpret is not evidence.
 
 ## Known limits of this plan
 
-- No AMD GPU inference has been run by this project. Everything above is a
+- AMD GPU inference has been run on this machine with an earlier build. None
+  of the code this round of testing is about has been. Everything above is a
   procedure, not a report.
 - AMD accelerator detection, placement reporting and the Vulkan/ROCm runtime
-  identification have never been exercised against real hardware.
+  identification have not been exercised against real hardware by this
+  project's own checks, which run on an Intel laptop and on fixtures.
+- The installer upgrade is tested against fixtures only: 38 checks cover a
+  successful upgrade, a failing one, a cancelled one, rollback, the run
+  import's refusal to overwrite, and a developer checkout being left alone.
+  No upgrade has been performed on a real machine.
 - The managed recipes are CPU recipes. They are useful here for testing
   download, verification, cancellation and recovery, not for measuring the GPU.
 - The downloader's resume, quarantine and cancellation are tested over

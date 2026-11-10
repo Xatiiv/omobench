@@ -346,6 +346,34 @@ NOT_ESTABLISHED = [
 ]
 
 
+def _looks_like_revision(value: str) -> bool:
+    """A git object name, not a branch or a sentence somebody typed."""
+    return (isinstance(value, str) and 7 <= len(value) <= 40
+            and all(character in "0123456789abcdefABCDEF" for character in value))
+
+
+def _git_head(root) -> dict | None:
+    """The commit a checkout is on, and whether it has been edited since.
+
+    Best effort: a source tree with no git, or no git history, simply has no
+    answer here and says so rather than guessing one.
+    """
+    try:
+        head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                              capture_output=True, text=True, timeout=10)
+        if head.returncode != 0:
+            return None
+        revision = head.stdout.strip()
+        if not _looks_like_revision(revision):
+            return None
+        status = subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
+                                capture_output=True, text=True, timeout=10)
+        dirty = status.returncode == 0 and bool(status.stdout.strip())
+        return {"revision": revision, "dirty": dirty}
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 class Controller:
     def __init__(self, root: Path):
         self.root = root.resolve()
@@ -430,10 +458,50 @@ class Controller:
             return False, "Start this panel from WSL2 or Linux to execute benchmarks."
         return preflight.ok, preflight.message
 
+    # The marker a managed installation writes beside the source it unpacked.
+    # Kept in step with ManagedEnvironment.RevisionMarkerName on the Windows
+    # side; neither program imports the other, so the name is written twice
+    # and tested from here.
+    SOURCE_REVISION_MARKER = ".omobench-source-revision"
+
+    def source_revision(self) -> dict:
+        """Which source this panel is running, and how that was established.
+
+        Installing a newer companion does not change which source serves this
+        page -- a managed installation keeps running the revision it was built
+        with until an upgrade switches it, and a checkout somebody selected
+        runs whatever is in it. So the panel says which one it is, rather than
+        leaving that to be inferred from a version file describing a different
+        program.
+        """
+        marker = self.root / self.SOURCE_REVISION_MARKER
+        try:
+            if marker.is_file():
+                recorded = marker.read_text(encoding="utf-8").strip()
+                if _looks_like_revision(recorded):
+                    return {"revision": recorded, "source": "installer",
+                            "detail": "Unpacked by the OmoBench installer, which recorded the "
+                                      "revision beside the source.",
+                            "path": str(self.root)}
+        except OSError:
+            pass
+        head = _git_head(self.root)
+        if head:
+            return {"revision": head["revision"], "source": "checkout",
+                    "detail": ("A checkout of your own at this commit."
+                               + (" It has uncommitted changes, so what is running is not that "
+                                  "commit exactly." if head["dirty"] else "")),
+                    "path": str(self.root), "dirty": head["dirty"]}
+        return {"revision": None, "source": "unknown",
+                "detail": "Nothing here records which revision this source is. It is neither a "
+                          "managed installation nor a git checkout.",
+                "path": str(self.root)}
+
     def setup(self) -> dict:
         report = cli.doctor_report()
         can_execute, runner_message = self.runner_readiness()
         return {"environment": report, "profiles": cli.PROFILE_SPECS,
+                "source_revision": self.source_revision(),
                 # How each profile's phases really resolve, so a page can mark a
                 # profile whose declaration its runner does not enforce.
                 "profile_contracts": {profile_id: cli.profile_phase_contract(self.root, profile_id)

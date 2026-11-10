@@ -154,6 +154,27 @@ function profileDetail() {
       ? ` ${brief.longer_alternative} is the same workload with a longer ceiling.` : "");
 }
 
+// Which source is serving this page. Installing a newer companion does not
+// change it: a managed installation keeps running the revision it was built
+// with until an upgrade switches it over, and a checkout somebody selected
+// runs whatever is in that checkout. So the panel says so itself, instead of
+// leaving it to be inferred from a version file about a different program.
+function renderSourceRevision(answer) {
+  const dt = document.createElement("dt"), dd = document.createElement("dd");
+  dt.textContent = "Panel source";
+  if (!answer || !answer.revision) {
+    dd.textContent = "Not recorded";
+    dd.classList.add("unrecorded");
+  } else {
+    const short = answer.revision.slice(0, 12);
+    dd.textContent = answer.source === "installer"
+      ? `${short} · installed`
+      : `${short} · checkout${answer.dirty ? ", edited since" : ""}`;
+  }
+  if (answer && answer.detail) dd.title = `${answer.detail}${answer.path ? ` (${answer.path})` : ""}`;
+  $("machine").append(dt, dd);
+}
+
 async function refreshSetup() {
   setup = await api("/api/setup");
   $("runner-status").textContent = setup.runner_message;
@@ -167,6 +188,7 @@ async function refreshSetup() {
     const dt = document.createElement("dt"), dd = document.createElement("dd");
     dt.textContent = label; dd.textContent = value; $("machine").append(dt, dd);
   });
+  renderSourceRevision(setup.source_revision);
   const currentProfile = $("profile").value;
   // A profile whose declared phases its runner does not enforce is offered for
   // reproducing earlier results, labelled, and never pre-selected.
