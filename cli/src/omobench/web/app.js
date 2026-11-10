@@ -411,22 +411,40 @@ function renderWorkflow(report) {
 // The same answer the checklist gives, repeated beside the fields it is about,
 // because that is where somebody filling them in is looking. It reports the
 // server's verdict; it never computes one of its own.
+//
+// A complete declaration is one requirement met, not a submission cleared.
+// Saying "publishable" here would merge four separate things: what the
+// contributor has written down, whether a reviewer agrees with the licence,
+// whether the run met the profile's thresholds, and whether everything else
+// the registry asks for is present. Each is decided by somebody different, so
+// each is said separately.
 function renderCustomEligibility(report) {
   const notice = $("custom-eligibility");
-  const item = (report.checks || []).find((check) => check.id === "eligibility");
-  const gate = (report.checks || []).find((check) => check.id === "catalog");
+  const checks = report.checks || [];
+  const item = checks.find((check) => check.id === "eligibility");
   if (!item || $("custom-workload").hidden) { notice.hidden = true; return; }
   notice.hidden = false;
   notice.classList.toggle("error", item.state === "blocked");
-  if (item.state === "ok") {
-    notice.textContent = `${gate ? gate.detail + " " : ""}Declared, not verified here: a `
-      + "reviewer reads the licence itself.";
+  if (item.state !== "ok") {
+    notice.textContent = item.state === "unknown"
+      ? "Nothing declared yet. These four facts are what a public submission needs about the "
+        + "model; the benchmark itself needs none of them."
+      : `This declaration is incomplete. Still needed: ${item.observed}.`;
     return;
   }
-  notice.textContent = item.state === "unknown"
-    ? "Nothing declared yet. Fill these in to submit this model publicly; the benchmark "
-      + "itself needs none of them."
-    : `Still needed to publish this: ${item.observed}.`;
+  // What is left, named rather than summarised, from the server's own list.
+  const label = (id) => (checks.find((check) => check.id === id) || {}).label || id;
+  const remaining = ((report.blocking || {}).submit || [])
+    .filter((id) => id !== "eligibility").map(label);
+  notice.textContent =
+    "Model eligibility is complete: a licence, a URL where it can be read, publicly "
+    + "downloadable weights and a text-generation modality are all declared. That is this "
+    + "model's eligibility, not permission to submit this result. Nothing here is checked: "
+    + "a reviewer reads the licence itself, and the run still has to meet the profile's own "
+    + "acceptance thresholds for successful requests and error rate. "
+    + (remaining.length
+       ? `Still outstanding for submission: ${remaining.join("; ")}.`
+       : "Nothing else is outstanding for submission; the checklist below is the authority.");
 }
 
 async function refreshWorkflow() {

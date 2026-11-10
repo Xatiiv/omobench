@@ -241,4 +241,37 @@ get("custom-workload").hidden = true;
 states.curatedAgain = context.withProvenance(
   Object.fromEntries(new HarnessFormData(get("package-form"))));
 
+// The notice beside the custom-model fields. A complete declaration is one
+// requirement met; it is not a submission cleared, and the wording has to keep
+// those apart.
+{
+  const CHECKS = [
+    { id: "catalog", label: "This model may be published here" },
+    { id: "eligibility", label: "What makes this model publishable" },
+    { id: "submitter", label: "Submitter identity" },
+    { id: "acceptance", label: "Profile acceptance" },
+  ];
+  const render = (state, observed, blockingSubmit) => {
+    get("custom-workload").hidden = false;
+    context.renderCustomEligibility({
+      checks: CHECKS.map((check) => check.id === "eligibility"
+        ? { ...check, state, observed } : check),
+      blocking: { run: [], package: [], submit: blockingSubmit },
+    });
+    return { text: get("custom-eligibility").textContent, hidden: get("custom-eligibility").hidden };
+  };
+  states.notice = {
+    nothing: render("unknown", null, ["catalog", "eligibility", "submitter", "acceptance"]),
+    partial: render("blocked", "licence_url, weights_publicly_downloadable",
+                    ["catalog", "eligibility", "submitter", "acceptance"]),
+    complete: render("ok", "declared", ["submitter", "acceptance"]),
+    completeAndNothingElse: render("ok", "declared", []),
+  };
+  // Choosing a curated workload again hides the section, and the notice with
+  // it: it is about fields that are no longer on screen.
+  get("custom-workload").hidden = true;
+  context.renderCustomEligibility({ checks: CHECKS, blocking: { submit: [] } });
+  states.notice.hiddenWithTheSection = get("custom-eligibility").hidden;
+}
+
 console.log(JSON.stringify(states, null, 2));

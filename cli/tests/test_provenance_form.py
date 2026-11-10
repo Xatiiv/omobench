@@ -138,6 +138,45 @@ class ProvenanceFormTests(unittest.TestCase):
         self.assertIsNone(state.get("eligibility"))
         self.assertIsNotNone(state["proposal"])
 
+    # -- the notice beside those fields ---------------------------------------
+
+    def test_a_complete_declaration_is_not_described_as_a_cleared_submission(self) -> None:
+        """One requirement met. Four parties still have something to say: the
+        contributor who wrote it, the reviewer who reads the licence, the run
+        that has to meet its thresholds, and the rest of the checklist."""
+        text = self.states["notice"]["complete"]["text"]
+        self.assertIn("Model eligibility is complete", text)
+        self.assertIn("not permission to submit this result", text)
+        self.assertNotIn("Publishable", text)
+        # The two requirements that are easiest to lose sight of, named.
+        self.assertIn("a reviewer reads the licence itself", text)
+        self.assertIn("acceptance thresholds", text)
+
+    def test_the_notice_names_what_is_still_outstanding(self) -> None:
+        with_more = self.states["notice"]["complete"]["text"]
+        self.assertIn("Still outstanding for submission: "
+                      "Submitter identity; Profile acceptance.", with_more)
+        # Eligibility never lists itself as outstanding once it is complete.
+        self.assertNotIn("What makes this model publishable", with_more)
+
+        clear = self.states["notice"]["completeAndNothingElse"]["text"]
+        self.assertIn("Nothing else is outstanding for submission", clear)
+        self.assertIn("the checklist below is the authority", clear)
+
+    def test_an_incomplete_declaration_says_so_and_names_the_gaps(self) -> None:
+        text = self.states["notice"]["partial"]["text"]
+        self.assertIn("This declaration is incomplete", text)
+        self.assertIn("licence_url", text)
+        self.assertIn("weights_publicly_downloadable", text)
+
+    def test_nothing_declared_is_not_a_claim_that_anything_is_wrong(self) -> None:
+        text = self.states["notice"]["nothing"]["text"]
+        self.assertIn("Nothing declared yet", text)
+        self.assertIn("the benchmark itself needs none of them", text)
+
+    def test_the_notice_goes_away_with_the_section_it_describes(self) -> None:
+        self.assertTrue(self.states["notice"]["hiddenWithTheSection"])
+
     def test_an_empty_custom_panel_declares_nothing(self) -> None:
         """A blank field is not a claim that a model has no licence."""
         state = self.states["noCustomModel"]

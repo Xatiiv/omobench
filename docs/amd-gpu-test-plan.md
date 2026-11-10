@@ -26,6 +26,46 @@ Write down, before you start: the exact GPU model, the driver version, the
 Windows build, the WSL distribution and its kernel, and how much memory the
 card reports. Those are the facts a result is worth nothing without.
 
+## 0. Which code is actually running
+
+Worth doing first and again at the end, because the most likely way this test
+goes wrong is quietly measuring the old code.
+
+The installer carries the OmoBench source inside it and unpacks it to
+`%LOCALAPPDATA%\OmoBench\source\<revision>` — **but only when it has nothing
+to reuse.** If this machine already has an OmoBench checkout and a Linux
+environment with OmoBench installed, the installer finds them and uses them,
+which is the behaviour step 2b asks you to confirm. In that case the panel
+runs *your checkout*, and installing a newer installer over the top changes
+nothing about which code serves the page.
+
+So check all three:
+
+```powershell
+# What the installer says it is
+Get-Content "$env:LOCALAPPDATA\Programs\OmoBench\version.json"
+
+# What it unpacked, if it unpacked anything
+Get-ChildItem "$env:LOCALAPPDATA\OmoBench\source"
+```
+
+```bash
+# And, if the panel runs from a checkout of your own, what that checkout is
+git -C /path/to/your/omobench rev-parse HEAD
+git -C /path/to/your/omobench status --porcelain
+```
+
+Pass: the revision in `version.json`, the directory name under `source\`, and
+the checkout's `HEAD` (where one is in play) are the revision named at the top
+of this round of testing. If the checkout is behind, `git pull` it before going
+further — and if it has local changes, say so rather than discarding them.
+
+The page itself is the fourth check, and the quickest. This revision opens on
+**Your hardware** and **Choose a workload for this hardware**, with one
+selector. The previous one opened on a list of model cards headed *Choose your
+test* and kept a separate `/advanced` page. If you see model cards first, the
+panel is running the old code, whatever the version files say.
+
 ## 1. Build and install
 
 The installer carries the OmoBench source inside it, so it must be built from a
@@ -151,31 +191,69 @@ load".
 Do this before any managed download. It is the cheaper test and it is the one
 that proves the AMD path.
 
-1. Start your serving runtime on Windows with the model on the GPU, and note
-   its address and the model identifier it answers to.
-2. In the panel's **Connect & run** section, enter that address and model
-   identifier. If the panel is running inside WSL and the server is on Windows,
-   tick the Windows bridge.
+1. In **LM Studio**, load the model onto the AMD GPU and start its server.
+   Note the address it listens on (its default is `http://127.0.0.1:1234`, a
+   different port from the panel's own `8765`) and the model identifier it
+   answers to -- that identifier is usually an alias, not the model's canonical
+   name, and the panel records the two separately on purpose.
+   In LM Studio's own hardware panel, note the GPU it reports, its memory, and
+   how many layers it placed on the card. Those are the numbers to compare the
+   panel's claims against; the panel has no way to see inside LM Studio.
+2. In the panel's **Connect & run** section, enter that address and the served
+   identifier. The panel runs inside WSL and LM Studio runs on Windows, so tick
+   **Windows bridge**: without it the panel is on the wrong side of the
+   network boundary and the address may not resolve at all.
 3. Press **Test connection**. Pass: it confirms the address, this environment,
    the server, its model list and one streaming request, and says plainly that
    the test request is not benchmark evidence.
-4. Run the shortest profile available.
+4. Press **Read the serving hardware**. The companion asks Windows what is in
+   the machine, because WSL cannot see it. Pass: the vendor reads `amd`, the
+   model and memory match LM Studio's own hardware panel, and nothing is filled
+   in that the companion could not actually read.
+   Then set the placement yourself: **GPU only** if LM Studio put every layer
+   on the card, **split CPU/GPU** otherwise -- and in the split case say how it
+   was split, for example `32 of 49 layers on GPU`. The panel will not guess
+   this and should refuse a split with no detail.
+5. Fill in the canonical model ID, an immutable weights revision, the
+   quantisation, and the serving runtime: LM Studio's release is **not** the
+   llama.cpp build it embeds, and the two are recorded separately.
+6. Run the shortest profile available.
 
-Pass: the run completes, the dashboard shows real progress, and the review
-section reports the measurements with their provenance.
+Pass: the run completes, the dashboard shows real progress, and **Review &
+submit** reports each measurement with where it came from -- detected, read
+from the server, or declared by you.
 
 Record, whatever happens:
 
-- whether the serving environment's accelerator was detected, and with what
-  vendor and memory;
-- whether the placement was reported as GPU-only or split, and whether that
-  matches what your runtime actually did;
-- if you used the bridge, that its latency is inside every number and has not
-  been subtracted — the panel should say so itself.
+- the accelerator the panel detected, with its vendor and memory, beside what
+  LM Studio reported;
+- the placement the result records, and whether it matches what LM Studio
+  actually did;
+- that the bridge's latency is inside every number and has not been subtracted
+  -- the panel should say so itself, in the evidence summary and in the
+  comparison caveats;
+- whether `execution_device` reads `gpu`, and on what basis.
 
 **Finding a card is not evidence that inference used it.** If the panel claims
-GPU execution while your runtime was on CPU, that is a bug worth reporting with
-the exact screens.
+GPU execution while LM Studio was serving on CPU, that is a bug worth reporting
+with the exact screens.
+
+### Then look at what submission would need
+
+Open **Review & submit** without submitting anything. The checklist is the
+point of this step: it should name every outstanding requirement at once
+rather than one at a time. Expect the model's catalog status to be settled one
+of three ways -- catalogued, a declared eligibility, or a proposal -- and
+expect *acceptance* to stay outstanding until a run has actually met the
+profile's thresholds for successful requests and error rate.
+
+If you use a custom model, the notice beside those fields should say that a
+complete eligibility declaration is this model's eligibility and **not**
+permission to submit the result, that a reviewer reads the licence itself, and
+what is still outstanding. If it ever reads as though filling in four fields
+cleared the submission, that is the defect this round of testing was meant to
+catch.
+
 
 ## 5. A managed download, if you want one
 

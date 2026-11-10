@@ -587,7 +587,9 @@ def submit_checks(
                  f"curated list ({', '.join(catalog)}), or choose the catalogued identity you "
                  "actually ran -- never substitute a different model for the one you ran. You "
                  "can run this benchmark and export its local report either way.",
-        detail=(f"Publishable through {route}."
+        detail=(f"This model meets the publication requirements through {route}. That is "
+                "about the model; whether this result may be submitted is the rest of this "
+                "list."
                 + (" The result and the proposal are judged separately." if complete
                    and not catalogued else "")) if satisfied else
                "Serving a model establishes nothing about whether it may be published. The "

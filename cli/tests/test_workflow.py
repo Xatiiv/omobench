@@ -232,6 +232,19 @@ class GateSeparationTests(unittest.TestCase):
         self.assertIn("the eligibility this result declares",
                       find(checks, "catalog")["detail"])
 
+    def test_a_met_model_requirement_never_reads_as_a_cleared_submission(self) -> None:
+        """Four different things decided by four different parties: what the
+        contributor wrote down, whether a reviewer accepts the licence, whether
+        the run met its thresholds, and what else the registry asks for."""
+        checks = self.submit(eligibility=self.ELIGIBLE)
+        detail = find(checks, "catalog")["detail"]
+        self.assertIn("meets the publication requirements", detail)
+        self.assertIn("whether this result may be submitted is the rest of this list", detail)
+        self.assertNotIn("Publishable through", detail)
+        # And the gate being met does not empty the submit gate: acceptance is
+        # a measurement of the run, not a fact about the model.
+        self.assertIn("acceptance", ids(checks, "submit"))
+
     def test_an_incomplete_eligibility_names_the_requirement_it_is_missing(self) -> None:
         for field, value, expected in [
             ("licence", "   ", "licence"),
