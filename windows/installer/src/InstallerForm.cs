@@ -438,7 +438,7 @@ namespace OmoBench.Installer
                 + found.Explain() + "\r\n\r\n"
                 + "--------------------------------------------------------------\r\n"
                 + "\"Prepare it for me\" will, inside "
-                + (_system.Distributions.Count > 0 ? FirstWsl2Name() : "your WSL2 distribution") + ":\r\n"
+                + (FirstWsl2Name() ?? "your WSL2 distribution") + ":\r\n"
                 + "  1. download the OmoBench source at revision " + _build.ShortRevision + "\r\n"
                 + "       into " + ManagedEnvironment.SourceDirectory(_build.Revision) + "\r\n"
                 + "  2. create a separate Python environment used only by OmoBench\r\n"
@@ -453,11 +453,29 @@ namespace OmoBench.Installer
 
         private string FirstWsl2Name()
         {
-            foreach (WslDistribution distribution in _system.Distributions)
+            return SelectPreparationDistribution(_upgrading ? _replacing : null, _system);
+        }
+
+        internal static string SelectPreparationDistribution(Configuration replacing, SystemReport system)
+        {
+            // A validated saved installation bypasses discovery. Its distribution
+            // is authoritative for an upgrade; the system report may be absent.
+            if (replacing != null && !string.IsNullOrWhiteSpace(replacing.Distribution))
             {
-                if (distribution.Version == 2) { return distribution.Name; }
+                return replacing.Distribution;
             }
-            return "your WSL2 distribution";
+            if (system != null && system.Distributions != null)
+            {
+                foreach (WslDistribution distribution in system.Distributions)
+                {
+                    if (distribution != null && distribution.Version == 2
+                        && !string.IsNullOrWhiteSpace(distribution.Name))
+                    {
+                        return distribution.Name;
+                    }
+                }
+            }
+            return null;
         }
 
         /// <summary>
@@ -550,6 +568,15 @@ namespace OmoBench.Installer
         {
             if (_wizard.Working) { return; }
 
+            string distribution = FirstWsl2Name();
+            if (string.IsNullOrWhiteSpace(distribution))
+            {
+                // Recover through the normal asynchronous discovery UI instead
+                // of launching WSL with a placeholder name or crashing.
+                ShowEnvironment(true);
+                return;
+            }
+
             _primary.Enabled = false;
             _secondary.Text = "Stop";
             _secondary.Enabled = true;
@@ -562,7 +589,6 @@ namespace OmoBench.Installer
                 : "This can take several minutes. You can stop at any point.";
             _detail.Text = "";
 
-            string distribution = FirstWsl2Name();
             BuildInfo build = _build;
             bool upgrading = _upgrading;
             DiscoveryCancel cancel = new DiscoveryCancel();

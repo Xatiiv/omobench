@@ -243,6 +243,7 @@ namespace OmoBench.Installer.Tests
                 ManagedEnvironmentCommandTests();
                 ManagedEnvironmentStageTests();
                 ManagedUpgradeTests();
+                UpgradeDistributionRegressionTests();
                 LinuxOwnershipTests();
                 ReviewRegressionTests();
                 RuntimePayloadTests();
@@ -276,6 +277,29 @@ namespace OmoBench.Installer.Tests
         }
 
         // -- where things go ---------------------------------------------------
+
+
+        private static void UpgradeDistributionRegressionTests()
+        {
+            Section("Upgrade distribution when saved setup bypasses discovery");
+            Configuration saved = new Configuration { Distribution = "Ubuntu-24.04" };
+            Check("upgrade uses saved distribution without a system report",
+                InstallerForm.SelectPreparationDistribution(saved, null) == "Ubuntu-24.04");
+            Check("missing discovery yields no placeholder distribution",
+                InstallerForm.SelectPreparationDistribution(null, null) == null);
+            Check("empty saved distribution without discovery is recoverable",
+                InstallerForm.SelectPreparationDistribution(
+                    new Configuration { Distribution = "" }, null) == null);
+            SystemReport system = new SystemReport();
+            system.Distributions.Add(new WslDistribution { Name = "Legacy", Version = 1 });
+            Check("WSL1 alone is not a preparation target",
+                InstallerForm.SelectPreparationDistribution(null, system) == null);
+            system.Distributions.Add(new WslDistribution { Name = "OtherUbuntu", Version = 2 });
+            Check("fresh preparation selects discovered WSL2",
+                InstallerForm.SelectPreparationDistribution(null, system) == "OtherUbuntu");
+            Check("upgrade preserves selected distro rather than first discovered",
+                InstallerForm.SelectPreparationDistribution(saved, system) == "Ubuntu-24.04");
+        }
 
         private static void InstallPathTests()
         {
