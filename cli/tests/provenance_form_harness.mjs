@@ -274,4 +274,44 @@ states.curatedAgain = context.withProvenance(
   states.notice.hiddenWithTheSection = get("custom-eligibility").hidden;
 }
 
+// Detect details, for a run that finished minutes ago in this same panel
+// session. What the probe and the server say *now* is not what was captured
+// while the run was served, so none of it may be attached automatically, and
+// none of it may be sent as detected evidence of the run.
+{
+  responses["/api/serving-probe"] = {
+    kind: "omobench-serving-hardware-probe-v1", os: "Windows 11 Pro 10.0.26200",
+    cpu: "AMD Ryzen 7 9800X3D", ram_gb: 64,
+    accelerators: [{ vendor: "amd", model: "AMD Radeon RX 9070", count: 1 }],
+  };
+  responses["/api/github/auth"] = { status: "signed_out" };
+  responses["/api/model-suggestions"] = { candidates: [] };
+  fill({ "serving-os": "", "serving-cpu": "", "serving-ram-gb": "", "serving-accelerators": "",
+         "custom-model-id": "", "custom-licence": "", "custom-licence-url": "" });
+  get("custom-workload").hidden = true;
+  get("windows-bridge").checked = true;
+  runInContext(`
+    selectedJob = { id: "job-0000000000000001", model: "deepseek-r1-distill-qwen-14b",
+      execution_device: "gpu", historical: false, captured: null,
+      created_at: new Date().toISOString(), finished_at: new Date().toISOString() };
+    lastServerCheck = { server_metadata: { source: "LM Studio's model API",
+      quantization: "Q4_K_M", compatibility_type: "gguf", engine: "llama.cpp" } };
+  `, context);
+  await runInContext("detectDetails()", context);
+  const afterDetect = Object.fromEntries(new HarnessFormData(get("package-form")));
+  states.sameSession = {
+    servingOsAfterDetect: get("serving-os").value,
+    engineAfterDetect: get("serving-engine").value,
+    heldForConfirmation: !get("review-now").hidden,
+    probeSentAfterDetect: "probe" in context.withProvenance(afterDetect),
+  };
+  // Confirmed by the person: filled, and recorded as their declaration.
+  get("review-now-confirmed").checked = true;
+  runInContext("detectedNow.map((item) => item.apply())", context);
+  const afterConfirm = context.withProvenance(Object.fromEntries(new HarnessFormData(get("package-form"))));
+  states.sameSession.servingOsAfterConfirm = get("serving-os").value;
+  states.sameSession.probeSentAfterConfirm = "probe" in afterConfirm;
+  states.sameSession.declaredHostCpu = afterConfirm.serving.host.cpu || null;
+}
+
 console.log(JSON.stringify(states, null, 2));

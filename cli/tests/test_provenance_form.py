@@ -177,6 +177,26 @@ class ProvenanceFormTests(unittest.TestCase):
     def test_the_notice_goes_away_with_the_section_it_describes(self) -> None:
         self.assertTrue(self.states["notice"]["hiddenWithTheSection"])
 
+    # -- current probes and historical runs ------------------------------------
+
+    def test_a_probe_is_never_attached_automatically_even_in_the_same_session(self) -> None:
+        """The run finished minutes ago in this panel. The probe still describes
+        the machine now, not the machine while it served that run."""
+        state = self.states["sameSession"]
+        self.assertEqual(state["servingOsAfterDetect"], "")
+        self.assertEqual(state["engineAfterDetect"], "")
+        self.assertTrue(state["heldForConfirmation"])
+
+    def test_detect_never_sends_the_probe_as_detected_evidence_of_the_run(self) -> None:
+        state = self.states["sameSession"]
+        self.assertFalse(state["probeSentAfterDetect"])
+        self.assertFalse(state["probeSentAfterConfirm"])
+
+    def test_a_confirmed_value_is_recorded_as_the_contributors_declaration(self) -> None:
+        state = self.states["sameSession"]
+        self.assertEqual(state["servingOsAfterConfirm"], "Windows 11 Pro 10.0.26200")
+        self.assertEqual(state["declaredHostCpu"], "AMD Ryzen 7 9800X3D")
+
     def test_an_empty_custom_panel_declares_nothing(self) -> None:
         """A blank field is not a claim that a model has no licence."""
         state = self.states["noCustomModel"]

@@ -714,15 +714,15 @@ async function detectDetails() {
   const bridged = $("windows-bridge").checked;
   const probe = bridged
     ? await api("/api/serving-probe", { windows_bridge: true }).catch(() => null) : null;
-  if (probe) servingProbeRead = true;
   const metadata = lastServerCheck && lastServerCheck.server_metadata;
-  const facts = machineFacts(probe, metadata);
-  let now = [];
-  if (selectedJob.historical) {
-    now = facts;
-  } else {
-    facts.forEach((fact) => { const r = fact.apply(); (Array.isArray(r) ? r : [r]).forEach((x) => filled.push(x)); });
-  }
+  // A probe and a server check describe the machine when they ran, which is
+  // not when the benchmark ran -- even a benchmark that finished minutes ago
+  // in this same panel. So they are never attached to a run on their own:
+  // every one is held for the person to confirm, and once confirmed it is
+  // recorded as their declaration. Nothing here marks the probe as detected
+  // evidence of the run (servingProbeRead stays as it was), because it was
+  // not captured while the run was being served.
+  const now = machineFacts(probe, metadata);
   if (metadata && metadata.max_context_length) {
     filled.push({ label: "Largest context the model file supports", value: `${metadata.max_context_length} tokens`,
       source: `${metadata.source}. This is the file's limit, not the context your server was started with`, kept: true });
