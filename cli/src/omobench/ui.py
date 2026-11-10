@@ -374,9 +374,103 @@ def _git_head(root) -> dict | None:
         return None
 
 
+def captured_metadata(run) -> dict | None:
+    """What was declared for this run the last time it was packaged.
+
+    This is the run's own record: result.json and the provenance declaration
+    written beside it. Nothing here is read from the machine now, so it can be
+    reused for this run without any question of whether it still applies.
+    """
+    if run is None:
+        return None
+    captured: dict = {}
+    try:
+        result = json.loads((run / "result.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        result = None
+    if isinstance(result, dict):
+        model = result.get("model") or {}
+        runtime = result.get("runtime") or {}
+        submission = result.get("submission") or {}
+        for key, value in (("model", model.get("id")),
+                           ("model_revision", model.get("revision")),
+                           ("model_source", model.get("source")),
+                           ("quantization", model.get("quantization")),
+                           ("served_model_id", model.get("served_model_id")),
+                           ("framework", runtime.get("framework")),
+                           ("framework_version", runtime.get("version")),
+                           ("submitter", submission.get("submitter"))):
+            if isinstance(value, str) and value.strip():
+                captured[key] = value
+        if isinstance(model.get("eligibility"), dict):
+            captured["eligibility"] = model["eligibility"]
+    try:
+        declaration = json.loads((run / "provenance.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        declaration = None
+    if isinstance(declaration, dict):
+        for key in ("serving", "weights", "eligibility", "tokenizer", "served_model_id"):
+            if declaration.get(key) is not None:
+                captured.setdefault(key, declaration[key])
+    return captured or None
+
+
+def _finished_before(job: dict, moment) -> bool:
+    """Did this run finish before `moment`? Unknown counts as yes: a run whose
+    time cannot be read is not one anybody can call current."""
+    stamp = job.get("finished_at") or job.get("created_at")
+    try:
+        return datetime.fromisoformat(str(stamp)) < moment
+    except (TypeError, ValueError):
+        return True
+
+
+# LM Studio's own REST API describes the model it has loaded: the weights
+# format, the quantisation, the architecture and the largest context the file
+# supports. It does not describe the context it was started with, the GPU
+# layer count, or the engine build, and nothing here pretends it does.
+_LMSTUDIO_FORMAT_ENGINE = {"gguf": "llama.cpp", "mlx": "MLX"}
+
+
+def lmstudio_model_metadata(endpoint: str, model: str, *, timeout: float = 5.0,
+                            _headers=None) -> dict | None:
+    """Best effort. None for any server that is not LM Studio, or that does
+    not answer; a server without this endpoint is normal, not a failure."""
+    if not endpoint or not model:
+        return None
+    from urllib.parse import quote
+
+    request = Request(endpoint.rstrip("/") + "/api/v0/models/" + quote(model, safe=""),
+                      headers={"Accept": "application/json", **(_headers or {})})
+    try:
+        with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=timeout) as response:
+            document = json.loads(response.read(256 * 1024))
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError, UIError):
+        return None
+    if not isinstance(document, dict) or document.get("id") != model:
+        return None
+    facts: dict = {"source": "LM Studio's model API, read during the server check"}
+    for key in ("quantization", "arch", "compatibility_type", "publisher", "state"):
+        value = document.get(key)
+        if isinstance(value, str) and value.strip():
+            facts[key] = value.strip()
+    if isinstance(document.get("max_context_length"), int) and document["max_context_length"] > 0:
+        facts["max_context_length"] = document["max_context_length"]
+    engine = _LMSTUDIO_FORMAT_ENGINE.get(str(facts.get("compatibility_type", "")).lower())
+    if engine:
+        # The format names the engine family. It does not name its build, and
+        # no version is invented for it.
+        facts["engine"] = engine
+    return facts if len(facts) > 1 else None
+
+
 class Controller:
     def __init__(self, root: Path):
         self.root = root.resolve()
+        # A probe answers about the machine now. A run that finished before
+        # this panel started may have been served differently, so what is
+        # read now is offered for confirmation rather than attached to it.
+        self.started_at = datetime.now(UTC)
         self.storage = self.root / ".omobench-runs" / "ui"
         if not self.storage.resolve().is_relative_to(self.root):
             raise UIError("The UI staging directory must stay inside the checkout.")
@@ -716,9 +810,12 @@ class Controller:
             # rather than asking for an evidence summary that packaging has
             # not produced, which the evidence endpoint rightly refuses.
             job["packaged"] = (run / "result.json").is_file()
+            job["captured"] = captured_metadata(run)
         except UIError:
             pass
         job.setdefault("packaged", False)
+        job.setdefault("captured", None)
+        job["historical"] = _finished_before(job, self.started_at)
         for path in paths:
             if self._inside(path).is_file():
                 with path.open("rb") as stream:
@@ -1093,8 +1190,14 @@ class Controller:
             sleep_prevention=execution.sleep_prevention_availability(),
         ) + self.requirement_checks(job or self._preview_job(model, values), values)
         proposal = self.proposal_status(values) if model else None
+        # Settled the same three ways the submission gate accepts, so the
+        # Identify stage and the gate can never give two answers about one
+        # model: catalogued, a complete eligibility declaration, or a proposal.
+        eligibility = values.get("eligibility")
         identity_settled = bool(model) and (
-            model in self.catalog_models() or bool((proposal or {}).get("document")))
+            model in self.catalog_models()
+            or bool((proposal or {}).get("document"))
+            or (isinstance(eligibility, dict) and not workflow.eligibility_gaps(eligibility)))
         return {
             "stages": workflow.stages(
                 checks, endpoint_checked=served is not None,
@@ -1580,6 +1683,12 @@ class Controller:
                     runner_health=(cli.runner_health_check(timeout=120, cancel=lambda: self.closing)
                                    if setup.ok and not native_windows else None),
                 )
+                # What the server says about the model it has loaded, where it
+                # says anything. Read now, about now, through the same route
+                # the benchmark will use.
+                report["server_metadata"] = lmstudio_model_metadata(
+                    checked.get("endpoint"), text_field(data, "model", optional=True) or "",
+                    **({"_headers": headers} if headers else {}))
                 with self.lock:
                     # Tied to the address it describes, so a later question
                     # about a different endpoint is answered as unchecked

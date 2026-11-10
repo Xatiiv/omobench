@@ -110,7 +110,7 @@
           </section>
           <section id="identity-block" class="identity">
             <h3>Which model is this?</h3>
-            <p class="hint">Two different things, kept apart. Your server answers to whatever identifier it was configured with; the catalog has its own canonical identity for the model. Nothing maps one to the other without you choosing it, and a model the catalog does not have can still be benchmarked and saved — only submitting it publicly needs the catalog's answer.</p>
+            <p class="hint">Two different things, kept apart. Your server answers to whatever identifier it was configured with; the model has its own canonical identity. Nothing maps one to the other without you choosing it. A model not on the curated list can still be benchmarked, saved and submitted — it then carries its own licence and downloadability instead.</p>
             <div class="grid two">
               <label>Canonical model ID<input name="model" id="package-model" form="package-form" list="catalog-models" spellcheck="false"><datalist id="catalog-models"></datalist><span class="hint">The catalogued identity of the model, which is not the same as the alias your server answers to.</span></label>
               <label>Identifier your server answers to<input name="served_model_id" id="served-model-id" form="package-form" spellcheck="false" placeholder="For example deepseek-r1-distill-qwen-14b"><span class="hint">The string this run sends to the server's API. It is a serving alias a serving application made up, not an identity claim.</span></label>
@@ -127,7 +127,7 @@
             </div>
             <details id="model-proposal-section" hidden>
             <summary>Propose this model for the catalog</summary>
-            <p class="hint">The model you ran is not in the catalog, so it cannot be published as a catalogued result. You can submit this result with a proposal: a reviewer sees the request and the evidence together. A proposal does not add the model to the catalog, and merging this result would not either.</p>
+            <p class="hint">Optional. A proposal asks for this model to be added to the curated list. It is not needed to submit this result — declaring the model's own licence and downloadability does that. A reviewer sees a proposal and the evidence together, and merging the result does not add the model either way.</p>
             <div class="grid two">
               <label>Family<input name="proposal_family" id="proposal-family" placeholder="For example DeepSeek"></label>
               <label>Parameter class<input name="proposal_parameter_class" id="proposal-parameter-class" placeholder="For example 14B"></label>
@@ -207,7 +207,33 @@
       </section>
       <section id="package-panel" class="panel" hidden>
         <div class="section-head"><div><span class="step">05</span><h2>Review &amp; submit</h2></div><span id="package-panel-device" class="pill">Evidence</span></div>
-        <p class="muted">Two separate things. <strong>Save local report</strong>, above, needs none of this: it exports the measurements this machine recorded, for any model, with no sign-in. Everything below prepares a <strong>community submission</strong>, which additionally needs a model identity the catalog knows (or a proposal for one), an immutable weights revision, a description of the machine that served the model, and the profile's acceptance thresholds. Packaging uses the existing CLI and registry validator.</p>
+        <section id="review-summary" class="review-summary" aria-labelledby="review-summary-title">
+          <h3 id="review-summary-title" class="visually-hidden">This run at a glance</h3>
+          <dl class="kv review-facts" id="review-facts"></dl>
+          <p id="review-readiness" class="review-readiness" role="status"></p>
+          <div class="actions">
+            <button id="detect-details" type="button">Detect details</button>
+            <span id="detect-status" class="hint" role="status"></span>
+          </div>
+          <div id="review-detected" class="notice" hidden>
+            <p><strong>Filled in for you</strong> <span class="hint">Each from the source named. Anything you had already typed was kept.</span></p>
+            <ul id="review-detected-list" class="status-checklist"></ul>
+          </div>
+          <div id="review-now" class="notice" hidden>
+            <p><strong>Read from the machine now</strong> <span class="hint">This run finished before the panel started, so these describe the machine today, not necessarily how the run was served.</span></p>
+            <ul id="review-now-list" class="status-checklist"></ul>
+            <label class="check"><input id="review-now-confirmed" type="checkbox"><span>These still describe how this run was served.</span></label>
+            <div class="actions"><button id="review-now-apply" type="button" class="secondary" disabled>Use these for this run</button></div>
+          </div>
+          <div id="review-needed" hidden>
+            <p><strong>Still needed</strong></p>
+            <ul id="review-needed-list" class="status-checklist"></ul>
+          </div>
+          <details class="quiet-details"><summary>What this screen is for</summary>
+            <p class="hint"><strong>Save local report</strong>, above, needs none of this: it exports what this machine measured, for any model, with no sign-in. This screen prepares a <strong>community submission</strong>, which also needs the model's identity and eligibility, the exact weights you ran, the machine that served them, and a run that met the profile's acceptance thresholds. Packaging uses the existing CLI and registry validator, and nothing here relaxes either.</p>
+          </details>
+        </section>
+        <details id="review-destination" class="quiet-details"><summary>Destination, GitHub sign-in and permissions</summary>
 <div class="community-submission">
             <label>Submission destination<select id="submission-mode">
               <option value="community">OmoBench community registry</option>
@@ -233,6 +259,8 @@
               </details>
             </section>
           </div>
+        </details>
+        <details id="review-all-details" class="quiet-details"><summary>All details <span class="hint">Every field, for corrections</span></summary>
         <ul class="status-checklist" id="publication-checklist"></ul>
         <p id="publication-summary" class="hint"></p>
         <form id="package-form">
@@ -261,15 +289,45 @@
               </select></label>
             </div>
             <label>How the weights were split<input name="serving_placement_detail" id="serving-placement-detail" placeholder="For example 32 of 49 layers on GPU"><span class="hint">Required when the weights were split, as the serving runtime itself reports the split. Leave blank otherwise.</span></label>
-            <label>Accelerators<textarea name="serving_accelerators" id="serving-accelerators" rows="3" placeholder="amd, AMD Radeon RX 9070, 16, 1, inference"></textarea>
-              <span class="hint">One per line: vendor (nvidia, amd, intel, apple, other), model, memory in GB, how many, and what it did — <code>inference</code> or <code>present-not-used</code>. List a card that was installed but idle as <code>present-not-used</code>: detecting a device is not evidence that inference touched it. Leave blank for a CPU-only server.</span></label>
+            <div class="accelerator-block">
+              <p class="field-title">Graphics cards and accelerators</p>
+              <div id="accelerator-cards" class="accelerator-cards"></div>
+              <div class="actions"><button id="accelerator-add" type="button" class="secondary">Add a card</button></div>
+              <p class="hint">Finding a card is not evidence that it did the inference. Say which one did; leave this empty for a CPU-only server.</p>
+              <details class="quiet-details"><summary>Edit as text</summary>
+                <label>Accelerators<textarea name="serving_accelerators" id="serving-accelerators" rows="3" placeholder="amd, AMD Radeon RX 9070, 16, 1, inference"></textarea>
+                  <span class="hint">One per line: vendor (nvidia, amd, intel, apple, other), model, memory in GB, how many, and what it did — <code>inference</code>, <code>present-not-used</code> or <code>unknown</code>.</span></label>
+              </details>
+            </div>
             <div class="grid two">
               <label>Inference engine<input name="serving_engine" id="serving-engine" placeholder="For example llama.cpp"><span class="hint">What actually executed the weights. For LM Studio this is <code>llama.cpp</code> or <code>MLX</code>, not LM Studio itself. Leave blank to use the framework chosen above.</span></label>
               <label>Serving application<input name="serving_application" id="serving-application" placeholder="For example LM Studio"></label>
               <label>Application version<input name="serving_application_version" id="serving-application-version" placeholder="For example 0.3.31"><span class="hint">The application release. It is a different thing from the inference engine build above, and both are kept.</span></label>
             </div>
-            <label>Serving settings that change the measurement<textarea name="serving_settings" id="serving-settings" rows="2" placeholder="context_length = 8192"></textarea><span class="hint">One <code>name = value</code> per line: context length, GPU layer count, batch size. Do not include tokens or passwords.</span></label>
-            <label>Weight manifest (optional)<textarea name="weights_manifest" id="weights-manifest" rows="2" placeholder="Paste the JSON from: omobench weights --directory ... --file ..."></textarea><span class="hint">For weights with no public immutable revision. <code>omobench weights</code> hashes the files you name and prints a manifest; the revision it gives you goes in the revision field above. A filename is never taken as proof of identity.</span></label>
+            <div class="settings-block">
+              <p class="field-title">Server settings that change the measurement</p>
+              <div class="grid two">
+                <label>Context length<input id="setting-context-length" inputmode="numeric" placeholder="As set in your server, e.g. 8192"></label>
+                <label>GPU layers<input id="setting-gpu-layers" inputmode="numeric" placeholder="e.g. 49, or blank if not split"></label>
+              </div>
+              <details class="quiet-details"><summary>Other settings, as text</summary>
+                <label>Serving settings<textarea name="serving_settings" id="serving-settings" rows="2" placeholder="context_length = 8192"></textarea><span class="hint">One <code>name = value</code> per line: context length, GPU layer count, batch size. Do not include tokens or passwords.</span></label>
+              </details>
+            </div>
+            <div id="weights-identify" class="weights-identify">
+              <p class="field-title">Identify the model file you used</p>
+              <p class="hint">OmoBench reads the exact file and records its fingerprint, so the result names the bytes you ran rather than a filename. Nothing is uploaded. For LM Studio the files are usually under <code>/mnt/c/Users/&lt;you&gt;/.lmstudio/models/</code>, in a folder named after the publisher and model.</p>
+              <div class="grid two">
+                <label>Folder containing the model file<input id="weights-folder" spellcheck="false" placeholder="/mnt/c/Users/you/.lmstudio/models/publisher/model"></label>
+                <div class="actions"><button id="weights-list" type="button" class="secondary">Show files</button></div>
+              </div>
+              <ul id="weights-files" class="weights-files"></ul>
+              <div class="actions"><button id="weights-hash" type="button" class="secondary" hidden>Identify the selected file(s)</button></div>
+              <p id="weights-result" class="hint" role="status"></p>
+            </div>
+            <details class="quiet-details"><summary>Paste a weight manifest instead</summary>
+              <label>Weight manifest<textarea name="weights_manifest" id="weights-manifest" rows="2" placeholder="Paste the JSON from: omobench weights --directory ... --file ..."></textarea><span class="hint">The same thing as above, produced on another machine. A filename is never taken as proof of identity.</span></label>
+            </details>
           </details>
 
           <label id="description-field" hidden>Server description<input name="server_description" id="server-description" placeholder="Name and details of the generic server"></label>
@@ -277,6 +335,7 @@
           <details><summary>Hardware details, if detection is incomplete</summary><div class="grid two"><label id="gpu-memory-field">GPU memory per card (GB)<input name="gpu_memory_gb" type="number" min="0.01" step="any" placeholder="Only if detected VRAM is unknown"></label><label>CPU description<input name="cpu" placeholder="Leave blank to use detected CPU"></label></div></details>
           <div class="actions"><button id="check-requirements" type="button" class="secondary">Check publication requirements</button><button id="package-button" type="submit">Package &amp; validate</button></div>
         </form>
+        </details>
         <p id="validation-result" class="notice" role="status" hidden></p>
         <section id="completion" hidden>
           <h3>Where this run has got to</h3>

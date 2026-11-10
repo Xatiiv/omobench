@@ -312,7 +312,20 @@ async function selectRun(id) {
   $("publication-checklist").replaceChildren(); $("publication-summary").textContent = "";
   const job = await api(`/api/runs/${id}`);
   if (selected !== id) return;
+  selectedJob = job; detectedNow = []; aliasSuggestion = null;
   $("package-form").reset(); $("package-model").value = job.model; $("framework").value = "llama.cpp"; frameworkChanged();
+  clearEditMarks();
+  // Prefilled from the run, not typed: a canonical identity recorded with an
+  // earlier packaging of this run may replace it.
+  $("package-model").dataset.filledBy = "the identifier this run sent";
+  // The identifier the run sent is a serving alias unless the curated list
+  // already knows it; record it as that, and let the canonical identity be
+  // confirmed separately.
+  if (!(setup && (setup.catalog || []).includes(job.model)) && !$("served-model-id").value) {
+    $("served-model-id").value = job.model;
+  }
+  const reused = applyCaptured(job);
+  renderDetected(reused, []);
   // Verified managed-run metadata, when present, so packaging never requires typing a source by hand.
   $("package-model-source").value = job.model_source || "";
   runStartedAt = new Date(job.created_at).getTime();
@@ -348,7 +361,9 @@ $("refresh-setup").addEventListener("click", () => action(refreshSetup));
 $("new-run").addEventListener("click", () => { $("configure").scrollIntoView({behavior: "smooth"}); $("model").focus(); });
 // Staged rather than pass/fail: "the server answered" and "this benchmark can
 // run" are different claims, and the report says which one each stage made.
+let lastServerCheck = null;
 function renderServerCheck(report) {
+  lastServerCheck = report;
   const state = { ok: "ok", failed: "fail", unknown: "pending", skipped: "pending" };
   $("server-check").replaceChildren(...report.stages.map((stage) => {
     const li = document.createElement("li");
@@ -428,6 +443,7 @@ function renderWorkflow(report) {
   workflowView.render(report);
   renderCatalogStatus(report.proposal);
   renderCustomEligibility(report);
+  renderReviewSummary();
 }
 
 // The same answer the checklist gives, repeated beside the fields it is about,
@@ -467,6 +483,511 @@ function renderCustomEligibility(report) {
     + (remaining.length
        ? `Still outstanding for submission: ${remaining.join("; ")}.`
        : "Nothing else is outstanding for submission; the checklist below is the authority.");
+}
+
+// --- Review & submit: one summary, and details filled from evidence ---------
+//
+// The rule for every fill below: an established fact goes into an empty field,
+// with its source named; a field somebody typed into is never overwritten; and
+// anything read from the machine *now* is not attached to a run that finished
+// before this panel started without that person confirming it still applies.
+
+let selectedJob = null;
+let detectedNow = [];
+let aliasSuggestion = null;
+
+const EDITABLE = "#package-form input, #package-form select, #package-form textarea, "
+  + "#identity-block input";
+
+function clearEditMarks() {
+  document.querySelectorAll(EDITABLE).forEach((element) => {
+    delete element.dataset.userEdited; delete element.dataset.filledBy;
+  });
+}
+
+document.addEventListener("input", (event) => {
+  const target = event.target;
+  if (target && target.matches && target.matches(EDITABLE) && event.isTrusted !== false) {
+    target.dataset.userEdited = "1";
+  }
+});
+
+function field(name) {
+  return document.querySelector(`#package-form [name="${name}"]`) || $(name);
+}
+
+// Fill one field if it is empty and nobody edited it. Returns what happened,
+// for the "Filled in for you" list: a fill, a kept value, or nothing.
+function fill(element, value, label, source) {
+  if (!element || value === undefined || value === null || String(value).trim() === "") return null;
+  const text = String(value).trim();
+  const current = (element.value || "").trim();
+  if (current === text) return null;
+  if (current && (element.dataset.userEdited || element.dataset.filledBy === undefined)) {
+    return { label, value: current, source: `kept your value; ${source} says ${text}`, kept: true };
+  }
+  element.value = text;
+  element.dataset.filledBy = source;
+  return { label, value: text, source };
+}
+
+function applyCaptured(job) {
+  // What the run itself recorded when it ran -- a managed recipe knows its
+  // exact revision, quantisation and runtime build -- comes first.
+  const ran = "recorded with this run when it ran";
+  const own = job ? [
+    fill(field("model_revision"), job.model_revision, "Weights revision", ran),
+    fill(field("quantization"), job.quantization, "Quantisation", ran),
+    fill(field("framework_version"), job.framework_version, "Runtime build", ran),
+  ] : [];
+  if (job && job.framework && !$("framework").dataset.userEdited
+      && $("framework").querySelector(`option[value="${job.framework}"]`)) {
+    $("framework").value = job.framework; frameworkChanged();
+  }
+  const captured = (job && job.captured) || null;
+  if (!captured) return own.filter(Boolean);
+  const source = "recorded with this run when it was packaged";
+  const results = [...own,
+    fill($("package-model"), captured.model, "Model", source),
+    fill($("served-model-id"), captured.served_model_id, "Served identifier", source),
+    fill(field("model_revision"), captured.model_revision, "Weights revision", source),
+    fill(field("model_source"), captured.model_source, "Weights source", source),
+    fill(field("quantization"), captured.quantization, "Quantisation", source),
+    fill(field("framework_version"), captured.framework_version, "Runtime build", source),
+    fill($("submitter"), captured.submitter, "Submitter", source),
+  ];
+  if (captured.framework && $("framework").querySelector(`option[value="${captured.framework}"]`)
+      && !$("framework").dataset.userEdited) {
+    $("framework").value = captured.framework; frameworkChanged();
+    results.push({ label: "Framework", value: captured.framework, source });
+  }
+  const serving = captured.serving;
+  if (serving && typeof serving === "object") {
+    const host = serving.host || {};
+    const value = (fact) => (fact && typeof fact === "object" ? fact.value : fact);
+    results.push(fill($("serving-os"), value(host.os), "Serving OS", source));
+    results.push(fill($("serving-cpu"), value(host.cpu), "Serving processor", source));
+    results.push(fill($("serving-ram-gb"), value(host.ram_gb), "Serving memory", source));
+    if (Array.isArray(serving.accelerators) && serving.accelerators.length && !$("serving-accelerators").value.trim()) {
+      $("serving-accelerators").value = serving.accelerators.map((device) => [device.vendor, device.model,
+        device.memory_gb ?? "", device.count ?? 1, device.role || "unknown"].join(", ")).join("\n");
+      results.push({ label: "Accelerators", value: `${serving.accelerators.length} recorded`, source });
+    }
+    const placement = serving.placement || {};
+    if (placement.mode && $("serving-placement").value === "unknown") {
+      $("serving-placement").value = placement.mode;
+      results.push({ label: "Weight placement", value: placement.mode, source });
+    }
+    results.push(fill($("serving-placement-detail"), placement.detail, "Placement detail", source));
+    const runtime = serving.runtime || {};
+    results.push(fill($("serving-engine"), (runtime.engine || {}).name, "Inference engine", source));
+    results.push(fill($("serving-application"), (runtime.application || {}).name, "Serving application", source));
+    results.push(fill($("serving-application-version"), (runtime.application || {}).version, "Application version", source));
+    if (Array.isArray(runtime.settings) && runtime.settings.length && !$("serving-settings").value.trim()) {
+      $("serving-settings").value = runtime.settings.map((s) => `${s.name} = ${s.value}`).join("\n");
+      results.push({ label: "Server settings", value: `${runtime.settings.length} recorded`, source });
+    }
+  }
+  if (captured.weights && captured.weights.manifest && !$("weights-manifest").value.trim()) {
+    $("weights-manifest").value = JSON.stringify(captured.weights.manifest);
+    results.push({ label: "Weights fingerprint", value: "recorded", source });
+  }
+  renderAccelerators(); renderSettings();
+  return results.filter(Boolean);
+}
+
+function renderDetected(filled, now) {
+  const shown = (filled || []).filter(Boolean);
+  $("review-detected").hidden = shown.length === 0;
+  $("review-detected-list").replaceChildren(...shown.map((item) => {
+    const li = document.createElement("li");
+    li.className = `status-item ${item.kept ? "pending" : "pass"}`;
+    const strong = document.createElement("strong"), span = document.createElement("span");
+    strong.textContent = `${item.label}: ${item.value}`;
+    span.textContent = item.source;
+    li.append(strong, span);
+    return li;
+  }));
+  detectedNow = now || [];
+  $("review-now").hidden = detectedNow.length === 0;
+  $("review-now-confirmed").checked = false;
+  $("review-now-apply").disabled = true;
+  $("review-now-list").replaceChildren(...detectedNow.map((item) => {
+    const li = document.createElement("li");
+    li.className = "status-item pending";
+    const strong = document.createElement("strong"), span = document.createElement("span");
+    strong.textContent = `${item.label}: ${item.value}`;
+    span.textContent = item.source;
+    li.append(strong, span);
+    return li;
+  }));
+}
+
+$("review-now-confirmed").addEventListener("change", () => {
+  $("review-now-apply").disabled = !$("review-now-confirmed").checked;
+});
+$("review-now-apply").addEventListener("click", () => {
+  if (!$("review-now-confirmed").checked) return;
+  const applied = detectedNow.map((item) => item.apply()).flat().filter(Boolean)
+    .map((item) => ({ ...item, source: `${item.source}, confirmed by you for this run` }));
+  renderDetected(applied, []);
+  renderAccelerators(); renderSettings(); scheduleWorkflowRefresh();
+});
+
+// What the machine and the server say *now*. Returned as deferred fills so a
+// historical run can hold them for confirmation instead of applying them.
+function machineFacts(probe, metadata) {
+  const facts = [];
+  const add = (label, value, source, apply) => {
+    if (value === undefined || value === null || String(value).trim() === "") return;
+    facts.push({ label, value: String(value), source, apply });
+  };
+  if (probe) {
+    const source = "read from the Windows machine by the companion";
+    add("Serving OS", probe.os, source, () => fill($("serving-os"), probe.os, "Serving OS", source));
+    add("Serving processor", probe.cpu, source, () => fill($("serving-cpu"), probe.cpu, "Serving processor", source));
+    add("Serving memory", probe.ram_gb ? `${probe.ram_gb} GB` : null, source,
+      () => fill($("serving-ram-gb"), probe.ram_gb, "Serving memory (GB)", source));
+    const devices = probe.accelerators || [];
+    if (devices.length) {
+      add("Graphics cards", devices.map((d) => d.model).join("; "), `${source}. Finding a card is not evidence it did the inference`,
+        () => {
+          if ($("serving-accelerators").value.trim()) {
+            return { label: "Graphics cards", value: "kept the cards already listed", source, kept: true };
+          }
+          // Memory and role are left for the person: Windows misreports
+          // video memory for large cards, and detection says nothing about use.
+          $("serving-accelerators").value = devices.map((d) =>
+            [d.vendor, d.model, "", d.count ?? 1, "unknown"].join(", ")).join("\n");
+          return { label: "Graphics cards", value: devices.map((d) => d.model).join("; "), source };
+        });
+    }
+  }
+  if (metadata) {
+    const source = metadata.source || "the server's own model API";
+    add("Quantisation", metadata.quantization, source,
+      () => fill(field("quantization"), metadata.quantization, "Quantisation", source));
+    add("Inference engine", metadata.engine, `${source}, from the model's ${metadata.compatibility_type} format`,
+      () => fill($("serving-engine"), metadata.engine, "Inference engine", source));
+    add("Serving application", "LM Studio", "LM Studio's own API answered",
+      () => {
+        const results = [fill($("serving-application"), "LM Studio", "Serving application", "LM Studio's own API answered")];
+        if ($("framework").value === "llama.cpp" && !$("framework").dataset.userEdited
+            && $("framework").querySelector('option[value="lmstudio"]')) {
+          $("framework").value = "lmstudio"; frameworkChanged();
+          results.push({ label: "Framework", value: "lmstudio", source: "LM Studio's own API answered" });
+        }
+        return results;
+      });
+  }
+  return facts;
+}
+
+async function detectDetails() {
+  if (!selectedJob) throw new Error("Choose a run first; details describe one run.");
+  $("detect-status").textContent = "Looking…";
+  const filled = [...applyCaptured(selectedJob)];
+
+  // The signed-in GitHub account is who is submitting.
+  const auth = await api("/api/github/auth").catch(() => null);
+  const login = auth && auth.account && auth.account.login;
+  if (login) filled.push(fill($("submitter"), login, "Submitter", "your signed-in GitHub account"));
+
+  // A serving alias may name a curated model. Offered, never applied.
+  const alias = $("served-model-id").value.trim();
+  const canonical = $("package-model").value.trim();
+  const catalog = (setup && setup.catalog) || [];
+  aliasSuggestion = null;
+  if (alias && !catalog.includes(canonical)) {
+    const report = await api("/api/model-suggestions", { served_model_id: alias }).catch(() => null);
+    if (report && report.candidates && report.candidates.length === 1) aliasSuggestion = report.candidates[0];
+  }
+
+  // The curated list's own licence record, for a curated model.
+  const curated = curatedRecord($("package-model").value.trim());
+  if (curated && curated.licence) {
+    filled.push({ label: "Licence", value: curated.licence,
+      source: "the curated list's record of this model; nothing else to declare" });
+  }
+
+  // The machine and the server, as they are now.
+  const bridged = $("windows-bridge").checked;
+  const probe = bridged
+    ? await api("/api/serving-probe", { windows_bridge: true }).catch(() => null) : null;
+  if (probe) servingProbeRead = true;
+  const metadata = lastServerCheck && lastServerCheck.server_metadata;
+  const facts = machineFacts(probe, metadata);
+  let now = [];
+  if (selectedJob.historical) {
+    now = facts;
+  } else {
+    facts.forEach((fact) => { const r = fact.apply(); (Array.isArray(r) ? r : [r]).forEach((x) => filled.push(x)); });
+  }
+  if (metadata && metadata.max_context_length) {
+    filled.push({ label: "Largest context the model file supports", value: `${metadata.max_context_length} tokens`,
+      source: `${metadata.source}. This is the file's limit, not the context your server was started with`, kept: true });
+  }
+  renderDetected(filled.filter(Boolean), now);
+  renderAccelerators(); renderSettings();
+  const missing = [];
+  if (!bridged) missing.push("the serving hardware (tick Windows bridge to read it from the Windows machine)");
+  if (!metadata) missing.push("the server's own model details (run Test connection first)");
+  $("detect-status").textContent = missing.length
+    ? `Done. Not read: ${missing.join("; ")}.` : "Done.";
+  scheduleWorkflowRefresh();
+}
+
+function curatedRecord(id) {
+  if (!id || !workloadAnswer) return null;
+  for (const family of workloadAnswer.families || []) {
+    for (const model of family.models || []) {
+      if (model.id === id) return { licence: family.licence, gated: family.gated };
+    }
+  }
+  return null;
+}
+
+$("detect-details").addEventListener("click", () => action(detectDetails));
+
+// --- accelerators as cards ------------------------------------------------------
+
+const ROLE_TEXT = { inference: "Did the inference", "present-not-used": "Installed, not used", unknown: "Not sure yet" };
+
+function renderAccelerators() {
+  let devices;
+  try { devices = parseAccelerators($("serving-accelerators").value); }
+  catch { $("accelerator-cards").replaceChildren(); return; }
+  $("accelerator-cards").replaceChildren(...devices.map((device, index) => {
+    const card = document.createElement("div");
+    card.className = "accelerator-card";
+    const title = document.createElement("p");
+    title.className = "accelerator-title";
+    title.textContent = `${device.model}${device.count > 1 ? ` × ${device.count}` : ""}`;
+    const memory = document.createElement("label");
+    memory.textContent = "Memory (GB)";
+    const memoryInput = document.createElement("input");
+    memoryInput.inputMode = "decimal"; memoryInput.value = device.memory_gb ?? "";
+    memoryInput.placeholder = "From your server's hardware panel";
+    memory.append(memoryInput);
+    const role = document.createElement("label");
+    role.textContent = "What it did";
+    const roleSelect = document.createElement("select");
+    Object.entries(ROLE_TEXT).forEach(([value, text]) => roleSelect.append(option(value, text)));
+    roleSelect.value = device.role;
+    role.append(roleSelect);
+    const write = () => {
+      const lines = $("serving-accelerators").value.split(/\r?\n/).filter((l) => l.trim());
+      const parts = lines[index].split(",").map((s) => s.trim());
+      while (parts.length < 5) parts.push("");
+      parts[2] = memoryInput.value.trim(); parts[3] = parts[3] || "1"; parts[4] = roleSelect.value;
+      lines[index] = parts.join(", ");
+      $("serving-accelerators").value = lines.join("\n");
+      $("serving-accelerators").dataset.userEdited = "1";
+      scheduleWorkflowRefresh(); renderReviewSummary();
+    };
+    memoryInput.addEventListener("change", write);
+    roleSelect.addEventListener("change", write);
+    card.append(title, memory, role);
+    return card;
+  }));
+}
+
+$("serving-accelerators").addEventListener("input", renderAccelerators);
+$("accelerator-add").addEventListener("click", () => {
+  const vendor = prompt("Vendor: nvidia, amd, intel, apple or other", "amd");
+  if (!vendor) return;
+  const model = prompt("Card name, as your server or Windows shows it", "");
+  if (!model) return;
+  const lines = $("serving-accelerators").value.split(/\r?\n/).filter((l) => l.trim());
+  lines.push([vendor.trim(), model.trim(), "", "1", "unknown"].join(", "));
+  $("serving-accelerators").value = lines.join("\n");
+  $("serving-accelerators").dataset.userEdited = "1";
+  renderAccelerators(); scheduleWorkflowRefresh();
+});
+
+// --- the two settings that matter most, as fields ----------------------------
+
+const SETTING_FIELDS = { context_length: "setting-context-length", gpu_layers: "setting-gpu-layers" };
+
+function renderSettings() {
+  let settings = [];
+  try { settings = parseSettings($("serving-settings").value); } catch { return; }
+  Object.entries(SETTING_FIELDS).forEach(([name, id]) => {
+    const found = settings.find((s) => s.name === name);
+    if (document.activeElement !== $(id)) $(id).value = found ? found.value : "";
+  });
+}
+
+Object.entries(SETTING_FIELDS).forEach(([name, id]) => {
+  $(id).addEventListener("input", () => {
+    let settings = [];
+    try { settings = parseSettings($("serving-settings").value); } catch { settings = []; }
+    settings = settings.filter((s) => s.name !== name);
+    const value = $(id).value.trim();
+    if (value) settings.push({ name, value });
+    $("serving-settings").value = settings.map((s) => `${s.name} = ${s.value}`).join("\n");
+    $("serving-settings").dataset.userEdited = "1";
+    scheduleWorkflowRefresh();
+  });
+});
+$("serving-settings").addEventListener("input", renderSettings);
+
+// --- identify the model file you used ----------------------------------------
+
+$("weights-list").addEventListener("click", () => action(async () => {
+  const directory = $("weights-folder").value.trim();
+  if (!directory) throw new Error("Enter the folder that holds the model file.");
+  const report = await api("/api/weight-identity", { directory });
+  $("weights-result").textContent = report.message;
+  $("weights-files").replaceChildren(...(report.candidates || []).map((candidate) => {
+    const li = document.createElement("li");
+    const label = document.createElement("label"); label.className = "check";
+    const box = document.createElement("input"); box.type = "checkbox"; box.value = candidate.name;
+    const text = document.createElement("span");
+    text.textContent = `${candidate.name} · ${formatBytes(candidate.bytes)}`;
+    label.append(box, text); li.append(label);
+    return li;
+  }));
+  $("weights-hash").hidden = !(report.candidates || []).length;
+}));
+
+$("weights-hash").addEventListener("click", () => action(async () => {
+  const files = [...document.querySelectorAll("#weights-files input:checked")].map((box) => box.value);
+  if (!files.length) throw new Error("Select the file you ran. A model split into parts needs every part.");
+  $("weights-result").textContent = "Reading every byte of the selected file(s). For a large model this takes a few minutes.";
+  const report = await api("/api/weight-identity", { directory: $("weights-folder").value.trim(), files });
+  $("weights-manifest").value = JSON.stringify(report.manifest);
+  // The fingerprint identifies these bytes. It replaces nothing the person
+  // typed: a different revision already in the field is kept and flagged.
+  const result = fill(field("model_revision"), report.revision, "Weights revision", "fingerprint of the file you selected");
+  const count = (report.manifest && report.manifest.files || []).length;
+  $("weights-result").textContent = result && result.kept
+    ? `Identified ${count} file(s). The revision field already holds something you typed, so it was left alone; this file's fingerprint is ${report.revision}.`
+    : `Identified ${count} file(s) and recorded the fingerprint as this run's weights revision. It names these exact bytes, not their filenames.`;
+  scheduleWorkflowRefresh();
+}));
+
+// --- the summary --------------------------------------------------------------
+
+// Where each check's field is edited, so "Fill in" can take somebody there.
+const CHECK_FIELDS = {
+  model: "package-model", model_revision: '[name="model_revision"]',
+  framework_version: '[name="framework_version"]', submitter: "submitter",
+  serving: "serving-os", quantization: '[name="quantization"]',
+};
+
+function goTo(target) {
+  $("review-all-details").open = true;
+  const element = target.startsWith("[") ? document.querySelector(`#package-form ${target}`) : $(target);
+  if (!element) return;
+  const enclosing = element.closest && element.closest("details");
+  if (enclosing) enclosing.open = true;
+  if (element.scrollIntoView) element.scrollIntoView({ block: "center" });
+  if (element.focus) element.focus();
+}
+
+function renderReviewSummary() {
+  if (!$("review-summary")) return;
+  const job = selectedJob;
+  const facts = [];
+  let devices = [];
+  try { devices = parseAccelerators($("serving-accelerators").value); } catch { devices = []; }
+  const used = devices.filter((d) => d.role === "inference");
+  const placement = { "cpu-only": "CPU only", "gpu-only": "GPU only", "cpu-gpu-offload": "split CPU/GPU" }[$("serving-placement").value];
+  const hardware = used.length ? used.map((d) => d.model).join(" + ")
+    : devices.length ? `${devices.map((d) => d.model).join(" + ")} (not yet confirmed as doing the inference)`
+    : $("serving-cpu").value.trim() ? `CPU · ${$("serving-cpu").value.trim()}` : "Not described yet";
+  facts.push(["Hardware", placement ? `${hardware} · ${placement}` : hardware]);
+  const quant = field("quantization").value.trim();
+  facts.push(["Model", `${$("package-model").value.trim() || "Not set"}${quant ? ` · ${quant}` : " · quantisation not recorded"}`]);
+  const results = job && job.summary && job.summary.results;
+  facts.push(["Performance", results
+    ? `${Number(results.output_tokens_per_second).toFixed(1)} tok/s output · first token p50 ${Math.round(results.latency_ms.ttft.p50)} ms · ${results.requests.succeeded}/${results.requests.attempted} requests`
+    : "No measurements on this run"]);
+  facts.push(["Submitter", $("submitter").value.trim() || "Not set"]);
+  $("review-facts").replaceChildren(...facts.flatMap(([label, value]) => {
+    const dt = document.createElement("dt"), dd = document.createElement("dd");
+    dt.textContent = label; dd.textContent = value;
+    return [dt, dd];
+  }));
+
+  // Readiness and what is left both come from the one workflow report, for
+  // the run that is selected. Nothing here decides anything on its own.
+  const report = workflow || {};
+  const checks = report.checks || [];
+  const blocking = report.blocking || {};
+  const blockedPackage = (blocking.package || []).length > 0;
+  const blockedSubmit = (blocking.submit || []).length > 0;
+  $("review-readiness").textContent = !job ? "Choose a run to review."
+    : !results ? "This run has no measurements, so there is nothing to package."
+    : blockedPackage ? "Not ready to package yet. What is left is below."
+    : blockedSubmit ? "Ready to package. Submitting publicly still needs what is listed below."
+    : "Ready to package and submit.";
+  $("review-readiness").className = `review-readiness ${!blockedPackage && !blockedSubmit && results ? "ok" : "pending"}`;
+
+  const needed = [];
+  const blockers = new Set([...(blocking.package || []), ...(blocking.submit || [])]);
+  // Requirements a person cannot type -- the run's own acceptance, whether it
+  // was interrupted -- are facts about the run, decided when it is packaged.
+  // They are said once, in the readiness line, rather than listed as fields.
+  const RUN_FACTS = new Set(["acceptance", "uninterrupted", "measurements"]);
+  const pendingFacts = checks.filter((check) => blockers.has(check.id) && RUN_FACTS.has(check.id));
+  checks.filter((check) => blockers.has(check.id) && !RUN_FACTS.has(check.id)).forEach((check) => {
+    // While a likely match is waiting to be confirmed, that question is the
+    // model's open item; the gate's longer explanation would say it twice.
+    if (check.id === "catalog" && aliasSuggestion) return;
+    const target = CHECK_FIELDS[check.field] || (check.id === "eligibility" ? "custom-model-id" : null);
+    needed.push({ label: check.label, detail: check.recovery || check.detail || "", target });
+  });
+  if (pendingFacts.length && results) {
+    $("review-readiness").textContent += " "
+      + pendingFacts.map((check) => check.id === "acceptance"
+        ? "Whether the run met the profile's acceptance thresholds is checked when you package it."
+        : `${check.label}: ${check.recovery || check.detail || "checked when you package"}`).join(" ");
+  }
+  if (aliasSuggestion && blockers.has("catalog")) {
+    needed.unshift({
+      label: `Is this ${aliasSuggestion.id}?`,
+      detail: `${aliasSuggestion.reason} This names the model, not the file: the exact quantised weights you ran are recorded separately, under weights revision.`,
+      action: { text: `Use ${aliasSuggestion.id}`, run: () => {
+        $("package-model").value = aliasSuggestion.id; $("package-model").dataset.userEdited = "1";
+        aliasSuggestion = null; scheduleWorkflowRefresh(); renderReviewSummary();
+      } },
+    });
+  }
+  // The page's own questions, which packaging would otherwise refuse with an
+  // error: a card nobody has said did the inference, and a split nobody
+  // has described. They gate nothing new; they ask before the validator does.
+  if (devices.some((d) => d.role === "unknown")) {
+    needed.push({ label: "Which card did the inference?",
+      detail: "A card being present is not evidence it was used. Set each card to what it did — the one that ran the model to “Did the inference”, any others to “Installed, not used”.",
+      target: "accelerator-cards" });
+  }
+  if (devices.length && $("serving-placement").value === "unknown") {
+    needed.push({ label: "Where were the weights?",
+      detail: "Your server knows: all on the card (GPU only), or split between the card and the CPU. OmoBench cannot read this from LM Studio.",
+      target: "serving-placement" });
+  }
+  if ($("serving-placement").value === "cpu-gpu-offload" && !$("serving-placement-detail").value.trim()) {
+    needed.push({ label: "How were the weights split?", detail: "As your server reports it, e.g. 32 of 49 layers on GPU.",
+      target: "serving-placement-detail" });
+  }
+  $("review-needed").hidden = !job || needed.length === 0;
+  $("review-needed-list").replaceChildren(...needed.map((item) => {
+    const li = document.createElement("li");
+    li.className = "status-item fail";
+    const strong = document.createElement("strong"), span = document.createElement("span");
+    strong.textContent = item.label; span.textContent = item.detail;
+    li.append(strong, span);
+    if (item.action || item.target) {
+      const button = document.createElement("button");
+      button.type = "button"; button.className = "secondary";
+      button.textContent = item.action ? item.action.text : "Fill in";
+      button.addEventListener("click", item.action ? item.action.run : () => goTo(item.target));
+      li.append(button);
+    }
+    return li;
+  }));
 }
 
 async function refreshWorkflow() {
@@ -515,9 +1036,13 @@ function renderCatalogStatus(proposal) {
   $("catalog-status").hidden = false;
   $("catalog-status-summary").textContent = proposal.summary;
   $("catalog-status").classList.toggle("error", Boolean(proposal.conflict));
+  const route = proposal.catalogued ? "Through the curated list"
+    : proposal.eligibility_declared ? "Through its declared licence and downloadability"
+    : proposal.document ? "Through a proposal for review"
+    : "Not settled yet: declare its licence and downloadability, or propose it";
   const rows = [
-    ["Is this model in the catalog?", proposal.catalogued ? "Yes" : "No"],
-    ["Does it need a proposal to be submitted?", proposal.required ? "Yes" : "No"],
+    ["On the curated list?", proposal.catalogued ? "Yes" : "No"],
+    ["How it can be published", route],
   ];
   if (proposal.conflict) rows.push(["Conflict", proposal.conflict]);
   $("catalog-status-items").replaceChildren(...rows.map(([label, value]) => {

@@ -64,3 +64,18 @@ pre{font-size:11px;background:#080f1c}
 .identity{margin:22px 0 6px;padding:18px;border:1px solid var(--line);border-radius:10px;background:#0e1829}
 .identity h3{margin:0 0 6px;font-size:14px}
 .identity .actions{margin-top:12px}
+/* Review & submit: one summary first, everything else behind a click. */
+.review-summary{border:1px solid var(--line);border-radius:10px;padding:18px 20px;background:#0d1728;margin:4px 0 18px}
+.review-facts{display:grid;grid-template-columns:120px 1fr;gap:6px 16px;margin:0}
+.review-facts dt{margin:0;color:var(--muted)}.review-facts dd{margin:0}
+.review-readiness{margin:14px 0 0;font-weight:600}.review-readiness.ok{color:#a6e3b4}.review-readiness.pending{color:var(--accent)}
+.review-summary .status-item button{margin-top:8px;padding:6px 12px;font-size:12px}
+.quiet-details{margin:12px 0}.quiet-details>summary{font-size:12px;color:var(--muted)}
+.field-title{font-size:12px;font-weight:600;margin:16px 0 6px;color:#d4dfef}
+.accelerator-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}
+.accelerator-card{border:1px solid var(--line);border-radius:8px;padding:12px 14px;background:#0c1423}
+.accelerator-title{margin:0 0 4px;font-weight:600;overflow-wrap:anywhere}
+.accelerator-card label{margin:8px 0}
+.weights-files{list-style:none;padding:0;margin:8px 0}.weights-files li{font-size:12px}
+.visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+@media(max-width:620px){.review-facts{grid-template-columns:1fr}.review-facts dd{margin-bottom:8px}}
