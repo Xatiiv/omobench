@@ -16,6 +16,10 @@ type Scenario = {
   ttft: [number, number];
   itl: [number, number];
   ram: number;
+  // The machine, where it is not simply this scenario's own name. Two
+  // scenarios sharing one lets the preview show the question OmoBench exists
+  // to ask: what does this computer do across the workloads it could run?
+  machine?: string;
   note?: string;
   overrides?: Partial<ResultRecord>;
 };
@@ -34,6 +38,16 @@ const SPLIT_SERVING: ServingEnvironment = {
   application: null,
   settings: [],
   runner: { cpu: "Example host CPU", kind: "native", os: "Example OS", ramGb: 64 },
+};
+
+// The same machine serving and measuring, with the weights undivided. Used by
+// the schema 1.2 example so that what distinguishes it is the model and its
+// eligibility, not a split placement nobody asked about.
+const PLAIN_SERVING: ServingEnvironment = {
+  ...SPLIT_SERVING,
+  accelerators: [],
+  placement: { mode: "cpu-only", detail: null },
+  settings: [{ name: "context_length", value: "8192", provenance: DECLARED }],
 };
 
 const scenarios: Scenario[] = [
@@ -82,6 +96,34 @@ const scenarios: Scenario[] = [
       quantization: "Example Q8",
     },
   },
+  // A model nobody curated, published on the eligibility it carries rather
+  // than on membership of a list. Schema 1.2, so the page has something to
+  // render those fields from; still fictional, still never registry evidence.
+  {
+    id: "example-uncatalogued", name: "Example uncatalogued model", device: "cpu",
+    output: 15, ttft: [800, 1350], itl: [60, 95], ram: 32,
+    // Deliberately the same machine as the reference: a second workload on
+    // one computer, which is the comparison this project is for.
+    machine: "Example CPU setup A",
+    overrides: {
+      schemaVersion: "1.2", catalogStatus: "uncatalogued", catalogStatusRecorded: true,
+      model: "example-org/Illustrative-Uncurated-7B",
+      modelRevision: "example-revision-3",
+      modelSource: "https://example.invalid/illustrative-uncurated-weights.gguf",
+      serving: PLAIN_SERVING,
+      eligibility: {
+        baseModel: null,
+        family: "Illustrative",
+        licence: "apache-2.0",
+        licenceUrl: "https://example.invalid/illustrative-licence",
+        modality: "text-generation",
+        parameterClass: "7B",
+        publisher: "example-org",
+        source: "https://example.invalid/illustrative-uncurated",
+        weightsPubliclyDownloadable: true,
+      },
+    },
+  },
 ];
 
 export const comparisonExamples: ComparisonEntry[] = scenarios.map((s, index) => ({
@@ -101,7 +143,7 @@ export const comparisonExamples: ComparisonEntry[] = scenarios.map((s, index) =>
     runtimeArguments: [],
     configurationFingerprint: `sha256:${String(index).repeat(64)}`,
     executionDevice: s.device as "cpu" | "gpu",
-    hardware: { cpu: s.device === "cpu" ? s.name : "Example host CPU", display: s.name, ramGb: s.ram, os: "Example OS", driverVersion: null,
+    hardware: { cpu: s.device === "cpu" ? (s.machine ?? s.name) : "Example host CPU", display: s.machine ?? s.name, ramGb: s.ram, os: "Example OS", driverVersion: null,
       gpus: s.device === "gpu" ? [{ count: 1, memoryGb: 16, model: "Example GPU", vendor: "other" }] : [] },
     outputTokensPerSecond: s.output,
     ttftP50: s.ttft[0], ttftP95: s.ttft[1], itlP50: s.itl[0], itlP95: s.itl[1],
@@ -112,9 +154,13 @@ export const comparisonExamples: ComparisonEntry[] = scenarios.map((s, index) =>
     // environment either: they are shaped like a schema 1.0 record, where none
     // of this was collected, rather than inventing a machine. The two that do
     // carry one are the ones whose point is what it records.
-    schemaVersion: "1.0", catalogStatus: "catalogued", metadataDeclaredAfterExecution: false,
+    schemaVersion: "1.0", catalogStatus: "catalogued", catalogStatusRecorded: false,
+    metadataDeclaredAfterExecution: false,
     hardwareDetection: null,
     serving: null, servedModelId: null, tokenizer: null, weights: null, execution: null,
+    // Schema 1.0 collected no eligibility facts. These examples say so rather
+    // than implying somebody declared them.
+    eligibility: null,
     transportRecorded: false,
     transport: { bridgeVersion: null, kind: "direct", overheadIncluded: false, protocol: "Not recorded" },
     ...s.overrides,

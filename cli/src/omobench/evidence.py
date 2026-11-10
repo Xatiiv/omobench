@@ -215,6 +215,24 @@ def _accelerators(result: dict[str, Any], environment: dict[str, Any] | None) ->
     return {"id": "accelerators", "title": "What ran the weights", "rows": rows}
 
 
+# Three different statements about the same model, kept distinct. A 1.0 result
+# has no status of its own: being catalogued was the condition of its
+# publication, so that is what its row says and nothing more.
+CATALOG_STATUS = {
+    "catalogued": "Catalogued",
+    "proposed": "Proposed — awaiting review",
+    "uncatalogued": "Not catalogued — published on its declared eligibility",
+}
+
+CATALOG_STATUS_NOTE = {
+    "catalogued": "",
+    "proposed": "This model is not in the catalog. The bundle carries a proposal for "
+                "review; nothing here makes it an eligible model.",
+    "uncatalogued": "This model is not in the catalog and is not asking to be. What made it "
+                    "publishable is the eligibility it declares, not a list it belongs to.",
+}
+
+
 def _model(result: dict[str, Any]) -> dict[str, Any]:
     model = result.get("model") or {}
     weights = model.get("weights")
@@ -226,12 +244,9 @@ def _model(result: dict[str, Any]) -> dict[str, Any]:
              provenance="contributor-declared",
              note="A serving alias. It is not a claim about which weights were loaded."),
         _row("Catalog status",
-             "Proposed — awaiting review" if status == "proposed"
-             else "Catalogued" if status else None,
+             CATALOG_STATUS.get(status, "Catalogued") if status else None,
              provenance="contributor-declared" if status else None,
-             note="This model is not in the catalog. The bundle carries a proposal for "
-                  "review; nothing here makes it an eligible model."
-                  if status == "proposed" else ""),
+             note=CATALOG_STATUS_NOTE.get(status, "") if status else ""),
         _row("Quantization", model.get("quantization"), provenance="contributor-declared"),
     ]
     if weights is None:
@@ -292,6 +307,46 @@ def _runtime(result: dict[str, Any], environment: dict[str, Any] | None) -> dict
     return {"id": "runtime", "title": "What served it", "rows": rows}
 
 
+def _eligibility(result: dict[str, Any]) -> dict[str, Any]:
+    """What made this model publishable, where the result carries it itself."""
+    declared = (result.get("model") or {}).get("eligibility")
+    version = result.get("schema_version")
+    if not isinstance(declared, dict):
+        note = ("This result is catalogued, so the catalog's own record of the licence and "
+                "modality applies. It carries no separate eligibility block."
+                if version == "1.2" else
+                f"Schema {version} collected none of this. A result from that era was "
+                "publishable because the model was on the curated list, which was the whole "
+                "test.")
+        return {"id": "eligibility", "title": "What made it publishable",
+                "rows": [_row("Eligibility", None, note=note)]}
+    downloadable = declared.get("weights_publicly_downloadable")
+    return {"id": "eligibility", "title": "What made it publishable", "rows": [
+        # Every one of these is the contributor's word. This shows what a
+        # reviewer would read; it does not fetch the licence or the weights.
+        _row("Licence", declared.get("licence"), provenance="contributor-declared",
+             note="Copied from the publisher, not interpreted."),
+        _row("Licence text", declared.get("licence_url"), provenance="contributor-declared"),
+        _row("Weights publicly downloadable",
+             None if downloadable is None else ("Yes" if downloadable else "No"),
+             provenance="contributor-declared",
+             note="Accepting the publisher's terms counts; a gated repository still qualifies."
+                  if downloadable else
+                  "Nobody else can obtain these weights, so nobody else can repeat this run."),
+        _row("Modality", declared.get("modality"), provenance="contributor-declared",
+             note="The only modality OmoBench's profiles measure."),
+        _row("Publisher", declared.get("publisher"), provenance="contributor-declared"),
+        _row("Where the weights come from", declared.get("source"),
+             provenance="contributor-declared"),
+        _row("Family", declared.get("family"), provenance="contributor-declared"),
+        _row("Parameter class", declared.get("parameter_class"),
+             provenance="contributor-declared",
+             note="A label the publisher states, never a measurement, and never a claim "
+                  "about answers."),
+        _row("Base model", declared.get("base_model"), provenance="contributor-declared"),
+    ]}
+
+
 def _tokenizer(result: dict[str, Any]) -> dict[str, Any]:
     tokenizer = (result.get("model") or {}).get("tokenizer")
     if tokenizer is None:
@@ -347,7 +402,7 @@ def summarize(result: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(result, dict):
         raise ValueError("A result summary needs the result object.")
     version = result.get("schema_version")
-    environment = result.get("environment") if version == "1.1" else None
+    environment = result.get("environment") if version in {"1.1", "1.2"} else None
     if environment is not None and not isinstance(environment, dict):
         raise ValueError("This result's environment is not an object.")
     qualifications = [STANDING_NOTE]
@@ -361,6 +416,16 @@ def summarize(result: dict[str, Any]) -> dict[str, Any]:
         qualifications.append(
             "This model is not catalogued. The bundle proposes it for review, which is a "
             "separate decision from accepting this result.")
+    if (result.get("model") or {}).get("catalog_status") == "uncatalogued":
+        qualifications.append(
+            "This model is not catalogued and is not asking to be. It was accepted on the "
+            "eligibility facts this bundle carries, which are listed below.")
+    eligibility = (result.get("model") or {}).get("eligibility")
+    if isinstance(eligibility, dict) and eligibility.get(
+            "weights_publicly_downloadable") is False:
+        qualifications.append(
+            "This bundle says its weights are not publicly downloadable, so nobody else can "
+            "repeat this run against the same weights.")
     if (result.get("submission") or {}).get("packaging", {}).get(
             "metadata_declared_after_execution"):
         qualifications.append(
@@ -372,6 +437,7 @@ def summarize(result: dict[str, Any]) -> dict[str, Any]:
             _environments(result, environment),
             _accelerators(result, environment),
             _model(result),
+            _eligibility(result),
             _runtime(result, environment),
             _tokenizer(result),
             _transport(result, environment),

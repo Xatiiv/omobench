@@ -644,8 +644,13 @@ class Controller:
             run = self.run_directory(job_id)
             paths.append(run / "guidellm.stdout.log")
             job["run_path"] = run.relative_to(self.root).as_posix()
+            # Whether a normalized result exists yet. The panel reads this
+            # rather than asking for an evidence summary that packaging has
+            # not produced, which the evidence endpoint rightly refuses.
+            job["packaged"] = (run / "result.json").is_file()
         except UIError:
             pass
+        job.setdefault("packaged", False)
         for path in paths:
             if self._inside(path).is_file():
                 with path.open("rb") as stream:
@@ -858,11 +863,18 @@ class Controller:
 
         catalogued = model in catalog
         conflict = None if not model else model_proposal.conflicts(model, catalog)
+        # A third route exists: the result can carry what makes the model
+        # publishable. Where that is complete, a proposal is one way of
+        # answering a question that has already been answered.
+        eligibility = data.get("eligibility")
+        declared = (isinstance(eligibility, dict)
+                    and not workflow.eligibility_gaps(eligibility))
         status = {
             "model": model or None,
             "served_model_id": served or None,
             "catalogued": catalogued,
-            "required": bool(model) and not catalogued,
+            "required": bool(model) and not catalogued and not declared,
+            "eligibility_declared": declared,
             "conflict": conflict if not catalogued else None,
             "catalog": catalog,
             "missing": [],
@@ -880,11 +892,19 @@ class Controller:
         if not model:
             status["summary"] = "Choose the canonical model identity first."
             return status
+        if declared and declaration is None:
+            status["summary"] = (
+                f"{model} is not in the OmoBench catalog and does not need to be. This result "
+                "carries what makes it publishable: its licence, where that licence can be "
+                "read, that the weights are publicly downloadable, and its modality. A "
+                "proposal is optional and asks for something else -- that the model be added "
+                "to the curated list.")
+            return status
         if declaration is None:
             status["summary"] = (
                 f"{model} is not in the OmoBench catalog. Running this benchmark and saving "
-                "its evidence need nothing from the catalog; submitting it publicly needs "
-                "either a catalogued identity or a proposal.")
+                "its evidence need nothing from the catalog; submitting it publicly needs a "
+                "catalogued identity, this model's own eligibility, or a proposal.")
             status["missing"] = ["family", "parameter_class", "source", "licence", "rationale",
                                  "weights_publicly_downloadable"]
             return status
@@ -1081,6 +1101,10 @@ class Controller:
             "submitter": values.get("submitter") if isinstance(values.get("submitter"), str) else None,
             "serving": values.get("serving") if isinstance(values.get("serving"), dict) else None,
             "proposal": self.proposal_status(values) if values.get("proposal") is not None else None,
+            # The custom-model panel's declaration, as sent. Absent means
+            # nobody declared anything, which is not the same as declaring
+            # that there is nothing to declare.
+            "eligibility": values.get("eligibility") if isinstance(values.get("eligibility"), dict) else None,
         }
 
     def evidence_location(self, job_id: str | None) -> str | None:
@@ -1107,10 +1131,11 @@ class Controller:
         return workflow.package_checks(
             job=job, model=inputs["model"], revision=inputs["revision"],
             framework=inputs["framework"], framework_version=inputs["framework_version"],
-            serving=inputs["serving"],
+            serving=inputs["serving"], eligibility=inputs["eligibility"],
         ) + workflow.submit_checks(
             job=job, model=inputs["model"], catalog=self.catalog_models(),
             proposal=inputs["proposal"], submitter=inputs["submitter"],
+            eligibility=inputs["eligibility"],
         )
 
     def publication_requirements(self, job_id: str, data: dict | None = None) -> dict:
@@ -1340,7 +1365,7 @@ class Controller:
         with this, and the packager says so if it is missing.
         """
         declaration: dict = {}
-        for name in ("serving", "weights", "proposal"):
+        for name in ("serving", "weights", "proposal", "eligibility"):
             value = data.get(name)
             if value is None:
                 continue
@@ -1369,8 +1394,12 @@ class Controller:
             declaration.setdefault("serving", {})["probe"] = dict(probe)
         status = data.get("catalog_status")
         if status is not None:
-            if status not in {"catalogued", "proposed"}:
-                raise UIError("Catalog status must be 'catalogued' or 'proposed'.")
+            # Three statuses now. "uncatalogued" is a model nobody curated and
+            # nobody is being asked to curate: what makes it publishable rides
+            # with the result, in the eligibility block above.
+            if status not in {"catalogued", "proposed", "uncatalogued"}:
+                raise UIError(
+                    "Catalog status must be 'catalogued', 'proposed' or 'uncatalogued'.")
             declaration["catalog_status"] = status
         if not declaration:
             # Nothing was declared at all. A direct run keeps its existing
@@ -1640,11 +1669,10 @@ class UIHandler(BaseHTTPRequestHandler):
             # with a request -- so a redirect is the one way to lose it.
             static = {"/": ("index.html", "text/html; charset=utf-8"),
                       "/guided": ("index.html", "text/html; charset=utf-8"),
-                      "/guided.js": ("guided.js", "text/javascript; charset=utf-8"),
+                      "/managed-setup.js": ("managed-setup.js", "text/javascript; charset=utf-8"),
                       "/community.js": ("community.js", "text/javascript; charset=utf-8"),
                       "/dashboard.js": ("dashboard.js", "text/javascript; charset=utf-8"),
                       "/workflow.js": ("workflow.js", "text/javascript; charset=utf-8"),
-                      "/guided.css": ("guided.css", "text/css; charset=utf-8"),
                       "/dashboard.css": ("dashboard.css", "text/css; charset=utf-8"),
                       "/favicon.svg": ("favicon.svg", "image/svg+xml"),
                       "/advanced": ("index.html", "text/html; charset=utf-8"),

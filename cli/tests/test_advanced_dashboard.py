@@ -285,16 +285,19 @@ class AdvancedDashboardTests(unittest.TestCase):
     def test_every_missing_publication_requirement_is_listed_at_once(self):
         checklist = self.states["checklist"]
         self.assertEqual(len([item for item in checklist["items"] if item.startswith("fail:")]), 3)
-        self.assertIn("fail:Canonical model ID is in the OmoBench catalog", checklist["items"])
+        self.assertIn("fail:This model may be published here", checklist["items"])
         self.assertIn("fail:Immutable revision of the actual weights source", checklist["items"])
         self.assertIn("3 requirements still missing", checklist["summary"])
         self.assertIn("Save local report", checklist["summary"])
 
     def test_viewing_a_run_never_packages_uploads_or_executes(self):
-        # Every one of these is a read. /api/workflow takes a body because it
-        # reads the form's current values, and computes; it writes nothing.
+        # Every one of these is a read. /api/workflow and /api/workloads take
+        # a body because they read the form's current values and compute from
+        # them; neither writes anything, and in particular /api/workloads
+        # downloads nothing -- it answers what this hardware could run.
         allowed_posts = {"POST /api/runs/<job>/cancel", "POST /api/runs/<job>/requirements",
-                         "POST /api/tokenizer-check", "POST /api/workflow"}
+                         "POST /api/tokenizer-check", "POST /api/workflow",
+                         "POST /api/workloads"}
         posts = {entry for entry in self.states["allRequests"] if entry.startswith("POST")}
         self.assertTrue(posts <= allowed_posts, posts)
 

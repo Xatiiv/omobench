@@ -174,7 +174,20 @@ class GateSeparationTests(unittest.TestCase):
         checks = self.package() + self.submit()
         self.assertEqual(ids(checks, "run"), [])
         self.assertEqual(ids(checks, "package"), [])
-        self.assertIn("proposal", ids(checks, "submit"))
+        self.assertIn("catalog", ids(checks, "submit"))
+
+    def test_the_two_routes_are_alternatives_and_never_both_demanded(self) -> None:
+        """One gate, two ways through it. Blocking on both at once would ask
+        for a proposal *and* a declaration, which is the opposite of the rule."""
+        blocking = ids(self.submit(), "submit")
+        self.assertIn("catalog", blocking)
+        self.assertNotIn("proposal", blocking)
+        self.assertNotIn("eligibility", blocking)
+
+    def test_a_route_started_and_left_unfinished_is_what_blocks(self) -> None:
+        self.assertIn("proposal", ids(self.submit(proposal=PARTIAL_PROPOSAL), "submit"))
+        partial = {**self.ELIGIBLE, "licence": ""}
+        self.assertIn("eligibility", ids(self.submit(eligibility=partial), "submit"))
 
     def test_a_model_awaiting_review_never_blocks_packaging(self) -> None:
         checks = self.package() + self.submit(proposal=COMPLETE_PROPOSAL)
@@ -196,6 +209,60 @@ class GateSeparationTests(unittest.TestCase):
         checks = self.submit(model="Qwen/Qwen3-4B")
         self.assertNotIn("proposal", [item["id"] for item in checks])
         self.assertEqual(find(checks, "catalog")["state"], "ok")
+
+    # -- judged by the requirements, not by membership of a list ---------------
+
+    ELIGIBLE = {
+        "licence": "apache-2.0",
+        "licence_url": "https://huggingface.co/acme/private-v9/blob/main/LICENSE",
+        "weights_publicly_downloadable": True,
+        "modality": "text-generation",
+    }
+
+    def test_a_declared_eligibility_opens_submission_without_a_proposal(self) -> None:
+        """The whole point: the curated list is a recommendation, not the set
+        of models allowed to exist."""
+        checks = self.submit(eligibility=self.ELIGIBLE)
+        self.assertEqual(find(checks, "catalog")["state"], "ok")
+        # The gate itself is no longer among the things holding submission up.
+        self.assertNotIn("catalog", ids(checks, "submit"))
+        self.assertNotIn("eligibility", ids(checks, "submit"))
+        self.assertNotIn("proposal", [item["id"] for item in checks])
+        self.assertEqual(find(checks, "eligibility")["state"], "ok")
+        self.assertIn("the eligibility this result declares",
+                      find(checks, "catalog")["detail"])
+
+    def test_an_incomplete_eligibility_names_the_requirement_it_is_missing(self) -> None:
+        for field, value, expected in [
+            ("licence", "   ", "licence"),
+            ("licence_url", "http://example.invalid/licence", "licence_url"),
+            ("weights_publicly_downloadable", False, "weights_publicly_downloadable"),
+            ("modality", "image-text-to-text", "modality"),
+        ]:
+            with self.subTest(field=field):
+                item = find(self.submit(eligibility={**self.ELIGIBLE, field: value}),
+                            "eligibility")
+                self.assertEqual(item["state"], "blocked")
+                self.assertIn(expected, item["observed"])
+                self.assertEqual(item["blocks"], "submit")
+
+    def test_nothing_declared_is_unknown_rather_than_refused(self) -> None:
+        """Nobody has said anything yet. That is not a claim that the model has
+        no licence."""
+        item = find(self.submit(), "eligibility")
+        self.assertEqual(item["state"], "unknown")
+        self.assertIsNone(item["observed"])
+
+    def test_a_catalogued_model_is_asked_for_neither_route(self) -> None:
+        ids_present = [item["id"] for item in self.submit(model="Qwen/Qwen3-4B")]
+        self.assertNotIn("eligibility", ids_present)
+        self.assertNotIn("proposal", ids_present)
+
+    def test_the_panel_never_verifies_what_it_records(self) -> None:
+        """It checks that the facts are stated. A reviewer reads the licence."""
+        item = find(self.submit(eligibility=self.ELIGIBLE), "eligibility")
+        self.assertIn("contributor's word", item["detail"])
+        self.assertIn("Nothing here fetches a licence or a weight", item["detail"])
 
     def test_missing_packaging_metadata_blocks_packaging_not_running(self) -> None:
         checks = self.package(revision=None, framework_version=None)

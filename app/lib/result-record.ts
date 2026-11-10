@@ -7,7 +7,7 @@ export type RegistryArtifact = {
 };
 
 export type ExecutionDevice = "cpu" | "gpu";
-export type SchemaVersion = "1.0" | "1.1";
+export type SchemaVersion = "1.0" | "1.1" | "1.2";
 export type TransportKind = "direct" | "windows-wsl-stdio-bridge";
 export type ServingRelationship = "same-host" | "windows-host-wsl-runner";
 export type PlacementMode = "cpu-only" | "gpu-only" | "cpu-gpu-offload" | "unknown";
@@ -32,6 +32,22 @@ export type ServingEnvironment = {
   relationship: ServingRelationship;
   runner: { cpu: string | null; kind: "native" | "wsl2"; os: string; ramGb: number | null };
   settings: Array<{ name: string; provenance: Provenance; value: string }>;
+};
+
+// Schema 1.2. What makes a model publishable, carried by the result rather
+// than by membership of the curated list. A 1.0 or 1.1 result has none of
+// this, because nothing collected it; absent is not "ineligible", it is the
+// older arrangement where the list itself was the gate.
+export type ModelEligibility = {
+  baseModel: string | null;
+  family: string | null;
+  licence: string;
+  licenceUrl: string;
+  modality: "text-generation";
+  parameterClass: string | null;
+  publisher: string | null;
+  source: string | null;
+  weightsPubliclyDownloadable: boolean;
 };
 
 export type ExecutionRecord = {
@@ -96,7 +112,16 @@ export type ResultRecord = {
   // A 1.0 result records no catalog status. It could not have been published
   // without being catalogued, because the registry refused anything else, so
   // this states what that gate established rather than inventing a fact.
-  catalogStatus: "catalogued" | "proposed";
+  // "uncatalogued" exists only from 1.2: a model nobody curated, submitted
+  // on its own eligibility rather than on a list it is not asking to join.
+  catalogStatus: "catalogued" | "proposed" | "uncatalogued";
+  // Whether the result itself stated a status. A 1.0 bundle never did: being
+  // catalogued was the condition of its publication, which is a fact about the
+  // gate, not a line the contributor wrote. Shown as "not recorded" rather
+  // than as a declaration nobody made.
+  catalogStatusRecorded: boolean;
+  // Present only on a 1.2 result. See ModelEligibility.
+  eligibility: ModelEligibility | null;
   // Schema 1.0 recorded one coarse detection state for the whole hardware
   // block. It is the only thing a 1.0 result says about where its facts came
   // from, so it is kept rather than discarded.
@@ -267,7 +292,7 @@ function readExecution(
 ): ExecutionRecord | null {
   const execution = value.execution;
   if (execution === undefined || execution === null) return null;
-  if (schemaVersion !== "1.1") {
+  if (schemaVersion === "1.0") {
     throw new Error(`Local result ${sourcePath} is schema 1.0 and cannot carry an execution record.`);
   }
   if (!isObject(execution)) throw new Error(`Local result ${sourcePath} has an invalid execution record.`);
@@ -442,12 +467,70 @@ function readTokenizer(model: JsonObject, sourcePath: string): TokenizerIdentity
   };
 }
 
+// Eligibility is read strictly or refused. A reviewer decides on these four
+// facts, so a result that states them loosely -- a missing licence URL, a
+// modality this project does not measure -- is not displayed as if it had
+// answered them.
+function readEligibility(
+  model: JsonObject,
+  schemaVersion: SchemaVersion,
+  sourcePath: string,
+): ModelEligibility | null {
+  const eligibility = model.eligibility;
+  if (eligibility === undefined || eligibility === null) return null;
+  if (schemaVersion !== "1.2") {
+    throw new Error(`Local result ${sourcePath} is schema ${schemaVersion} and cannot carry model eligibility.`);
+  }
+  if (!isObject(eligibility)) throw new Error(`Local result ${sourcePath} has an invalid eligibility record.`);
+  const licenceUrl = textField(eligibility, "licence_url", sourcePath);
+  if (!licenceUrl.startsWith("https://")) {
+    throw new Error(`Local result ${sourcePath} has a licence URL a reviewer cannot open.`);
+  }
+  if (eligibility.modality !== "text-generation") {
+    throw new Error(`Local result ${sourcePath} declares a modality OmoBench's profiles do not measure.`);
+  }
+  if (typeof eligibility.weights_publicly_downloadable !== "boolean") {
+    throw new Error(`Local result ${sourcePath} does not say whether its weights are publicly downloadable.`);
+  }
+  return {
+    baseModel: optionalTextField(eligibility, "base_model", sourcePath),
+    family: optionalTextField(eligibility, "family", sourcePath),
+    licence: textField(eligibility, "licence", sourcePath),
+    licenceUrl,
+    modality: "text-generation",
+    parameterClass: optionalTextField(eligibility, "parameter_class", sourcePath),
+    publisher: optionalTextField(eligibility, "publisher", sourcePath),
+    source: optionalTextField(eligibility, "source", sourcePath),
+    weightsPubliclyDownloadable: eligibility.weights_publicly_downloadable,
+  };
+}
+
+// A 1.0 result records no catalog status at all; it could not have been
+// published without being catalogued, so that is what its gate established.
+// "uncatalogued" is a 1.2 statement and is refused on anything older rather
+// than quietly read as "catalogued".
+function readCatalogStatus(
+  model: JsonObject,
+  schemaVersion: SchemaVersion,
+  sourcePath: string,
+): "catalogued" | "proposed" | "uncatalogued" {
+  const status = model.catalog_status;
+  if (status === "proposed") return "proposed";
+  if (status === "uncatalogued") {
+    if (schemaVersion !== "1.2") {
+      throw new Error(`Local result ${sourcePath} is schema ${schemaVersion} and cannot be uncatalogued.`);
+    }
+    return "uncatalogued";
+  }
+  return "catalogued";
+}
+
 export function readResultRecord(sourcePath: string, value: unknown): ResultRecord {
   if (!isObject(value)) {
     throw new Error(`Local result ${sourcePath} must contain a JSON object.`);
   }
-  if (value.schema_version !== "1.0" && value.schema_version !== "1.1") {
-    throw new Error(`Local result ${sourcePath} must use OmoBench schema version 1.0 or 1.1.`);
+  if (value.schema_version !== "1.0" && value.schema_version !== "1.1" && value.schema_version !== "1.2") {
+    throw new Error(`Local result ${sourcePath} must use OmoBench schema version 1.0, 1.1 or 1.2.`);
   }
   const schemaVersion = value.schema_version as SchemaVersion;
 
@@ -464,8 +547,10 @@ export function readResultRecord(sourcePath: string, value: unknown): ResultReco
   const artifacts = objectField(value, "artifacts", sourcePath);
   const executionDevice = executionDeviceField(value, sourcePath);
   const environment = value.environment;
-  if (schemaVersion === "1.1") {
-    if (!isObject(environment)) throw new Error(`Local result ${sourcePath} is schema 1.1 but has no environment.`);
+  if (schemaVersion !== "1.0") {
+    if (!isObject(environment)) {
+      throw new Error(`Local result ${sourcePath} is schema ${schemaVersion} but has no environment.`);
+    }
   } else if (environment !== undefined) {
     // A stored 1.0 bundle keeps the meaning it was written with. It cannot
     // acquire serving metadata in place, because nobody collected any.
@@ -512,7 +597,9 @@ export function readResultRecord(sourcePath: string, value: unknown): ResultReco
       : gpus.map((gpu) => `${gpu.count}× ${gpu.model} · ${gpu.memoryGb} GB each`).join(" + ");
 
   const record: ResultRecord = {
-    catalogStatus: model.catalog_status === "proposed" ? "proposed" : "catalogued",
+    catalogStatus: readCatalogStatus(model, schemaVersion, sourcePath),
+    catalogStatusRecorded: typeof model.catalog_status === "string",
+    eligibility: readEligibility(model, schemaVersion, sourcePath),
     hardwareDetection: isObject(hardware.detection)
       ? optionalTextField(hardware.detection, "hardware", sourcePath) : null,
     metadataDeclaredAfterExecution:
@@ -612,8 +699,14 @@ export function readResultRecord(sourcePath: string, value: unknown): ResultReco
       throw new Error("A split CPU/GPU placement has to say how the weights were split.");
     }
   }
-  if (record.catalogStatus === "proposed" && record.schemaVersion !== "1.1") {
-    throw new Error("Only a schema 1.1 result can propose a model for the catalog.");
+  if (record.catalogStatus === "proposed" && record.schemaVersion === "1.0") {
+    throw new Error("A schema 1.0 result cannot propose a model for the catalog.");
+  }
+  // An uncatalogued result stands on its eligibility block. Without one there
+  // is nothing to stand on, and the result says neither that it is curated nor
+  // what would make it publishable.
+  if (record.catalogStatus === "uncatalogued" && !record.eligibility) {
+    throw new Error("An uncatalogued result has to carry the eligibility facts a reviewer reads.");
   }
   return record;
 }

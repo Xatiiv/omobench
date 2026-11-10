@@ -16,11 +16,14 @@ first-class, publishable OmoBench results, provided the model is in the
 ## Start here
 
 - **Install or update OmoBench:** [Setup guide](docs/quickstart.md).
-- **First time? Just run `omobench ui`:** it opens a guided benchmark by default, download and verify one reviewed CPU model, run it, understand the result, and
-  prepare a submission, with no server address, model revision, runtime argument,
-  or shell command to type. See [Guided CPU setup](docs/guided-launcher.md).
-- **Already run your own model server?** Open `/advanced` in the same panel, or
-  see the [Browser control guide](docs/browser-control.md), the
+- **First time? Just run `omobench ui`:** one page. It reads your hardware
+  first, then asks which workload to put on it. Choose a reviewed CPU model and
+  the panel downloads, verifies and runs it, explains the result and prepares a
+  submission, with no server address, model revision, runtime argument or shell
+  command to type. See [Guided CPU setup](docs/guided-launcher.md).
+- **Already run your own model server?** Same page: the "connect a server you
+  already run" form is on it. See the
+  [Browser control guide](docs/browser-control.md), the
   [guided workflow](docs/guided-workflow.md) and
   [CPU demo walkthrough](docs/local-demo.md) for that workflow.
 - **On Windows, prefer not to use a terminal?** The
@@ -38,24 +41,25 @@ first-class, publishable OmoBench results, provided the model is in the
 
 | Component | What it does | How it starts |
 | --- | --- | --- |
-| A reviewed managed CPU model | Downloads, verifies, and serves one pinned model + runtime for you | Automatic, from the panel's default guided page |
-| Your own model server (optional) | Loads weights and performs inference on CPU or GPU | Start llama.cpp, LM Studio, vLLM, or another compatible server separately, then connect from `/advanced` |
+| A reviewed managed CPU model | Downloads, verifies, and serves one pinned model + runtime for you | Automatic, from the panel, once you choose a workload it has a recipe for |
+| Your own model server (optional) | Loads weights and performs inference on CPU or GPU | Start llama.cpp, LM Studio, vLLM, or another compatible server separately, then connect from the same panel |
 | Local OmoBench panel | Runs the CLI, shows logs/results, and prepares submissions | `omobench ui`; normally `127.0.0.1:8765` |
 | Comparison website | Displays illustrative demo rows and a separate registry of committed results | Visit the hosted site, or use `npm run dev` locally |
 
-The guided page downloads and runs one reviewed CPU model for you; the advanced
-panel needs a model server you already run yourself and does not download models,
-start that server, or select its hardware for you. The website's **Run a
-benchmark** page explains how to launch the local panel; visiting the hosted
-site does not start programs on your computer.
+Choosing a reviewed workload lets the panel download and run that model for
+you; connecting your own server needs a model server you already run yourself,
+and the panel does not download models, start that server, or select its
+hardware for you in that case. The website's **Run a benchmark** page explains
+how to launch the local panel; visiting the hosted site does not start programs
+on your computer.
 
 ## Run through the browser
 
-`omobench ui` opens a **guided benchmark by default**, see
-[Guided CPU setup](docs/guided-launcher.md) for that walkthrough. The steps
-below describe the **advanced panel** at `/advanced`: connecting to a model
-server you already run yourself. Both panels run the same CLI, profiles, and
-GuideLLM version; only how you get to a running server differs.
+`omobench ui` opens **one page**. Choosing a reviewed workload hands the
+preparation to the panel, see [Guided CPU setup](docs/guided-launcher.md) for
+that walkthrough. The steps below describe the other route on the same page:
+connecting to a model server you already run yourself. Both run the same CLI,
+profiles and GuideLLM version; only how you get to a running server differs.
 
 ### 1. Prepare OmoBench
 
@@ -118,8 +122,9 @@ omobench ui
 
 Keep both terminals open. If a browser does not open automatically, copy the
 full URL printed by the panel, including `#token=...`, into your browser.
-On WSL, use your normal Windows browser. Open **`/advanced`** for the workflow
-below; the default page is the guided benchmark instead.
+On WSL, use your normal Windows browser. The workflow below is the
+**Connect & run** section of that page. (`/advanced` and `/guided` still work
+as bookmarks; they serve the same page.)
 
 1. Enter the **Server address** and **Server model identifier** from your running
    server. Its address is different from the panel's port `8765`.
@@ -161,9 +166,9 @@ incorrect identifiers, streaming errors, and interrupted runs.
 - Quality/accuracy evaluation, model installation, cloud hardware provisioning,
   and native Windows benchmark execution are outside the current workflow.
 - A guided, reviewed CPU setup path (`omobench prepare`/`launch`, and the
-  panel's default page) can download, verify, run, and, unlike a plain smoke
-  test, package and prepare a submission for one pinned model + runtime
-  recipe, without leaving the guided page. It is a development milestone, not
+  panel's managed-setup component) can download, verify, run, and, unlike a
+  plain smoke test, package and prepare a submission for one pinned model +
+  runtime recipe, without leaving the page. It is a development milestone, not
   a general installer; see [Guided CPU setup](docs/guided-launcher.md).
 
 ## Fixed workloads and measurements

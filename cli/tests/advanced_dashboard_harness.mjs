@@ -81,7 +81,7 @@ const WORKFLOW = {
       state: "attention", observed: "0.26 GB available of 7.85 GB allocated to this WSL environment",
       source: "this machine", blocks: "run", recovery: "fixture memory recovery",
       detail: "fixture memory detail", field: null, severity: "severe" },
-    { id: "catalog", label: "Canonical model ID is in the OmoBench catalog", state: "attention",
+    { id: "catalog", label: "This model may be published here", state: "attention",
       observed: "Qwen/Qwen3-VL-4B-Instruct", source: "you", blocks: "submit",
       recovery: "fixture catalog recovery", detail: "fixture catalog detail", field: "model" },
     { id: "tokenizer-match", label: "The tokenizer matches the served weights", state: "unknown",
@@ -102,7 +102,7 @@ const REQUIREMENTS = {
   ready: false, local_export_available: true,
   items: [
     { field: null, label: "Benchmark completed with measurements", ok: true, detail: "This run produced measurements." },
-    { field: "model", label: "Canonical model ID is in the OmoBench catalog", ok: false, detail: "Qwen/Qwen3-VL-4B-Instruct is not currently eligible for the community registry." },
+    { field: "model", label: "This model may be published here", ok: false, detail: "Qwen/Qwen3-VL-4B-Instruct is not currently eligible for the community registry." },
     { field: "model_revision", label: "Immutable revision of the actual weights source", ok: false, detail: "A commit SHA of the weights repository." },
     { field: "framework_version", label: "Exact serving runtime version", ok: false, detail: "The runtime build, not the application version." },
   ],
@@ -165,6 +165,9 @@ const context = createContext({
 runInContext(readFileSync(join(webDirectory, "dashboard.js"), "utf8"), context);
 runInContext(readFileSync(join(webDirectory, "community.js"), "utf8"), context);
 runInContext(readFileSync(join(webDirectory, "workflow.js"), "utf8"), context);
+// The managed-setup component the one panel mounts: preparation, download,
+// cancellation and recovery, with no selector or dashboard of its own.
+runInContext(readFileSync(join(webDirectory, "managed-setup.js"), "utf8"), context);
 get("submission-mode").value = "community";
 runInContext(readFileSync(appPath, "utf8"), context, { filename: appPath });
 context.download = (blob, name) => downloads.push({ blob, name });

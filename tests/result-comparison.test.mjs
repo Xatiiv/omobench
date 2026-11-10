@@ -11,6 +11,7 @@ async function loadModule(path) {
 }
 const { readResultRecord } = await loadModule("../app/lib/result-record.ts");
 const { comparisonExamples } = await loadModule("../app/data/comparison-examples.ts");
+const { summarize } = await loadModule("../app/lib/evidence.ts");
 const { assess, comparisonQuestions, suitabilityLabel, incompatibilities, metricDifference, rankRuns, eligibleLeaderboard, barPercent, comparisonHref, formatMetric, transportLabel, servingLabel, placementLabel, tokenizerLabel } = await loadModule("../app/lib/comparison.ts");
 
 function fixture() {
@@ -302,7 +303,120 @@ test("a proposed model is readable and labelled, not silently catalogued", () =>
   document.model.catalog_status = "proposed";
   const result = readResultRecord("proposed", document);
   assert.equal(result.catalogStatus, "proposed");
-  assert.throws(() => readResultRecord("proposed on 1.0", { ...fixture(), model: { ...fixture().model, catalog_status: "proposed" } }), /schema 1.1/);
+  assert.throws(() => readResultRecord("proposed on 1.0", { ...fixture(), model: { ...fixture().model, catalog_status: "proposed" } }), /schema 1\.0 result cannot propose/);
+});
+
+// --- Schema 1.2: eligibility carried by the result, not by a list ----------
+
+// The same bridged machine, submitting a model nobody has curated. It is not
+// asking to be curated either: what makes it publishable travels with it.
+function uncataloguedFixture(overrides = {}) {
+  const document = bridgedFixture();
+  document.schema_version = "1.2";
+  document.model = {
+    ...document.model,
+    catalog_status: "uncatalogued",
+    eligibility: {
+      licence: "apache-2.0",
+      licence_url: "https://example.invalid/licence",
+      weights_publicly_downloadable: true,
+      modality: "text-generation",
+      publisher: "Fixture Lab",
+      source: "https://example.invalid/weights",
+      family: "Fixture",
+      parameter_class: "14B",
+      base_model: null,
+      ...(overrides.eligibility ?? {}),
+    },
+    ...(overrides.model ?? {}),
+  };
+  return { ...document, ...(overrides.document ?? {}) };
+}
+
+test("an uncatalogued 1.2 result reads, keeping its status and its eligibility", () => {
+  const result = readResultRecord("uncatalogued", uncataloguedFixture());
+  assert.equal(result.schemaVersion, "1.2");
+  assert.equal(result.catalogStatus, "uncatalogued");
+  assert.equal(result.eligibility.licence, "apache-2.0");
+  assert.equal(result.eligibility.weightsPubliclyDownloadable, true);
+  assert.equal(result.eligibility.parameterClass, "14B");
+  assert.equal(result.eligibility.baseModel, null);
+  // Everything 1.1 recorded is still recorded. 1.2 adds; it does not replace.
+  assert.equal(result.transport.kind, "windows-wsl-stdio-bridge");
+  assert.equal(result.serving.relationship, "windows-host-wsl-runner");
+});
+
+test("the site shows an uncatalogued result's eligibility as what made it publishable", () => {
+  const summary = summarize(readResultRecord("uncatalogued", uncataloguedFixture()));
+  const section = summary.sections.find((entry) => entry.id === "eligibility");
+  assert.ok(section, "an eligibility section is rendered");
+  const rows = Object.fromEntries(section.rows.map((row) => [row.label, row]));
+  assert.equal(rows["Licence"].value, "apache-2.0");
+  assert.equal(rows["Weights publicly downloadable"].value, "Yes");
+  assert.equal(rows["Modality"].value, "text-generation");
+  // Declared, never verified here. The site says whose word each fact is.
+  assert.equal(rows["Licence"].source, "stated by the contributor");
+  assert.match(summary.qualifications.join(" "), /not catalogued and is not asking to be/);
+  const status = summary.sections.find((entry) => entry.id === "model").rows
+    .find((row) => row.label === "Catalog status");
+  assert.match(status.value, /Not catalogued/);
+});
+
+test("a legacy result's eligibility section says nobody collected any, not that there is none", () => {
+  for (const [name, document] of [["1.0", fixture()], ["1.1", bridgedFixture()]]) {
+    const summary = summarize(readResultRecord(name, document));
+    const section = summary.sections.find((entry) => entry.id === "eligibility");
+    assert.equal(section.rows[0].recorded, false, name);
+    assert.match(section.rows[0].note, /collected none of this/, name);
+    assert.doesNotMatch(summary.qualifications.join(" "), /not asking to be/, name);
+  }
+  // And a 1.0 result states no catalog status at all, because it never did.
+  const legacy = summarize(readResultRecord("1.0", fixture()));
+  const status = legacy.sections.find((entry) => entry.id === "model").rows
+    .find((row) => row.label === "Catalog status");
+  assert.equal(status.recorded, false);
+});
+
+test("weights nobody else can obtain are called out on the page", () => {
+  const closed = uncataloguedFixture({ eligibility: { weights_publicly_downloadable: false } });
+  const summary = summarize(readResultRecord("closed weights", closed));
+  assert.match(summary.qualifications.join(" "), /nobody else can repeat this run/);
+});
+
+test("eligibility is a 1.2 statement and cannot appear on an older result", () => {
+  const stale = uncataloguedFixture();
+  stale.schema_version = "1.1";
+  stale.model.catalog_status = "catalogued";
+  assert.throws(() => readResultRecord("eligibility on 1.1", stale), /cannot carry model eligibility/);
+  const older = { ...fixture(), model: { ...fixture().model, catalog_status: "uncatalogued" } };
+  assert.throws(() => readResultRecord("uncatalogued on 1.0", older), /cannot be uncatalogued/);
+});
+
+test("an uncatalogued result with nothing to stand on is refused", () => {
+  const bare = uncataloguedFixture();
+  delete bare.model.eligibility;
+  assert.throws(() => readResultRecord("bare", bare), /eligibility facts a reviewer reads/);
+});
+
+test("eligibility a reviewer could not check is refused rather than displayed", () => {
+  assert.throws(
+    () => readResultRecord("http licence", uncataloguedFixture({ eligibility: { licence_url: "http://example.invalid/licence" } })),
+    /licence URL a reviewer cannot open/);
+  assert.throws(
+    () => readResultRecord("other modality", uncataloguedFixture({ eligibility: { modality: "image-generation" } })),
+    /modality OmoBench's profiles do not measure/);
+  assert.throws(
+    () => readResultRecord("unstated weights", uncataloguedFixture({ eligibility: { weights_publicly_downloadable: "yes" } })),
+    /whether its weights are publicly downloadable/);
+});
+
+test("a catalogued 1.2 result needs no eligibility block of its own", () => {
+  const curated = uncataloguedFixture();
+  curated.model.catalog_status = "catalogued";
+  delete curated.model.eligibility;
+  const result = readResultRecord("catalogued 1.2", curated);
+  assert.equal(result.catalogStatus, "catalogued");
+  assert.equal(result.eligibility, null);
 });
 
 test("metadata declared after the run is reported as such", () => {
@@ -481,6 +595,66 @@ test("a different model is unsuitable unless that is the question", () => {
   assert.match(asked.reasons.join(" "), /not comparable across models as a measure of work done/);
 });
 
+test("asking what one machine does holds that machine fixed", () => {
+  // The whole point of the question: one computer, several workloads. Two
+  // computers cannot answer it, however well matched they otherwise are.
+  const otherModel = { ...withServing(), model: "Qwen/Qwen3-4B", modelRevision: "another-revision",
+                       modelSource: "https://example.invalid/qwen.gguf", quantization: "Q8_0" };
+  const asked = assess(withServing(), otherModel, "workload");
+  assert.equal(asked.suitability, "qualified");
+  assert.match(asked.differences.join(" "), /Model: /);
+
+  const otherMachine = { ...otherModel, hardware: { ...withServing().hardware, display: "Another box" } };
+  const refused = assess(withServing(), otherMachine, "workload");
+  assert.equal(refused.suitability, "unsuitable");
+  assert.ok(refused.blockers.includes("Different serving hardware"));
+  assert.match(refused.reasons.join(" "), /question about one computer/);
+
+  // The same differing hardware is only reported under every other question,
+  // which is what it has always been.
+  for (const question of ["exact", "hardware", "runtime"]) {
+    const assessment = assess(withServing(), { ...withServing(), hardware: { ...withServing().hardware, display: "Another box" } }, question);
+    assert.equal(assessment.suitability, "ranking", question);
+  }
+});
+
+test("comparing workloads on one machine does not rank the models against each other", () => {
+  const other = { ...withServing(), model: "Qwen/Qwen3-4B", quantization: "Q8_0" };
+  assert.match(assess(withServing(), other, "workload").reasons.join(" "),
+    /not comparable across models as a measure of work done/);
+  assert.match(comparisonQuestions.workload.detail, /quality of an answer/);
+});
+
+test("a different context window is a different measurement, not a faster one", () => {
+  const document = bridgedFixture();
+  document.environment.relationship = "same-host";
+  document.environment.runner.kind = "native";
+  document.environment.transport = { kind: "direct", protocol: "HTTP/1.1", bridge_version: null, overhead: "none-direct" };
+  document.hardware.gpus = [{ vendor: "amd", model: "AMD Radeon RX 9070", memory_gb: 16, count: 1 }];
+  document.environment.serving.runtime.settings = [
+    { name: "context_length", value: "32768", provenance: "contributor-declared" }];
+  const wider = readResultRecord("wider context", document);
+
+  for (const question of ["exact", "hardware", "runtime"]) {
+    const assessment = assess(withServing(), wider, question);
+    assert.equal(assessment.suitability, "unsuitable", question);
+    assert.ok(assessment.blockers.includes("Different context length"), question);
+  }
+  // A different model may well need a different window; that is the workload.
+  assert.equal(assess(withServing(), wider, "workload").suitability, "qualified");
+});
+
+test("two runs that never recorded a context length agree about silence", () => {
+  const document = bridgedFixture();
+  document.environment.relationship = "same-host";
+  document.environment.runner.kind = "native";
+  document.environment.transport = { kind: "direct", protocol: "HTTP/1.1", bridge_version: null, overhead: "none-direct" };
+  document.hardware.gpus = [{ vendor: "amd", model: "AMD Radeon RX 9070", memory_gb: 16, count: 1 }];
+  document.environment.serving.runtime.settings = [];
+  const silent = readResultRecord("no context", document);
+  assert.equal(assess(silent, silent, "exact").suitability, "ranking");
+});
+
 test("a split placement is a difference when the question is about hardware", () => {
   // The base fixture runs gpu-only; this one splits the weights across both.
   const document = bridgedFixture();
@@ -592,10 +766,35 @@ test("the illustrative examples are not kept out of the public registry", () => 
   }
 });
 
+test("the uncatalogued example renders its eligibility and never joins a ranking of models", () => {
+  const entry = comparisonExamples.find((candidate) => candidate.key === "example-uncatalogued");
+  assert.ok(entry, "the preview carries a schema 1.2 example to render");
+  assert.equal(entry.result.schemaVersion, "1.2");
+  const summary = summarize(entry.result);
+  const section = summary.sections.find((s) => s.id === "eligibility");
+  assert.equal(section.rows.find((row) => row.label === "Licence").value, "apache-2.0");
+  assert.match(summary.qualifications.join(" "), /not catalogued and is not asking to be/);
+  // A different model on the same machine, with its own context window. Only
+  // the question about what one machine does across workloads lets both of
+  // those differ; asking for a repeat of the same setup says no, and so does
+  // asking about models alone, because the context window is not the model.
+  const verdictFor = (question) =>
+    assess(example("example-reference"), entry.result, question).suitability;
+  assert.equal(verdictFor("exact"), "unsuitable");
+  assert.equal(verdictFor("workload"), "qualified");
+  assert.ok(assess(example("example-reference"), entry.result, "model").blockers
+    .includes("Different context length"));
+});
+
 test("an example pair that differs only in hardware stays directly comparable", () => {
+  // Every question but one: the hardware is free to differ and is merely
+  // reported. "What does this machine do across workloads" is the exception,
+  // because two machines are not one machine.
   for (const question of Object.keys(comparisonQuestions)) {
+    if (question === "workload") continue;
     assert.equal(verdict("example-cpu-b", question), "ranking", question);
   }
+  assert.equal(verdict("example-cpu-b", "workload"), "unsuitable");
   const assessment = assess(example("example-reference"), example("example-cpu-b"), "hardware");
   assert.deepEqual(assessment.blockers, []);
   assert.ok(assessment.differences.some((text) => text.startsWith("Serving hardware:")));

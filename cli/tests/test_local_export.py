@@ -210,7 +210,7 @@ class LocalExportTests(unittest.TestCase):
     def test_every_missing_requirement_is_listed_together(self):
         items = self.controller.publication_requirements(self.job()["id"])["items"]
         failing = {item["label"] for item in items if item["ok"] is False}
-        self.assertIn("Canonical model ID is in the OmoBench catalog", failing)
+        self.assertIn("This model may be published here", failing)
         self.assertIn("Immutable revision of the actual weights source", failing)
         self.assertIn("Exact serving runtime version", failing)
         self.assertGreaterEqual(len(failing), 3)  # all at once, not one popup at a time
@@ -219,7 +219,7 @@ class LocalExportTests(unittest.TestCase):
         report = self.controller.publication_requirements(self.job()["id"], {"model": UNCATALOGUED})
         catalog_item = next(item for item in report["items"] if item["field"] == "model")
         self.assertFalse(catalog_item["ok"])
-        self.assertIn("not currently eligible for the community registry", catalog_item["detail"])
+        self.assertIn("not on the curated list", catalog_item["detail"])
         self.assertIn("Qwen/Qwen3-4B", catalog_item["detail"])  # shown as the catalog, not as a substitute
         self.assertEqual(report["model"], UNCATALOGUED)
         self.assertNotIn(UNCATALOGUED, report["catalog"])

@@ -10,11 +10,11 @@
   <script src="/dashboard.js" defer></script>
   <script src="/community.js" defer></script>
   <script src="/workflow.js" defer></script>
+  <script src="/managed-setup.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
-  <header class="topbar"><a class="brand" href="/">Omo<span>Bench</span><span class="brand-mark">▥</span></a><span class="pill"><span class="dot"></span> Advanced panel</span></header>
-  <p class="guided-link"><a href="/">← Back to the guided benchmark</a> This is the advanced panel: connect to a model server you already run yourself. New here? The guided benchmark walks through a reviewed, verified CPU model end to end, including packaging and submission, without typing server addresses or shell commands.</p>
+  <header class="topbar"><a class="brand" href="/">Omo<span>Bench</span><span class="brand-mark">▥</span></a><span class="pill"><span class="dot"></span> Local control</span></header>
   <div class="layout">
     <aside>
       <div class="aside-head"><h2>This machine</h2><button id="refresh-setup" class="quiet" type="button">Refresh</button></div>
@@ -24,9 +24,60 @@
       <p class="aside-note">Evidence stays in this checkout. Uploading a bundle requires your confirmation.</p>
     </aside>
     <main>
-      <div class="eyebrow">LOCAL BENCHMARK CONTROL</div>
-      <h1>Benchmark your model.</h1>
-      <p class="intro">Connect a model server, run a fixed workload, and inspect the measurements.</p>
+      <div class="eyebrow">WHAT CAN THIS MACHINE DO?</div>
+      <h1>Measure your hardware.</h1>
+      <p class="intro">OmoBench runs a fixed workload against a model server and records what your machine did with it. The model is the load; the hardware is the subject.</p>
+
+      <section id="hardware-panel" class="panel" aria-labelledby="hardware-title">
+        <div class="section-head"><div><span class="step">01</span><h2 id="hardware-title">Your hardware</h2></div><span id="hardware-placement" class="pill">Checking&#8230;</span></div>
+        <dl class="kv" id="hardware-facts"></dl>
+        <p id="hardware-source" class="hint"></p>
+        <p id="hardware-shared" class="hint"></p>
+      </section>
+
+      <section id="workload-panel" class="panel" aria-labelledby="workload-title">
+        <div class="section-head"><div><span class="step">02</span><h2 id="workload-title">Choose a workload for this hardware</h2></div><span class="muted small">Curated, or your own</span></div>
+        <p class="muted">A workload is a model and the way it is run. These are recommendations whose licences have been checked; any compatible model can be benchmarked, and submitted on the same requirements. Nothing here ranks models, and size and speed say nothing about the quality of a model&#8217;s answers.</p>
+        <label>Workload<select id="workload-select"></select></label>
+        <div id="workload-detail" class="profile-detail" hidden>
+          <dl class="kv" id="workload-facts"></dl>
+          <p id="workload-fit" class="hint"></p>
+          <p id="workload-evidence" class="hint"></p>
+          <p id="workload-licence" class="hint"></p>
+        </div>
+        <ul class="status-checklist" id="workload-caveats"></ul>
+        <section id="managed-setup" class="identity" hidden aria-labelledby="managed-title">
+          <h3 id="managed-title">OmoBench can prepare this one for you</h3>
+          <p class="hint">The exact files below are downloaded, verified by SHA-256 and installed under a folder you choose. Nothing is installed system-wide, and a download that is interrupted resumes rather than starting again.</p>
+          <label>Storage folder<input id="managed-storage-dir" spellcheck="false" placeholder="/mnt/d/OmoBench"><span class="hint">Large model and runtime files are kept here, under <code>omobench-managed-v1/</code>.</span></label>
+          <div class="actions"><button id="managed-recheck" type="button" class="secondary">Check this folder</button></div>
+          <p id="managed-platform" class="hint"></p>
+          <p id="managed-space" class="hint"></p>
+          <div id="managed-files"></div>
+          <p id="managed-error" class="notice error" role="status" hidden></p>
+          <div class="actions"><button id="managed-start" type="button" disabled>Download and verify</button></div>
+        </section>
+        <section id="custom-workload" class="identity" hidden aria-labelledby="custom-title">
+          <h3 id="custom-title">Your own model</h3>
+          <p class="hint">Benchmark anything you can serve. Submitting it publicly needs the same requirements a curated model meets &#8212; a published licence, weights anybody can obtain, text generation, and an immutable identity. OmoBench never downloads or executes anything from an arbitrary repository.</p>
+          <div class="grid two">
+            <label>Canonical model ID<input id="custom-model-id" spellcheck="false" placeholder="org/Model-7B"><span class="hint">The model&#8217;s own identity, not the alias your server answers to.</span></label>
+            <label>Publisher <span class="muted small">optional</span><input id="custom-publisher" spellcheck="false" placeholder="org"></label>
+            <label>Weights revision<input id="custom-revision" spellcheck="false" placeholder="commit SHA"><span class="hint">Immutable. Not <code>main</code>, <code>master</code> or <code>latest</code>. A content hash of the actual files works too.</span></label>
+            <label>Quantisation<input id="custom-quantisation" spellcheck="false" placeholder="Q4_K_M"></label>
+            <label>Runtime engine<input id="custom-runtime" spellcheck="false" placeholder="llama.cpp"></label>
+            <label>Runtime build<input id="custom-runtime-version" spellcheck="false" placeholder="b10621"></label>
+            <label>Licence<input id="custom-licence" spellcheck="false" placeholder="apache-2.0"><span class="hint">As its publisher states it.</span></label>
+            <label>Licence URL<input id="custom-licence-url" type="url" spellcheck="false" placeholder="https://&#8230;"><span class="hint">Where a reviewer reads it.</span></label>
+            <label>Weights source<input id="custom-source" type="url" spellcheck="false" placeholder="https://huggingface.co/org/Model-7B"></label>
+            <label>Tokenizer source <span class="muted small">optional</span><input id="custom-tokenizer" spellcheck="false" placeholder="Leave blank to use the model ID"></label>
+            <label>Base model <span class="muted small">optional</span><input id="custom-base-model" spellcheck="false" placeholder="For a fine-tune"><span class="hint">A fine-tune is its own model and is never filed under its base.</span></label>
+          </div>
+          <label class="check"><input id="custom-downloadable" type="checkbox"><span>Anybody can download these weights, accepting the publisher&#8217;s terms if there are any.</span></label>
+          <p class="hint">Private weights can be benchmarked and kept locally; they cannot be published here, and the panel says so rather than refusing the run.</p>
+          <p id="custom-eligibility" class="notice" role="status" hidden></p>
+        </section>
+      </section>
       <div id="notice" class="notice" role="status" hidden></div>
       <div id="runner-status" class="notice">Checking the runner…</div>
       <nav class="stepper" id="workflow-stepper" aria-label="Benchmark workflow">
@@ -38,7 +89,7 @@
         <button type="button" class="step-tab" data-stage="submit" data-target="submission-preview">6 · Submit</button>
       </nav>
       <section id="configure" class="panel">
-        <div class="section-head"><div><span class="step">01</span><h2>Connect &amp; run</h2></div><span class="muted small">Uses the OmoBench CLI</span></div>
+        <div class="section-head"><div><span class="step">03</span><h2>Connect &amp; run</h2></div><span class="muted small">Uses the OmoBench CLI</span></div>
         <p class="muted">Start and load your model in a local inference server first, then point this panel at it. Any server that exposes streaming OpenAI-compatible <code>/v1/chat/completions</code> on this machine's loopback address works; the two guided recipes are presets, not the limit of what can be benchmarked.</p>
         <form id="run-form">
           <div class="grid two">
@@ -143,7 +194,7 @@
         </form>
       </section>
       <section id="run-panel" class="panel" hidden>
-        <div class="section-head"><div><span class="step">02</span><h2 id="run-title">Benchmark</h2></div><span id="run-status" class="pill"></span></div>
+        <div class="section-head"><div><span class="step">04</span><h2 id="run-title">Benchmark</h2></div><span id="run-status" class="pill"></span></div>
         <p id="run-meta" class="muted"></p>
         <p id="run-transport" class="notice" hidden></p>
         <!-- The same dashboard component the guided recipes mount, with the
@@ -155,7 +206,7 @@
         <p id="run-path" class="hint path"></p>
       </section>
       <section id="package-panel" class="panel" hidden>
-        <div class="section-head"><div><span class="step">03</span><h2>Review &amp; submit</h2></div><span id="package-panel-device" class="pill">Evidence</span></div>
+        <div class="section-head"><div><span class="step">05</span><h2>Review &amp; submit</h2></div><span id="package-panel-device" class="pill">Evidence</span></div>
         <p class="muted">Two separate things. <strong>Save local report</strong>, above, needs none of this: it exports the measurements this machine recorded, for any model, with no sign-in. Everything below prepares a <strong>community submission</strong>, which additionally needs a model identity the catalog knows (or a proposal for one), an immutable weights revision, a description of the machine that served the model, and the profile's acceptance thresholds. Packaging uses the existing CLI and registry validator.</p>
 <div class="community-submission">
             <label>Submission destination<select id="submission-mode">

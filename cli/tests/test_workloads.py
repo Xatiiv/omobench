@@ -95,37 +95,78 @@ class HonestyTests(unittest.TestCase):
 
 
 class AssessTests(unittest.TestCase):
-    """Two questions with separate answers: will it load, will it finish."""
+    """Two questions, and neither is answered by an estimate."""
 
-    def test_a_known_load_on_a_big_machine_still_cannot_promise_completion(self) -> None:
+    def test_a_measured_load_with_no_completion_evidence_is_unverified(self) -> None:
+        """Not "marginal": nothing here is near anything, it is simply not
+        established what finishing takes."""
         answer = workloads.assess(load_memory_gb=4.3, completion_requirement_gb=None,
-                                  available_gb=64.0)
+                                  available_gb=64.0, load_measured=True)
+        self.assertEqual(answer["verdict"], "completion-unverified")
         self.assertEqual(answer["loads"], "fits")
         self.assertEqual(answer["completes"], "unknown")
+        self.assertEqual(answer["basis"], "measured")
+
+    def test_an_estimate_never_establishes_that_it_loads(self) -> None:
+        """Advisory is not knowledge. A weight file is not a footprint."""
+        answer = workloads.assess(load_memory_gb=None, completion_requirement_gb=None,
+                                  available_gb=64.0, weights_gb=4.9)
+        self.assertEqual(answer["verdict"], "completion-unverified")
+        self.assertEqual(answer["loads"], "completion-unverified")
+        self.assertEqual(answer["basis"], "estimated")
+
+    def test_marginal_needs_evidence_of_limited_headroom(self) -> None:
+        """The Qwen3-4B case: a run was holding 6.99 GB when it was killed,
+        which is above the memory free here. That is evidence."""
+        answer = workloads.assess(load_memory_gb=4.3, completion_requirement_gb=None,
+                                  available_gb=6.39, observed_before_failure_gb=6.99,
+                                  load_measured=True)
         self.assertEqual(answer["verdict"], "marginal")
+        self.assertIn("evidence of limited headroom", answer["headroom_note"])
+
+    def test_a_failure_below_what_you_have_is_not_evidence_against_you(self) -> None:
+        answer = workloads.assess(load_memory_gb=4.3, completion_requirement_gb=None,
+                                  available_gb=64.0, observed_before_failure_gb=6.99,
+                                  load_measured=True)
+        self.assertEqual(answer["verdict"], "completion-unverified")
+        self.assertIsNone(answer["headroom_note"])
 
     def test_too_small_to_load_is_a_flat_no(self) -> None:
         answer = workloads.assess(load_memory_gb=11.0, completion_requirement_gb=None,
-                                  available_gb=8.0)
+                                  available_gb=8.0, load_measured=True)
         self.assertEqual(answer["verdict"], "too-large")
+        self.assertIsNone(answer["headroom_note"], "a measured figure needs no advisory")
+
+    def test_an_estimated_refusal_says_it_is_advisory(self) -> None:
+        answer = workloads.assess(load_memory_gb=None, completion_requirement_gb=None,
+                                  available_gb=8.0, weights_gb=9.1)
+        self.assertEqual(answer["verdict"], "too-large")
+        self.assertIn("Advisory", answer["headroom_note"])
 
     def test_a_measured_completion_requirement_would_allow_a_yes(self) -> None:
         """None exists yet; the path is tested so it works when one does."""
         answer = workloads.assess(load_memory_gb=4.3, completion_requirement_gb=9.0,
-                                  available_gb=16.0)
+                                  available_gb=16.0, load_measured=True)
         self.assertEqual(answer["verdict"], "fits")
         self.assertEqual(answer["completes"], "fits")
 
     def test_unknown_memory_produces_unknown_and_not_a_refusal(self) -> None:
         answer = workloads.assess(load_memory_gb=4.3, completion_requirement_gb=None,
-                                  available_gb=None)
+                                  available_gb=None, load_measured=True)
         self.assertEqual(answer["verdict"], "unknown")
         self.assertEqual(answer["loads"], "unknown")
 
-    def test_a_recipe_with_no_measured_load_falls_back_to_the_weight_file(self) -> None:
-        answer = workloads.assess(load_memory_gb=None, completion_requirement_gb=None,
-                                  available_gb=8.0, weights_gb=9.1)
-        self.assertEqual(answer["verdict"], "too-large", "the weights alone do not fit")
+    def test_nothing_ever_reads_fits_without_a_completed_benchmark(self) -> None:
+        """Across the whole shipped catalog, on a machine big enough for all
+        of it: no curated workload may claim to fit, because none has
+        completed a profile."""
+        document = workloads.describe(ROOT, serving_available_gb=256.0)
+        verdicts = {option["verdict"]
+                    for family in document["families"]
+                    for model in family["models"]
+                    for option in model["options"]}
+        self.assertNotIn("fits", verdicts)
+        self.assertEqual(verdicts, {"completion-unverified"})
 
 
 class HardwareTests(unittest.TestCase):

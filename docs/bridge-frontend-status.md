@@ -1,6 +1,6 @@
 # Experimental bridge HTTP frontend
 
-The experimental bridge is now connected to the advanced panel and both runner
+The experimental bridge is now connected to the panel and both runner
 execution paths. It is explicit and off by default. It is not a published
 installer update, and native helper tests do not establish real Windows–WSL
 interop or overhead. Bridged measurements are publishable under schema 1.1, which

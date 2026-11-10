@@ -13,20 +13,27 @@ or GPU workloads, and a Windows server measured from WSL through the explicit
 bridge; all are eligible for public v1 packaging and submission, the bridged
 case once its serving machine is described.
 The comparison website and its `/run` launch guide are separate from this panel.
-Both panel routes mount one shared live dashboard (`cli/src/omobench/web/dashboard.js`
-and `dashboard.css`); keep it shared rather than reimplementing it per page, and
-let each route declare only the stages it actually observes. Saving a local
-report and preparing a public submission are separate actions with separate
-requirements, on both routes.
+The panel is **one page** (`cli/src/omobench/web/index.html`): the hardware
+first, then one workload selector covering curated recipes and a custom model,
+then one shared configuration and run state. `/`, `/guided` and `/advanced` all
+serve that same page -- served, not redirected, because the connection token
+lives in the URL fragment and a redirect would discard it. Managed preparation
+is a component mounted inside that page
+(`cli/src/omobench/web/managed-setup.js`), driven by the panel's selection; it
+owns no selector, stepper or dashboard of its own. The live dashboard
+(`dashboard.js`, `dashboard.css`) stays shared rather than reimplemented.
+Saving a local report and preparing a public submission remain separate actions
+with separate requirements.
 
 It is **not** a model host, model downloader, cloud GPU provider, or automatic proof that a model server used the declared execution device.
 
-`omobench prepare`/`omobench launch` and the panel's default page (also
-reachable at `/guided`; the "connect a server you already run" panel moved to
-`/advanced`) add a reviewed, managed CPU setup path (a development milestone,
-not an installer): they download and verify one pinned model + runtime recipe
-from `catalog/downloads/`, then run the same unchanged benchmark engine
-described below, and can package/prepare its submission from the same page.
+`omobench prepare`/`omobench launch` and the panel's managed-setup component
+add a reviewed, managed CPU setup path (a development milestone, not an
+installer): they download and verify one pinned model + runtime recipe from
+`catalog/downloads/`, then run the same unchanged benchmark engine described
+below, and can package/prepare its submission from the same page. Choosing a
+workload the panel has a recipe for reveals that component inline; choosing a
+custom model hides it and asks for the model's own details instead.
 See [guided-launcher.md](docs/guided-launcher.md).
 
 ## V1 scope and invariants
@@ -111,11 +118,11 @@ See [provenance.md](docs/provenance.md).
   failure) from not-supplied-yet (what will be needed) from nobody-checked.
 - Stage progress is derived from state, never from navigation, and moving
   between stages never clears what was entered.
-- Both panel routes mount one shared workflow view
+- The panel mounts one shared workflow view
   (`cli/src/omobench/web/workflow.js`) for the stepper, the gate lists, the
-  completion states and the evidence summary, exactly as they already share one
-  dashboard. The guided page and the advanced panel are two ways to start the
-  same workflow, not two workflows.
+  completion states and the evidence summary, exactly as it mounts one
+  dashboard. A managed recipe and a server you already run are two ways to
+  reach the same workflow, not two workflows.
 - A profile stops on its request budget or its duration ceiling, whichever
   comes first, and a ceiling-driven stop cancels the request in flight -- which
   counts against the error rate the registry checks. Say what a profile
@@ -206,7 +213,7 @@ Keep localhost/token/origin protections and the one-panel-per-checkout lock.
 | `results/` | Submitted evidence bundles |
 | `app/` | Results website |
 | `windows/companion/` | Windows companion that opens the existing panel from the website's `omobench://` link; see [windows-companion.md](docs/windows-companion.md) |
-| `windows/installer/` | Downloadable Windows installer that installs the companion and prepares an environment; see [windows-installer.md](docs/windows-installer.md) |
+| `windows/installer/` | Downloadable Windows installer that installs the companion and prepares an environment; see [windows-installer.md](docs/windows-installer.md) and, for the untested AMD GPU path, [amd-gpu-test-plan.md](docs/amd-gpu-test-plan.md) |
 | `docs/` | Contributor and submission documentation; see [guided-workflow.md](docs/guided-workflow.md), [provenance.md](docs/provenance.md) and [bounded-execution.md](docs/bounded-execution.md) |
 
 ## Safe change workflow

@@ -307,7 +307,7 @@ async function selectRun(id) {
   // Reopening a saved run recomputes where it got to and what its evidence
   // says, rather than leaving the previous run's answers on screen.
   await refreshWorkflow();
-  await refreshEvidence(id);
+  await refreshEvidence(id, Boolean(job.packaged));
 }
 
 function download(blob, name) {
@@ -380,7 +380,23 @@ function workflowRequest() {
   enriched.endpoint = $("endpoint").value;
   enriched.tokenizer = $("tokenizer").value;
   enriched.windows_bridge = $("windows-bridge").checked;
-  enriched.model = $("package-model").value.trim() || $("model").value.trim();
+  // Which model this run is about. A custom model chosen in the selector is
+  // the canonical identity; the packaging field and the connect form are the
+  // same answer typed in two other places, and whichever is filled in wins in
+  // that order. Nothing here substitutes a different model for the one that
+  // ran -- it only decides which field the contributor is using to name it.
+  enriched.model = (!$("custom-workload").hidden && $("custom-model-id").value.trim())
+    || $("package-model").value.trim() || $("model").value.trim();
+  if (!$("custom-workload").hidden) {
+    const revision = $("custom-revision").value.trim();
+    if (revision && !enriched.model_revision) enriched.model_revision = revision;
+    const quantisation = $("custom-quantisation").value.trim();
+    if (quantisation && !enriched.quantization) enriched.quantization = quantisation;
+    const runtime = $("custom-runtime").value.trim();
+    if (runtime && !enriched.framework) enriched.framework = runtime;
+    const build = $("custom-runtime-version").value.trim();
+    if (build && !enriched.framework_version) enriched.framework_version = build;
+  }
   if (selected) enriched.job = selected;
   return enriched;
 }
@@ -389,6 +405,28 @@ function renderWorkflow(report) {
   workflow = report;
   workflowView.render(report);
   renderCatalogStatus(report.proposal);
+  renderCustomEligibility(report);
+}
+
+// The same answer the checklist gives, repeated beside the fields it is about,
+// because that is where somebody filling them in is looking. It reports the
+// server's verdict; it never computes one of its own.
+function renderCustomEligibility(report) {
+  const notice = $("custom-eligibility");
+  const item = (report.checks || []).find((check) => check.id === "eligibility");
+  const gate = (report.checks || []).find((check) => check.id === "catalog");
+  if (!item || $("custom-workload").hidden) { notice.hidden = true; return; }
+  notice.hidden = false;
+  notice.classList.toggle("error", item.state === "blocked");
+  if (item.state === "ok") {
+    notice.textContent = `${gate ? gate.detail + " " : ""}Declared, not verified here: a `
+      + "reviewer reads the licence itself.";
+    return;
+  }
+  notice.textContent = item.state === "unknown"
+    ? "Nothing declared yet. Fill these in to submit this model publicly; the benchmark "
+      + "itself needs none of them."
+    : `Still needed to publish this: ${item.observed}.`;
 }
 
 async function refreshWorkflow() {
@@ -408,7 +446,10 @@ function scheduleWorkflowRefresh() {
     finally { workflowPending = false; }
   }, 700);
 }
-["run-form", "package-form"].forEach((id) => {
+// The custom-model panel is not a form element, so it is listened to by name.
+// What is typed there decides whether the model may be published, which is a
+// check like any other and follows the fields the same way.
+["run-form", "package-form", "custom-workload"].forEach((id) => {
   $(id).addEventListener("input", scheduleWorkflowRefresh);
   $(id).addEventListener("change", scheduleWorkflowRefresh);
 });
@@ -448,7 +489,9 @@ function renderCatalogStatus(proposal) {
     return li;
   }));
   $("catalog-status-review").textContent = proposal.review_note;
-  // Opened only when it is needed, and never closed over the contributor's work.
+  // Opened only when it is the route left, and never closed over the
+  // contributor's work. A model with its own eligibility declared needs no
+  // proposal, so opening one would be asking for something already answered.
   if (proposal.required && $("model-proposal-section").hidden) {
     $("model-proposal-section").hidden = false;
   }
@@ -477,7 +520,11 @@ $("check-proposal").addEventListener("click", () => action(async () => {
 }));
 
 // --- Six states, none of them assumed -------------------------------------
-async function refreshEvidence(jobId) {
+async function refreshEvidence(jobId, packaged = true) {
+  // Packaging is what writes the normalized result an evidence summary reads.
+  // Before that there is nothing to summarise, and asking anyway would make
+  // the endpoint refuse a question the panel already knows the answer to.
+  if (!packaged) return workflowView.renderEvidence(null);
   workflowView.renderEvidence(await api(`/api/runs/${jobId}/evidence`).catch(() => null));
 }
 
@@ -595,7 +642,7 @@ function weightsDeclaration() {
 
 function proposalDeclaration() {
   if ($("model-proposal-section").hidden) return null;
-  return {
+  const declaration = {
     family: $("proposal-family").value.trim(),
     parameter_class: $("proposal-parameter-class").value.trim(),
     source: $("proposal-source").value.trim(),
@@ -603,10 +650,50 @@ function proposalDeclaration() {
     rationale: $("proposal-rationale").value.trim(),
     weights_publicly_downloadable: $("proposal-public").checked,
   };
+  // An open section nobody has typed into is not a proposal. The panel used
+  // to open this by itself for any uncatalogued model, and treating that as a
+  // started proposal would make it beat a complete eligibility declaration --
+  // which would be the panel answering a question on the contributor's
+  // behalf, in favour of the slower route.
+  const written = Object.values(declaration).some(
+    (value) => (typeof value === "string" ? value !== "" : value === true));
+  return written ? declaration : null;
 }
 
 // Everything the packager needs beyond the schema 1.0 fields, collected in one
 // place so the two forms cannot disagree about what was declared.
+// What the custom-model panel says makes this model publishable. Only the
+// four required facts gate a submission; the rest are recorded as given and
+// omitted when blank, because an empty string is not an answer.
+//
+// Nothing here is verified by the panel. It is the contributor's word, it is
+// labelled as such everywhere it is shown, and the registry's validator is
+// what actually decides.
+function eligibilityDeclaration() {
+  // Only what is on screen is being declared. Switching back to a curated
+  // workload leaves the typed fields alone -- nothing a contributor wrote is
+  // thrown away -- but it stops them describing a run they are not about.
+  if ($("custom-workload").hidden) return null;
+  const field = (id) => $(id).value.trim();
+  const licence = field("custom-licence");
+  const licenceUrl = field("custom-licence-url");
+  // A model nobody named is not a declaration about anything.
+  if (!field("custom-model-id")) return null;
+  if (!licence && !licenceUrl && !$("custom-downloadable").checked) return null;
+  const declaration = {
+    licence,
+    licence_url: licenceUrl,
+    weights_publicly_downloadable: $("custom-downloadable").checked,
+    modality: "text-generation",
+  };
+  for (const [key, id] of [["publisher", "custom-publisher"], ["source", "custom-source"],
+                           ["base_model", "custom-base-model"]]) {
+    const value = field(id);
+    if (value) declaration[key] = value;
+  }
+  return declaration;
+}
+
 function withProvenance(data) {
   const enriched = {...data};
   enriched.served_model_id = $("served-model-id").value.trim();
@@ -615,6 +702,16 @@ function withProvenance(data) {
   if (weights) enriched.weights = weights;
   const proposal = proposalDeclaration();
   if (proposal) { enriched.proposal = proposal; enriched.catalog_status = "proposed"; }
+  // A custom model is submitted on what makes it publishable, not on
+  // membership of a list it is not asking to join. A proposal, if one was
+  // written, is the older route and keeps precedence: it is an explicit
+  // request for review, and silently overriding it would answer a question
+  // the contributor asked somebody else.
+  const eligibility = eligibilityDeclaration();
+  if (eligibility && !proposal) {
+    enriched.eligibility = eligibility;
+    enriched.catalog_status = "uncatalogued";
+  }
   // A request for the probe the panel read itself, not a document from here.
   if (servingProbeRead) enriched.probe = true;
   delete enriched.serving_os; delete enriched.serving_cpu; delete enriched.serving_ram_gb;
@@ -785,14 +882,219 @@ async function poll() {
   finally { setTimeout(poll, 1500); }
 }
 
+
+// Byte sizes, said the way a person reads them. Moved here from the guided
+// page when its managed-setup flow became a component of this one.
+function formatBytes(value) {
+  if (value === null || value === undefined) return "unknown";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let size = value, index = 0;
+  while (size >= 1024 && index < units.length - 1) { size /= 1024; index += 1; }
+  return `${size.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+}
+
+// -- Hardware first, then a workload for it -----------------------------------
+//
+// OmoBench measures hardware, so the panel opens with the machine and asks
+// what to put on it. One selector, curated workloads grouped by family and
+// "Custom model..." in the same list, because a custom model is a choice of
+// workload and not a different mode of the application.
+
+let workloadAnswer = null;
+
+const managedSetup = new ManagedSetup({
+  api,
+  formatBytes,
+  onStage: ({ job, active, kind }) => {
+    if (!active && kind === "setup") return;
+    $("managed-error").hidden = true;
+    notice(kind === "setup"
+      ? `Preparing: ${job.status}${job.progress && job.progress.total
+          ? ` (${formatBytes(job.progress.done)} of ${formatBytes(job.progress.total)})` : ""}`
+      : `Managed run: ${job.status}`);
+  },
+  onFinished: async ({ success, message, benchmarkJobId }) => {
+    notice(success ? "Managed run finished." : `Managed run did not finish: ${message || ""}`,
+           !success);
+    jobs = await api("/api/runs").catch(() => jobs);
+    renderJobs();
+    if (benchmarkJobId) await selectRun(benchmarkJobId);
+  },
+});
+
+function hardwareRow(label, value) {
+  const dt = document.createElement("dt"), dd = document.createElement("dd");
+  dt.textContent = label;
+  dd.textContent = value === null || value === undefined ? "Not recorded" : value;
+  if (value === null || value === undefined) dd.classList.add("unrecorded");
+  return [dt, dd];
+}
+
+function renderHardware(hardware) {
+  const facts = $("hardware-facts");
+  const rows = [];
+  // Three different numbers, named as three different things. An allocation
+  // is a ceiling, not free memory, and neither is the computer's own total.
+  rows.push(...hardwareRow("Serving device", hardware.device === "gpu" ? "GPU" : "CPU"));
+  rows.push(...hardwareRow("Placement", hardware.placement));
+  rows.push(...hardwareRow("Free in the serving environment",
+    hardware.serving_available_gb === null ? null : `${hardware.serving_available_gb} GB`));
+  rows.push(...hardwareRow("That environment's ceiling",
+    hardware.serving_allocation_gb === null ? null : `${hardware.serving_allocation_gb} GB`));
+  if (hardware.serving_vram_gb !== null && hardware.serving_vram_gb !== undefined) {
+    rows.push(...hardwareRow("Accelerator memory", `${hardware.serving_vram_gb} GB`));
+  }
+  if (hardware.physical_ram_gb !== null && hardware.physical_ram_gb !== undefined) {
+    rows.push(...hardwareRow("Physical computer", `${hardware.physical_ram_gb} GB`));
+  }
+  facts.replaceChildren(...rows);
+  $("hardware-placement").textContent = hardware.bridged
+    ? "Bridged: server and runner on one computer"
+    : hardware.device === "gpu" ? "GPU serving" : "CPU serving";
+  $("hardware-source").textContent = `Read from: ${hardware.source || "nothing yet"}.`;
+  $("hardware-shared").textContent = hardware.shared_host_note || "";
+}
+
+const VERDICT_WORD = {
+  "fits": "Completed a profile on memory like this",
+  "completion-unverified": "Completion unverified",
+  "marginal": "Limited headroom",
+  "too-large": "Larger than the memory here",
+  "unknown": "Not established",
+};
+
+function workloadOptions(answer) {
+  const options = [];
+  answer.families.forEach((family) => {
+    family.models.forEach((model) => {
+      model.options.forEach((option) => {
+        options.push({ family, model, option });
+      });
+    });
+  });
+  return options;
+}
+
+function renderWorkloadChoices(answer) {
+  const select = $("workload-select");
+  const groups = [];
+  answer.families.forEach((family) => {
+    const group = document.createElement("optgroup");
+    group.label = family.gated ? `${family.family} (accept terms to download)` : family.family;
+    family.models.forEach((model) => {
+      model.options.forEach((option) => {
+        const item = document.createElement("option");
+        item.value = `${model.id}|${option.quantisation}|${option.runtime}`;
+        item.textContent = `${model.id} · ${option.quantisation} · ${option.runtime}`
+          + ` — ${VERDICT_WORD[option.verdict]}`;
+        group.append(item);
+      });
+    });
+    groups.push(group);
+  });
+  // In the same list, deliberately: choosing your own model is a choice of
+  // workload, not a different mode of the application.
+  const custom = document.createElement("optgroup");
+  custom.label = "Your own";
+  const customItem = document.createElement("option");
+  customItem.value = "custom";
+  customItem.textContent = "Custom model\u2026";
+  custom.append(customItem);
+  groups.push(custom);
+  select.replaceChildren(...groups);
+
+  $("workload-caveats").replaceChildren(...answer.qualifications.map((line) => {
+    const li = document.createElement("li");
+    li.className = "status-item pending";
+    li.textContent = line;
+    return li;
+  }));
+}
+
+function describeSelection(answer, value) {
+  if (value === "custom") return null;
+  return workloadOptions(answer).find(
+    ({ model, option }) => `${model.id}|${option.quantisation}|${option.runtime}` === value) || null;
+}
+
+async function chooseWorkload(value) {
+  const chosen = describeSelection(workloadAnswer, value);
+  $("custom-workload").hidden = value !== "custom";
+  $("workload-detail").hidden = !chosen;
+  if (!chosen) {
+    await managedSetup.select(null);
+    return;
+  }
+  const { family, model, option } = chosen;
+
+  const facts = $("workload-facts");
+  const rows = [];
+  rows.push(...hardwareRow("Model", model.id));
+  rows.push(...hardwareRow("Quantisation", option.quantisation));
+  rows.push(...hardwareRow("Runtime", option.runtime));
+  rows.push(...hardwareRow("Context", model.context_tokens ? `${model.context_tokens} tokens` : null));
+  rows.push(...hardwareRow("Weight file", option.weights_gb ? `${option.weights_gb} GB`
+    + (option.weights_measured ? "" : " (estimate)") : null));
+  rows.push(...hardwareRow("Loaded footprint", option.load_memory_gb
+    ? `${option.load_memory_gb} GB${option.load_measured ? " (measured)" : " (estimate)"}` : null));
+  rows.push(...hardwareRow("Memory to complete a profile",
+    option.completion_requirement_gb === null ? null : `${option.completion_requirement_gb} GB`));
+  facts.replaceChildren(...rows);
+
+  // The verdict, and what kind of claim it is. An estimate is advisory and
+  // says so rather than borrowing the authority of a measurement.
+  $("workload-fit").textContent = `${VERDICT_WORD[option.verdict]}.`
+    + (option.basis === "estimated" ? " This is an advisory estimate, not a measurement." : "")
+    + (option.headroom_note ? ` ${option.headroom_note}` : "");
+  $("workload-evidence").textContent = option.benchmark === "never-run"
+    ? "No benchmark of this workload has been recorded here."
+    : `Previous benchmark: ${option.benchmark}. ${option.benchmark_note || ""}`;
+  $("workload-licence").textContent = `${family.licence || "Licence not recorded"}`
+    + (family.verified ? ` · model card read ${family.verified}` : " · not re-verified")
+    + (family.gate_note ? ` · ${family.gate_note}` : "");
+
+  await managedSetup.select({
+    managed_recipe: option.managed_recipe,
+    model_id: model.id,
+    suggested_storage_dir: workloadAnswer.suggested_storage_dir,
+  });
+}
+
+async function refreshWorkloads() {
+  const bridged = $("windows-bridge") ? $("windows-bridge").checked : false;
+  workloadAnswer = await api("/api/workloads", {
+    placement: $("execution-device") && $("execution-device").value === "gpu" ? "gpu-only" : "cpu-only",
+    windows_bridge: bridged,
+  }).catch(() => null);
+  if (!workloadAnswer) return;
+  renderHardware(workloadAnswer.hardware);
+  renderWorkloadChoices(workloadAnswer);
+  await chooseWorkload($("workload-select").value);
+}
+
 async function init() {
   try {
     if (!token) throw new Error("Open the full connection link printed by omobench ui, including its #token part.");
     community.refresh();
-    await refreshSetup(); jobs = await api("/api/runs"); renderJobs();
+    await refreshSetup();
+    await refreshWorkloads();
+    // A download or managed run still going from a previous session is
+    // adopted rather than abandoned.
+    await managedSetup.recover();
+    jobs = await api("/api/runs"); renderJobs();
     if (jobs.length) await selectRun(jobs[0].id);
     else await refreshWorkflow();
     poll();
   } catch (error) { notice(error.message, true); $("runner-status").hidden = true; }
+}
+$("workload-select").addEventListener("change", (event) =>
+  action(() => chooseWorkload(event.target.value)));
+$("managed-recheck").addEventListener("click", () => action(() => managedSetup.refresh()));
+$("managed-start").addEventListener("click", () => action(() => managedSetup.start()));
+if ($("execution-device")) {
+  $("execution-device").addEventListener("change", () => action(refreshWorkloads));
+}
+if ($("windows-bridge")) {
+  $("windows-bridge").addEventListener("change", () => action(refreshWorkloads));
 }
 updateButtons(); init();

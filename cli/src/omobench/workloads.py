@@ -43,9 +43,20 @@ GPU_VRAM_TIERS_GB = (4, 8, 12, 16, 20)
 CATALOG = Path("catalog") / "workloads" / "text-generation-v1.yaml"
 MODELS = Path("catalog") / "models"
 
-# What a fit answer can say. "unknown" is the honest answer far more often
-# than a recommendation list would like.
-FITS, MARGINAL, TOO_LARGE, UNKNOWN = "fits", "marginal", "too-large", "unknown"
+# What a fit answer can say.
+#
+# "fits" requires evidence that a profile COMPLETED -- nothing has, yet.
+# "completion-unverified" is the ordinary answer: it is expected to load and
+# nobody has established what finishing takes. "marginal" is stronger and is
+# reserved for evidence of limited headroom, such as a run on comparable
+# memory that has already failed. "unknown" is for when nothing is
+# established at all. An estimate never upgrades any of these: it is advisory,
+# and `basis` says so.
+FITS = "fits"
+UNVERIFIED = "completion-unverified"
+MARGINAL = "marginal"
+TOO_LARGE = "too-large"
+UNKNOWN = "unknown"
 
 
 def _as_text(value: Any) -> str | None:
@@ -118,36 +129,63 @@ def assess(
     completion_requirement_gb: float | None,
     available_gb: float | None,
     weights_gb: float | None = None,
+    observed_before_failure_gb: float | None = None,
+    load_measured: bool = False,
 ) -> dict[str, Any]:
-    """Two separate questions, because they have separate answers.
+    """Two separate questions, and neither is answered by an estimate.
 
-    Will it load, and will it finish. The first is often knowable; the second
-    is knowable only from a completed benchmark, and this project does not yet
-    have one. A recommendation list that answered the second from arithmetic
-    would be making it up, so when it does not know it says so.
+    Will it load, and will it finish. The first is knowable when somebody has
+    measured it; otherwise the weight file gives an advisory floor, which is
+    not the same as knowing. The second is knowable only from a completed
+    benchmark, and this project does not have one -- so the usual answer is
+    "completion unverified", which says what is missing rather than implying
+    a near miss.
+
+    "marginal" is reserved for evidence of limited headroom: a run that has
+    already failed at or above the memory you have is evidence, and an
+    estimate is not.
     """
-    loads = UNKNOWN
+    basis = "measured" if load_measured and load_memory_gb is not None else (
+        "estimated" if (load_memory_gb or weights_gb) is not None else "none")
     floor = load_memory_gb if load_memory_gb is not None else weights_gb
-    if floor is not None and available_gb is not None:
-        loads = FITS if available_gb >= floor else TOO_LARGE
 
-    completes = UNKNOWN
-    if completion_requirement_gb is not None and available_gb is not None:
+    if available_gb is None or floor is None:
+        return {"verdict": UNKNOWN, "loads": UNKNOWN, "completes": UNKNOWN, "basis": basis,
+                "headroom_note": None}
+
+    if available_gb < floor:
+        return {
+            "verdict": TOO_LARGE,
+            "loads": TOO_LARGE,
+            "completes": UNKNOWN,
+            "basis": basis,
+            "headroom_note": (
+                None if basis == "measured" else
+                "Advisory: based on the weight file rather than a measured footprint."),
+        }
+
+    loads = FITS if basis == "measured" else UNVERIFIED
+    if completion_requirement_gb is not None:
         completes = FITS if available_gb >= completion_requirement_gb else TOO_LARGE
+        verdict = FITS if completes == FITS else TOO_LARGE
+        return {"verdict": verdict, "loads": loads, "completes": completes, "basis": basis,
+                "headroom_note": None}
 
-    # The headline. It is deliberately conservative about claiming success and
-    # deliberately unwilling to claim failure from a number nobody measured.
-    if loads == TOO_LARGE:
-        verdict = TOO_LARGE
-    elif loads == FITS and completes == FITS:
-        verdict = FITS
-    elif loads == FITS:
-        # It will start. Whether it survives a profile is the open question,
-        # and on this project's own hardware the answer was no.
-        verdict = MARGINAL
-    else:
-        verdict = UNKNOWN
-    return {"verdict": verdict, "loads": loads, "completes": completes}
+    # Nothing establishes what completing costs. Say that, rather than
+    # implying a near miss -- unless something has actually failed around here.
+    if observed_before_failure_gb is not None and observed_before_failure_gb >= available_gb:
+        return {
+            "verdict": MARGINAL,
+            "loads": loads,
+            "completes": UNKNOWN,
+            "basis": basis,
+            "headroom_note": (
+                f"A run of this workload was holding {observed_before_failure_gb} GB when it was "
+                f"killed, which is at or above the {available_gb} GB free here. That is evidence "
+                "of limited headroom, not a requirement."),
+        }
+    return {"verdict": UNVERIFIED, "loads": loads, "completes": UNKNOWN, "basis": basis,
+            "headroom_note": None}
 
 
 def describe(
@@ -206,6 +244,8 @@ def describe(
             completion_requirement_gb=recipe.get("completion_requirement_gb"),
             available_gb=available,
             weights_gb=recipe.get("weights_gb"),
+            observed_before_failure_gb=recipe.get("observed_before_failure_gb"),
+            load_measured=bool(recipe.get("load_measured")),
         )
         entry["options"].append({
             "quantisation": recipe.get("quantisation"),
@@ -251,8 +291,11 @@ def describe(
             "Fit is arithmetic about memory, not a benchmark result: it predicts nothing about "
             "speed, about meeting a profile's acceptance thresholds, or about the quality of "
             "what a model produces.",
-            "Loading is not completing. 'Marginal' means it should start and nothing here knows "
-            "whether it will finish -- which on this project's own hardware it did not.",
+            "Loading is not completing. 'Completion unverified' means nobody has established what "
+            "finishing takes; 'marginal' is stronger and is used only where something has "
+            "actually failed at or above the memory you have.",
+            "An estimate is advisory. A figure taken from a weight file rather than a "
+            "measured footprint never establishes that a workload will load.",
             "No curated workload has a measured completion requirement. The one large figure "
             "measured here is what a server had reached when the kernel killed it, which is a "
             "lower bound on a failure and not a specification for success.",

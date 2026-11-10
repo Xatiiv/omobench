@@ -119,3 +119,36 @@ eligibility block, because neither ever collected one.
 - `uncatalogued` — not on the list and not asking to be. Eligibility rests on
   the facts in `model.eligibility`, which a reviewer checks against the
   requirements above.
+
+## In the panel
+
+Choose **Custom model** in the workload selector. The fields below it are the
+eligibility block: the model's canonical ID, its publisher, an immutable
+weights revision, the licence and a URL where it can be read, the weights
+source, and a checkbox confirming anybody can download them. A tokenizer
+source and a base model are optional and recorded only when given.
+
+The panel reports, beside those fields and in the submission checklist,
+whether what has been typed satisfies the requirements. It names the ones still
+missing. It does **not** verify any of them: it does not open the licence URL,
+does not fetch the weights, and does not confirm the publisher exists. Every
+value is recorded and displayed as the contributor's word, here and on the
+website. The registry's validator decides, and a reviewer reads the licence.
+
+Three routes satisfy the same submission gate, and the panel treats them as
+equals:
+
+| Route | When |
+| --- | --- |
+| The curated catalog | The model is on the list, which already records these facts |
+| An eligibility declaration | The model is not on the list and is not asking to be |
+| A proposal | The model is not on the list and you are asking for it to be added |
+
+A declaration never becomes a proposal and a proposal is never replaced by
+one. If both are present the proposal wins, because it is an explicit request
+for review that somebody else has to answer.
+
+A model whose weights are **not** publicly downloadable can still be
+benchmarked and kept locally. The panel records that fact rather than refusing
+the run, and the submission gate — not the runner — is what stops it going
+public.

@@ -419,6 +419,7 @@ def package_checks(
     framework: str | None,
     framework_version: str | None,
     serving: dict[str, Any] | None,
+    eligibility: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """What stands between a finished run and a schema-valid bundle."""
     summary = job.get("summary")
@@ -436,7 +437,13 @@ def package_checks(
             "Run the benchmark first; only a completed run can be packaged."),
     )]
 
-    if job.get("transport"):
+    # A bridged run cannot be described any other way. A run declaring its own
+    # model eligibility is schema 1.2, which is 1.1 plus that block, and 1.1
+    # has always carried a serving environment -- so the same description is
+    # needed, on the same machine or not. Saying so here is the difference
+    # between a checklist item and a raw packager error.
+    relayed = bool(job.get("transport"))
+    if relayed or eligibility:
         declared = bool(serving and (serving.get("host") or {}).get("cpu"))
         checks.append(check(
             "serving-environment",
@@ -447,10 +454,16 @@ def package_checks(
             source=SOURCE_YOU,
             blocks="package",
             recovery="" if declared else
-                     "Describe the serving machine: its operating system, processor, memory, "
-                     "accelerators and serving runtime. This panel is running in WSL, and what "
-                     "WSL can see of the Windows host is not evidence about what served the "
-                     "model, so none of it is filled in for you.",
+                     ("Describe the serving machine: its operating system, processor, memory, "
+                      "accelerators and serving runtime. This panel is running in WSL, and what "
+                      "WSL can see of the Windows host is not evidence about what served the "
+                      "model, so none of it is filled in for you."
+                      if relayed else
+                      "Describe the serving machine: its operating system, processor, memory, "
+                      "accelerators and serving runtime. A result that carries its own model "
+                      "eligibility is recorded under schema 1.2, which records this too. "
+                      "Nothing is filled in for you: this panel measured the run, it did not "
+                      "serve it."),
             detail="Recorded, and marked as declared by you rather than detected here."
                    if declared else
                    "This run's model server and its benchmark runner were different "
@@ -503,6 +516,30 @@ def package_checks(
     return checks
 
 
+# The four facts that make a model publishable when no curated record covers
+# it. A reviewer reads these; this list is what the panel checks is present,
+# not what it verifies -- nothing here opens a licence or fetches a weight.
+# See docs/model-eligibility.md.
+ELIGIBILITY_FIELDS = ("licence", "licence_url", "weights_publicly_downloadable", "modality")
+
+
+def eligibility_gaps(eligibility: dict[str, Any] | None) -> list[str]:
+    """Which of the four required facts a declaration has not stated."""
+    if not eligibility:
+        return list(ELIGIBILITY_FIELDS)
+    gaps = []
+    if not str(eligibility.get("licence") or "").strip():
+        gaps.append("licence")
+    url = str(eligibility.get("licence_url") or "").strip()
+    if not url.startswith("https://"):
+        gaps.append("licence_url")
+    if eligibility.get("weights_publicly_downloadable") is not True:
+        gaps.append("weights_publicly_downloadable")
+    if eligibility.get("modality") != "text-generation":
+        gaps.append("modality")
+    return gaps
+
+
 def submit_checks(
     *,
     job: dict[str, Any],
@@ -510,6 +547,7 @@ def submit_checks(
     catalog: list[str],
     proposal: dict[str, Any] | None,
     submitter: str | None,
+    eligibility: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """What stands between a valid bundle and the public registry.
 
@@ -517,48 +555,85 @@ def submit_checks(
     catalog review is the clearest case: the measurements are real, the
     evidence is complete and the bundle validates, and all that is missing is a
     decision somebody else has to make.
+
+    A model is judged by the requirements, not by membership of a list. Three
+    routes satisfy the same gate: the curated catalog already records these
+    facts; a proposal asks for the model to be added and is reviewed alongside
+    the result; or the result carries the facts itself. The curated list is a
+    recommendation, not the set of models allowed to exist.
     """
     catalogued = bool(model) and model in catalog
     missing = (proposal or {}).get("missing") or []
     complete = bool(proposal) and not missing
+    gaps = eligibility_gaps(eligibility)
+    declared = bool(eligibility) and not gaps
+    satisfied = catalogued or complete or declared
+    route = ("the curated catalog" if catalogued else
+             "a proposal for review" if complete else
+             "the eligibility this result declares" if declared else None)
     checks: list[dict[str, Any]] = [check(
         "catalog",
-        "Canonical model ID is in the OmoBench catalog",
+        "This model may be published here",
         field="model",
-        state="ok" if catalogued else ("ok" if complete else "attention"),
-        observed=(model or None) if catalogued or not model else
-                 (f"{model} (proposed for review)" if complete else model),
+        state="ok" if satisfied else "attention",
+        observed=(model or None) if satisfied or not model else model,
         source=SOURCE_CATALOG if catalogued else SOURCE_YOU,
-        blocks=None if catalogued or complete else "submit",
-        recovery="" if catalogued or complete else
-                 f"{model} is not currently eligible for the community registry as a "
-                 f"catalogued model: the catalog ({', '.join(catalog)}) is the registry's "
-                 "source of truth. Either choose the catalogued identity you actually ran -- "
-                 "never substitute a different, catalogued model for the one you ran -- or "
-                 "submit a proposal with this result so a reviewer can consider adding it. "
-                 "You can still run this benchmark and export its local report either way.",
-        detail=f"{model} is catalogued." if catalogued else
-               ("Submitted with a proposal asking for this model to be reviewed for the "
-                "catalog. The result and the proposal are judged separately."
-                if complete else
-                "Catalog eligibility is a separate question from whether your server serves "
-                "this model. The server answering to a name establishes nothing about the "
-                "catalog."),
+        blocks=None if satisfied else "submit",
+        recovery="" if satisfied else
+                 f"{model} is not on the curated list, which is fine on its own. To publish it, "
+                 "state what makes it publishable: the licence its publisher states, an https "
+                 "URL where that licence can be read, that anybody can download the weights, "
+                 "and that it is a text-generation model. Alternatively propose it for the "
+                 f"curated list ({', '.join(catalog)}), or choose the catalogued identity you "
+                 "actually ran -- never substitute a different model for the one you ran. You "
+                 "can run this benchmark and export its local report either way.",
+        detail=(f"Publishable through {route}."
+                + (" The result and the proposal are judged separately." if complete
+                   and not catalogued else "")) if satisfied else
+               "Serving a model establishes nothing about whether it may be published. The "
+               "requirements are a published licence anybody can read, weights anybody can "
+               "obtain, text generation, and an immutable identity.",
     )]
 
-    if not catalogued:
+    # Two alternative routes to one gate. The gate above is what blocks
+    # submission; a route blocks only once it has been started and left
+    # unfinished, because a half-written declaration is a thing to finish
+    # while an unstarted one is simply the other route not taken. Blocking on
+    # both at once would tell a contributor they need a proposal *and* a
+    # declaration, which is the opposite of what this change was for.
+    if not catalogued and not complete:
+        checks.append(check(
+            "eligibility",
+            "What makes this model publishable",
+            state="ok" if declared else ("unknown" if not eligibility else "blocked"),
+            observed="declared" if declared else (", ".join(gaps) if eligibility else None),
+            source=SOURCE_YOU,
+            blocks="submit" if eligibility and not declared else None,
+            recovery="" if declared else
+                     "State the licence, an https URL where it can be read, that the weights "
+                     "are publicly downloadable, and that the modality is text generation."
+                     if eligibility else
+                     "Fill in the custom model's licence, licence URL and weights source, or "
+                     "propose it for the curated list instead.",
+            detail="These are the contributor's word, recorded and labelled as such. The "
+                   "registry's validator is what decides, and a reviewer reads the licence "
+                   "itself. Nothing here fetches a licence or a weight.",
+        ))
+
+    if not catalogued and not declared:
         checks.append(check(
             "proposal",
             "Model proposal for review",
             state="ok" if complete else ("unknown" if proposal is None else "blocked"),
             observed="complete" if complete else (", ".join(missing) or None),
             source=SOURCE_YOU,
-            blocks="submit",
+            blocks="submit" if proposal is not None and not complete else None,
             recovery="" if complete else
                      "Fill in the model's family, parameter class, publisher page, licence and "
                      "why it belongs, and confirm the weights are publicly downloadable."
                      if proposal is not None else
-                     "Open Propose this model for the catalog, or choose a catalogued identity.",
+                     "Optional. Declare this model's own eligibility instead, choose a "
+                     "catalogued identity, or open Propose this model for the catalog.",
             detail="A proposal is a request for review and nothing more. Accepting it is a "
                    "separate, reviewed change to the catalog: merging this result would not "
                    "add the model, and this result is marked as proposed wherever it appears.",

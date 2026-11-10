@@ -78,6 +78,15 @@ const registryHardwareOptions = getRegistryOptions((result) => result.hardware.d
 const registryFrameworkOptions = getRegistryOptions((result) => result.framework);
 const registryProfileOptions = getRegistryOptions((result) => result.profile);
 const registryExecutionDeviceOptions = getRegistryOptions((result) => result.executionDevice.toUpperCase());
+// Three different statements about a model's identity, so they filter
+// separately rather than collapsing into "accepted". A 1.0 or 1.1 result has
+// no uncatalogued state to offer; the option simply does not appear.
+const CATALOG_STATUS_LABEL: Record<RegistryResult["catalogStatus"], string> = {
+  catalogued: "Catalogued",
+  proposed: "Proposed, awaiting review",
+  uncatalogued: "Not catalogued, published on declared eligibility",
+};
+const registryCatalogOptions = getRegistryOptions((result) => CATALOG_STATUS_LABEL[result.catalogStatus]);
 
 function deviceBadgeClassName(executionDevice: RegistryResult["executionDevice"]): string {
   return executionDevice === "cpu"
@@ -128,6 +137,7 @@ function LocalRegistry() {
   const [framework, setFramework] = useState("all");
   const [profile, setProfile] = useState("all");
   const [device, setDevice] = useState("all");
+  const [catalog, setCatalog] = useState("all");
 
   const filteredResults = useMemo(
     () =>
@@ -137,9 +147,10 @@ function LocalRegistry() {
           (hardware === "all" || result.hardware.display === hardware) &&
           (framework === "all" || result.framework === framework) &&
           (profile === "all" || result.profile === profile) &&
+          (catalog === "all" || CATALOG_STATUS_LABEL[result.catalogStatus] === catalog) &&
           (device === "all" || result.executionDevice.toUpperCase() === device),
       ),
-    [device, framework, hardware, model, profile],
+    [catalog, device, framework, hardware, model, profile],
   );
 
   const hasResults = registryResults.length > 0;
@@ -170,10 +181,11 @@ function LocalRegistry() {
           </div>
         ) : (
           <>
-            <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-              <DemoFilter id="registry-model-filter" label="Model" onValueChange={setModel} options={registryModelOptions} value={model} />
-              <DemoFilter id="registry-device-filter" label="Execution device" onValueChange={setDevice} options={registryExecutionDeviceOptions} value={device} />
+            <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
               <DemoFilter id="registry-hardware-filter" label="Hardware" onValueChange={setHardware} options={registryHardwareOptions} value={hardware} />
+              <DemoFilter id="registry-device-filter" label="Execution device" onValueChange={setDevice} options={registryExecutionDeviceOptions} value={device} />
+              <DemoFilter id="registry-model-filter" label="Workload model" onValueChange={setModel} options={registryModelOptions} value={model} />
+              <DemoFilter id="registry-catalog-filter" label="Catalog status" onValueChange={setCatalog} options={registryCatalogOptions} value={catalog} />
               <DemoFilter id="registry-framework-filter" label="Framework" onValueChange={setFramework} options={registryFrameworkOptions} value={framework} />
               <DemoFilter id="registry-profile-filter" label="Profile" onValueChange={setProfile} options={registryProfileOptions} value={profile} />
             </div>

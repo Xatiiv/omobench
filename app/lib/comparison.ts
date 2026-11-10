@@ -37,6 +37,29 @@ export function placementLabel(result: ResultRecord): string {
   return mode === "cpu-only" ? "CPU only" : "GPU only";
 }
 
+// The context window the server was started with, where the contributor
+// declared it. "Not recorded" is its own answer: a 1.0 result never collected
+// it, and a 1.1 result only has it if somebody wrote it down.
+export function contextLabel(result: ResultRecord): string {
+  const setting = result.serving?.settings.find((entry) => entry.name === "context_length");
+  return setting ? `${setting.value} tokens` : "Not recorded";
+}
+
+export function quantizationLabel(result: ResultRecord): string {
+  return result.quantization?.trim() || "Not recorded";
+}
+
+export function runtimeLabel(result: ResultRecord): string {
+  const engine = result.serving?.engine;
+  const application = result.serving?.application;
+  const build = engine?.name
+    ? `${engine.name} ${engine.version ?? ""}`.trim()
+    : `${result.framework} ${result.frameworkVersion}`.trim();
+  // The hosting application's release and the engine build it embeds are two
+  // different versions, so they are never run together into one string.
+  return application ? `${build} · hosted by ${application.name} ${application.version}` : build;
+}
+
 export function tokenizerLabel(result: ResultRecord): string {
   if (!result.tokenizer) return "Not recorded";
   const loaded = result.tokenizer.loaded === "loaded-before-run"
@@ -58,7 +81,7 @@ export function tokenizerLabel(result: ResultRecord): string {
 // simply not recorded -- look at them side by side, with the qualification
 // stated. Unsuitable means they differ somewhere the question holds fixed.
 
-export type ComparisonQuestion = "exact" | "hardware" | "runtime" | "model";
+export type ComparisonQuestion = "exact" | "hardware" | "runtime" | "model" | "workload";
 export type Suitability = "ranking" | "qualified" | "unsuitable";
 
 export const comparisonQuestions: Record<ComparisonQuestion, { title: string; detail: string }> = {
@@ -84,6 +107,13 @@ export const comparisonQuestions: Record<ComparisonQuestion, { title: string; de
       + "the same semantic work: a token is not a unit of meaning, and two models do not spend "
       + "them alike.",
   },
+  workload: {
+    title: "Different workloads on the same machine",
+    detail: "The machine is held fixed and the workloads are meant to differ. This asks what one "
+      + "computer does across the things it could be asked to run. It does not rank the models "
+      + "against each other: a token is not a unit of meaning, two models do not spend tokens "
+      + "alike, and none of these numbers says anything about the quality of an answer.",
+  },
 };
 
 type Dimension = {
@@ -101,6 +131,10 @@ type Dimension = {
   // machine, the engine build and the device vary freely in every question;
   // saying so is useful, gating on it would not be.
   informational?: boolean;
+  // Questions under which an otherwise-informational dimension is held fixed.
+  // Asking what one machine does across workloads is not a question two
+  // machines can answer, so the hardware stops being a free variable there.
+  fixedFor?: ComparisonQuestion[];
   // A dimension neither run records is usually an agreement about silence.
   // Quantization is the exception: it changes the numbers enough that two runs
   // which both omit it cannot be ranked against each other.
@@ -135,39 +169,55 @@ const dimensions: Dimension[] = [
   // The model and the bytes behind it. Only a question about models lets these
   // differ, and then only with the warning that token rates across models do
   // not measure the same work.
-  { id: "model", label: "Model", varies: ["model"], blocker: "Different model",
+  { id: "model", label: "Model", varies: ["model", "workload"], blocker: "Different model",
     value: (r) => r.model || null },
   {
-    id: "revision", label: "Weights revision", varies: ["model"],
+    id: "revision", label: "Weights revision", varies: ["model", "workload"],
     blocker: "Different weights revision", value: (r) => r.modelRevision || null,
   },
   {
-    id: "source", label: "Weights source", varies: ["model"],
+    id: "source", label: "Weights source", varies: ["model", "workload"],
     blocker: "Different or missing weights source",
     value: (r) => r.modelSource,
   },
   {
-    id: "quantization", label: "Quantization", varies: ["model"],
+    id: "quantization", label: "Quantization", varies: ["model", "workload"],
     blocker: "Different quantization", requiredOnBoth: true,
     value: (r) => (r.quantization?.trim() ? r.quantization : null),
   },
   {
-    id: "tokenizer", label: "Tokenizer", varies: ["model"],
+    id: "tokenizer", label: "Tokenizer", varies: ["model", "workload"],
     blocker: "Different or unrecorded tokenizer source",
     value: (r) => r.tokenizer?.source ?? null,
   },
   {
-    id: "catalog", label: "Catalog status", varies: ["model"],
+    id: "catalog", label: "Catalog status", varies: ["model", "workload"],
     blocker: "One model is proposed, not catalogued",
+    // Three states, and only one of them is a pending request. An
+    // uncatalogued result was accepted on its own declared eligibility; it is
+    // not waiting on anybody, so it is not held out of a ranking as if it were.
     value: (r) => (r.catalogStatus === "proposed" ? "proposed, not catalogued" : "catalogued"),
   },
 
   // How the weights sat on the machine. Two machines or two engines place them
   // differently, and that is the point of asking about either.
   {
-    id: "placement", label: "Weight placement", varies: ["hardware", "runtime"],
+    id: "placement", label: "Weight placement", varies: ["hardware", "runtime", "workload"],
     blocker: "Different weight placement",
     value: (r) => (r.serving?.placement.mode === "cpu-gpu-offload" ? "split CPU/GPU" : "undivided"),
+  },
+
+  // The context window the server was started with. It changes what a request
+  // costs to serve, so two runs that differ here differ in what was measured,
+  // not only in how fast it went: holding the hardware or the engine as the
+  // explanation would be wrong. Only a question about workloads lets it vary,
+  // because a different model may need a different window. Recorded from 1.1
+  // on and only when declared; two runs that both omit it agree about silence.
+  {
+    id: "context", label: "Context length", varies: ["workload"],
+    blocker: "Different context length",
+    value: (r) => r.serving?.settings.find(
+      (setting) => setting.name === "context_length")?.value ?? null,
   },
 
   // Reported, never gated.
@@ -180,7 +230,8 @@ const dimensions: Dimension[] = [
     value: (r) => r.executionDevice,
   },
   {
-    id: "hardware", label: "Serving hardware", varies: [], informational: true, blocker: "",
+    id: "hardware", label: "Serving hardware", varies: [], informational: true,
+    fixedFor: ["workload"], blocker: "Different serving hardware",
     value: (r) => r.hardware.display || null,
   },
 ];
@@ -225,11 +276,15 @@ export function assess(
         left === null ? "the reference run" : "the other run"}`);
     }
     if (left === right) continue;
-    if (dimension.informational) {
+    // A dimension the question holds fixed gates it, however freely it varies
+    // elsewhere. This is checked before the informational shortcut, which
+    // would otherwise let the fixed thing differ and only mention it.
+    const fixedHere = dimension.fixedFor?.includes(question) ?? false;
+    if (dimension.informational && !fixedHere) {
       differences.push(`${dimension.label}: ${left ?? "not recorded"} against ${right ?? "not recorded"}`);
       continue;
     }
-    if (dimension.varies.includes(question)) {
+    if (!fixedHere && dimension.varies.includes(question)) {
       differences.push(`${dimension.label}: ${left ?? "not recorded"} against ${right ?? "not recorded"}`);
       suitability = suitability === "unsuitable" ? "unsuitable" : "qualified";
       continue;
@@ -244,6 +299,10 @@ export function assess(
         : dimension.id === "catalog"
         ? "One of these models is proposed for the catalog rather than catalogued. Its "
           + "measurements are real; its identity is still a request, so it does not join a ranking."
+        : dimension.id === "hardware"
+        ? `These ran on different machines (${left ?? "not recorded"} against ${right ?? "not recorded"}). `
+          + "Asking what one computer does across workloads is a question about one computer. "
+          + "To compare machines, ask the hardware question instead."
         : `${dimension.label} differs (${left ?? "not recorded"} against ${right ?? "not recorded"}), `
           + "which this comparison holds fixed. Ask a different question, or choose a different run.");
   }
@@ -281,7 +340,11 @@ export function assess(
   } else {
     reasons.unshift(comparisonQuestions[question].detail);
   }
-  if (question === "model" && differences.some((text) => text.startsWith("Model:"))) {
+  // Said whenever the models differ on purpose, which is both questions that
+  // let them. Measuring one machine across workloads is still not a ranking
+  // of the workloads, and nothing here is a statement about answer quality.
+  if ((question === "model" || question === "workload")
+      && differences.some((text) => text.startsWith("Model:"))) {
     reasons.push("Token rates are not comparable across models as a measure of work done: a "
       + "token is not a unit of meaning, and two models do not spend them alike.");
   }

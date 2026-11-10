@@ -11,7 +11,7 @@ The website and local panels share a midnight navy and amber palette. Amber iden
 | Main text | `#edf3fc` |
 | Supporting text | `#a5b6cf` |
 
-The hosted website introduces the benchmark and presents registry evidence. The local guided panel runs the existing CLI. A link to the advanced panel remains available, and the CLI's workload, runner arguments, profiles and acceptance rules are unchanged.
+The hosted website introduces the benchmark and presents registry evidence. The local panel is one page: the hardware first, then the workload to put on it, whether that is a reviewed managed recipe or a server you already run. The CLI's workload, runner arguments, profiles and acceptance rules are unchanged.
 
 ## Live performance display
 

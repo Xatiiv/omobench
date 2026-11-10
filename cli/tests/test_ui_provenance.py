@@ -46,6 +46,20 @@ SERVING = {
                 "settings": [{"name": "context_length", "value": "8192"}]},
 }
 
+# The same machine served and measured: the Linux box this panel runs on, with
+# the card in it doing the inference. Declaring a Windows host here would claim
+# a transport a direct run did not use, and the packager says so. The
+# accelerator has to match the one the run's own environment recorded, because
+# two places that can disagree are one place that cannot be trusted.
+SAME_HOST_SERVING = {
+    "host": {"os": "Test Linux", "cpu": "Test CPU", "ram_gb": 64.0},
+    "accelerators": [{"vendor": "amd", "model": "AMD Radeon RX 9070", "memory_gb": 16.0,
+                      "count": 1, "role": "inference"}],
+    "placement": {"mode": "gpu-only"},
+    "runtime": {"engine": {"name": "llama.cpp", "version": "b10621"},
+                "settings": [{"name": "context_length", "value": "8192"}]},
+}
+
 PACKAGE_FORM = {
     "model": "Qwen/Qwen3-4B", "model_revision": "abc123", "framework": "lmstudio",
     "framework_version": "b10621", "submitter": "local-tester", "quantization": "Q4_K_M",
@@ -134,6 +148,136 @@ class PublicationRequirementTests(PanelFixture):
         job_id = self.completed_job(bridged=False)
         report = self.controller.publication_requirements(job_id, dict(PACKAGE_FORM))
         self.assertNotIn("serving", [item["field"] for item in report["items"]])
+
+
+class UncataloguedPackagingTests(PanelFixture):
+    """A model nobody curated, submitted on what makes it publishable.
+
+    End to end through the panel: the declaration the custom-model fields
+    build, the checks the panel shows, the bundle the packager writes, and the
+    registry validator's verdict on it.
+    """
+
+    ELIGIBILITY = {
+        "licence": "apache-2.0",
+        "licence_url": "https://huggingface.co/someone/Model-7B/blob/main/LICENSE",
+        "weights_publicly_downloadable": True,
+        "modality": "text-generation",
+        "publisher": "someone",
+        "source": "https://huggingface.co/someone/Model-7B",
+    }
+    FORM = {**PACKAGE_FORM, "model": "someone/Model-7B",
+            "model_revision": "b" * 40,
+            "framework": "llama.cpp", "framework_version": "b10621"}
+
+    def form(self, *, eligibility: dict | None = None, **extra) -> dict:
+        """What the panel sends: the packaging fields, the declaration the
+        custom-model section builds, the status it implies, and the serving
+        description schema 1.2 records like 1.1 before it."""
+        return {**self.FORM, "catalog_status": "uncatalogued", "serving": SAME_HOST_SERVING,
+                "eligibility": dict(eligibility or self.ELIGIBILITY), **extra}
+
+    def test_declaring_eligibility_asks_for_the_serving_machine_too(self) -> None:
+        """Schema 1.2 is 1.1 plus the eligibility block, and 1.1 has always
+        recorded this. A checklist item, not a raw packager error."""
+        job_id = self.completed_job(bridged=False)
+        form = {key: value for key, value in self.form().items() if key != "serving"}
+        report = self.controller.publication_requirements(job_id, form)
+        self.assertIn("Serving environment is described separately from the runner",
+                      report["blocks_packaging"])
+        item = next(entry for entry in report["checks"]
+                    if entry["id"] == "serving-environment")
+        self.assertIn("schema 1.2", item["recovery"])
+        # A plain catalogued run on this machine is asked for none of it.
+        plain = self.controller.publication_requirements(job_id, dict(PACKAGE_FORM))
+        self.assertNotIn("serving", [entry["field"] for entry in plain["items"]])
+
+    def test_the_panel_stops_asking_for_a_proposal_once_eligibility_is_declared(self) -> None:
+        job_id = self.completed_job(bridged=False)
+        report = self.controller.publication_requirements(job_id, self.form())
+        self.assertEqual(report["blocks_packaging"], [])
+        self.assertNotIn("This model may be published here", report["blocks_submission"])
+        self.assertNotIn("Model proposal for review",
+                         [item["label"] for item in report["items"]])
+
+    def test_an_incomplete_declaration_names_what_is_still_needed(self) -> None:
+        job_id = self.completed_job(bridged=False)
+        partial = {**self.ELIGIBILITY, "licence_url": "", "weights_publicly_downloadable": False}
+        report = self.controller.publication_requirements(job_id, self.form(eligibility=partial))
+        self.assertIn("What makes this model publishable", report["blocks_submission"])
+        item = next(entry for entry in report["checks"] if entry["id"] == "eligibility")
+        self.assertIn("licence_url", item["observed"])
+        self.assertIn("weights_publicly_downloadable", item["observed"])
+
+    def test_the_packaged_bundle_is_schema_1_2_and_validates(self) -> None:
+        job_id = self.completed_job(bridged=False)
+        detail = self.controller.package(job_id, self.form())
+        self.assertEqual(detail["validation"]["errors"], [])
+        self.assertTrue(detail["validation"]["valid"])
+        result = json.loads((self.controller.run_directory(job_id) / "result.json")
+                            .read_text(encoding="utf-8"))
+        self.assertEqual(result["schema_version"], "1.2")
+        self.assertEqual(result["model"]["catalog_status"], "uncatalogued")
+        self.assertEqual(result["model"]["eligibility"]["licence"], "apache-2.0")
+        self.assertIs(result["model"]["eligibility"]["weights_publicly_downloadable"], True)
+
+    def test_a_bridged_uncatalogued_run_packages_and_validates_too(self) -> None:
+        """The two independent things are independent: a relayed measurement
+        and a model nobody curated do not interact."""
+        job_id = self.completed_job(bridged=True)
+        detail = self.controller.package(job_id, {**self.form(), "serving": SERVING})
+        self.assertEqual(detail["validation"]["errors"], [])
+        self.assertTrue(detail["validation"]["valid"])
+        result = json.loads((self.controller.run_directory(job_id) / "result.json")
+                            .read_text(encoding="utf-8"))
+        self.assertEqual(result["schema_version"], "1.2")
+        self.assertEqual(result["environment"]["transport"]["kind"],
+                         "windows-wsl-stdio-bridge")
+
+    def test_a_catalogued_run_is_untouched_by_any_of_this(self) -> None:
+        """Nothing already published changes meaning, and nothing acquires a
+        field nobody collected."""
+        job_id = self.completed_job(bridged=False)
+        self.controller.package(job_id, dict(PACKAGE_FORM))
+        result = json.loads((self.controller.run_directory(job_id) / "result.json")
+                            .read_text(encoding="utf-8"))
+        self.assertNotEqual(result["schema_version"], "1.2")
+        self.assertNotIn("eligibility", result["model"])
+
+    def test_a_proposal_stops_being_required_once_eligibility_is_declared(self) -> None:
+        """It stays available. It stops being the price of admission."""
+        asked = self.controller.proposal_status({"model": "someone/Model-7B"})
+        self.assertTrue(asked["required"])
+        self.assertFalse(asked["eligibility_declared"])
+        self.assertIn("a catalogued identity, this model's own eligibility, or a proposal",
+                      asked["summary"])
+
+        declared = self.controller.proposal_status(
+            {"model": "someone/Model-7B", "eligibility": dict(self.ELIGIBILITY)})
+        self.assertFalse(declared["required"])
+        self.assertTrue(declared["eligibility_declared"])
+        self.assertIn("does not need to be", declared["summary"])
+        self.assertIn("A proposal is optional", declared["summary"])
+
+    def test_an_incomplete_declaration_does_not_excuse_a_proposal(self) -> None:
+        partial = {**self.ELIGIBILITY, "licence": ""}
+        status = self.controller.proposal_status(
+            {"model": "someone/Model-7B", "eligibility": partial})
+        self.assertTrue(status["required"])
+        self.assertFalse(status["eligibility_declared"])
+
+    def test_the_evidence_summary_shows_what_made_it_publishable(self) -> None:
+        job_id = self.completed_job(bridged=False)
+        self.controller.package(job_id, self.form())
+        summary = self.controller.evidence_summary(job_id)
+        section = next(entry for entry in summary["sections"] if entry["id"] == "eligibility")
+        rows = {row["label"]: row for row in section["rows"]}
+        self.assertEqual(rows["Licence"]["value"], "apache-2.0")
+        self.assertEqual(rows["Weights publicly downloadable"]["value"], "Yes")
+        # Declared, never verified here.
+        self.assertEqual(rows["Licence"]["source"], "stated by the contributor")
+        self.assertTrue(any("not asking to be" in note
+                            for note in summary["qualifications"]))
 
 
 class BridgedPackagingTests(PanelFixture):
@@ -629,8 +773,8 @@ class CompletionAndRecoveryTests(PanelFixture):
                                              framework_version="0.11.0"))
         summary = self.controller.evidence_summary(job_id)
         self.assertEqual([section["id"] for section in summary["sections"]],
-                         ["environments", "accelerators", "model", "runtime", "tokenizer",
-                          "transport"])
+                         ["environments", "accelerators", "model", "eligibility", "runtime",
+                          "tokenizer", "transport"])
         self.assertTrue(summary["qualifications"])
 
     def test_an_uncatalogued_model_never_stops_the_evidence_being_packaged(self) -> None:
@@ -640,7 +784,7 @@ class CompletionAndRecoveryTests(PanelFixture):
                     model="acme/private-model-v9")
         report = self.controller.publication_requirements(job_id, form)
         self.assertEqual(report["blocks_packaging"], [])
-        self.assertIn("Canonical model ID is in the OmoBench catalog",
+        self.assertIn("This model may be published here",
                       report["blocks_submission"])
         detail = self.controller.package(job_id, form)
         # The bundle exists; the registry refuses it, which is a later state.

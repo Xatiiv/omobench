@@ -4,14 +4,14 @@
 Its **default page is a guided benchmark**, see
 [Guided CPU setup](guided-launcher.md), that downloads, verifies, runs, and
 helps submit one reviewed small CPU model for you, with nothing to type but a
-submitter identity. This page describes the **advanced panel**, at
-`/advanced` in the same running panel: connecting to a model server you
-already run yourself. You use browser forms and buttons; benchmark execution
+submitter identity. This page describes the **Connect & run** section of
+that same single page: connecting to a model server you already run yourself.
+(`/advanced` and `/guided` are kept as bookmarks and serve the same page.) You use browser forms and buttons; benchmark execution
 still runs through `omobench run --execute`, with the same GuideLLM version,
 profiles, and evidence. Packaging still runs through `omobench package`.
 Submission remains a GitHub PR.
 
-The advanced panel connects to an already-running model server on the same
+That section connects to an already-running model server on the same
 machine. It does not install models, start the model server, or switch its
 execution device. The hosted website links to these launch instructions; it
 does not remotely execute programs on visitors' computers.
@@ -24,7 +24,7 @@ the panel, everything below works exactly as it does when you run
 
 ## What this panel can benchmark
 
-The two guided recipes are presets, not the boundary. The advanced panel will
+The two managed recipes are presets, not the boundary. The panel will
 benchmark any local model server that meets the requirements below, whatever
 serves it and whatever model it holds.
 
@@ -119,9 +119,9 @@ about one check, never about the whole benchmark.
 5. Keep this terminal open. The browser opens automatically when supported.
    Otherwise, copy the **full URL**, including `#token=…`, from the terminal into
    your browser. The default panel port is `8765`; your model server uses a
-   different port, for example `8092`. The page that opens is the guided
-   benchmark; click through to **`/advanced`** (same token, same origin) for
-   the connect-your-own-server workflow this page describes.
+   different port, for example `8092`. The page opens on your hardware and a
+   workload selector; the **Connect & run** section below it is the
+   connect-your-own-server workflow this page describes.
 
 No `npm install`, Node.js, or website development server is needed for this panel.
 On native Windows you can install `./cli[ui]` and open the panel for setup and
@@ -218,7 +218,7 @@ yourself it never downloaded weights, never started the server and never loaded
 a model, so those stages do not exist here: the stages are **starting the
 runner, warming up, running the benchmark, cooling down, saving results**, and
 warmup and cooldown appear only when GuideLLM itself reports them. Everything
-else follows the same rules as the guided page: a missing value reads "Pending"
+else follows the same rules everywhere on the page: a missing value reads "Pending"
 or "unavailable" rather than zero, progress comes from the runner's own
 remaining fraction rather than from elapsed time, a spent time budget is
 labelled instead of shown as a finished run, and 100% appears only once the

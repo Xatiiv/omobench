@@ -105,6 +105,51 @@ class ProvenanceFormTests(unittest.TestCase):
     def test_a_weight_manifest_that_is_not_json_is_refused(self) -> None:
         self.assertIn("omobench weights", self.states["errors"]["badManifest"])
 
+    # -- a model nobody curated ------------------------------------------------
+
+    def test_a_custom_model_is_submitted_on_its_eligibility(self) -> None:
+        """Not a proposal. Nobody is being asked to add it to the list."""
+        state = self.states["uncatalogued"]
+        self.assertEqual(state["catalog_status"], "uncatalogued")
+        self.assertIsNone(state.get("proposal"))
+        eligibility = state["eligibility"]
+        self.assertEqual(eligibility["licence"], "apache-2.0")
+        self.assertTrue(eligibility["licence_url"].startswith("https://"))
+        self.assertIs(eligibility["weights_publicly_downloadable"], True)
+        self.assertEqual(eligibility["modality"], "text-generation")
+        self.assertEqual(eligibility["publisher"], "someone")
+
+    def test_weights_nobody_else_can_obtain_are_declared_not_dropped(self) -> None:
+        """The run is still worth doing locally. The page records the fact and
+        lets the registry's own validator be the one that refuses it."""
+        eligibility = self.states["privateWeights"]["eligibility"]
+        self.assertIs(eligibility["weights_publicly_downloadable"], False)
+
+    def test_an_untouched_proposal_section_declares_nothing(self) -> None:
+        """The panel opens it by itself. Opening is not writing."""
+        state = self.states["emptyProposalSection"]
+        self.assertIsNone(state.get("proposal"))
+        self.assertEqual(state["catalog_status"], "uncatalogued")
+        self.assertIsNotNone(state["eligibility"])
+
+    def test_an_open_proposal_keeps_precedence_over_the_eligibility_route(self) -> None:
+        state = self.states["proposalWins"]
+        self.assertEqual(state["catalog_status"], "proposed")
+        self.assertIsNone(state.get("eligibility"))
+        self.assertIsNotNone(state["proposal"])
+
+    def test_an_empty_custom_panel_declares_nothing(self) -> None:
+        """A blank field is not a claim that a model has no licence."""
+        state = self.states["noCustomModel"]
+        self.assertNotIn("catalog_status", state)
+        self.assertIsNone(state.get("eligibility"))
+
+    def test_a_hidden_custom_panel_describes_no_run(self) -> None:
+        """Fields left over from an earlier choice are kept, not sent."""
+        state = self.states["curatedAgain"]
+        self.assertNotIn("catalog_status", state)
+        self.assertIsNone(state.get("eligibility"))
+
 
 if __name__ == "__main__":
     unittest.main()

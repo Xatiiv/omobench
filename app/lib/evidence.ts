@@ -182,6 +182,23 @@ function accelerators(result: ResultRecord): EvidenceSection {
   return { id: "accelerators", title: "What ran the weights", rows };
 }
 
+// Three different statements about the same model, kept distinct. A 1.0
+// result has no status of its own: being catalogued was the condition of its
+// publication, so that is what its row says and nothing more.
+const CATALOG_STATUS: Record<ResultRecord["catalogStatus"], string> = {
+  catalogued: "Catalogued",
+  proposed: "Proposed — awaiting review",
+  uncatalogued: "Not catalogued — published on its declared eligibility",
+};
+
+const CATALOG_STATUS_NOTE: Record<ResultRecord["catalogStatus"], string> = {
+  catalogued: "",
+  proposed: "This model is not in the catalog. The bundle carries a proposal for review; nothing "
+    + "here makes it an eligible model.",
+  uncatalogued: "This model is not in the catalog and is not asking to be. What made it "
+    + "publishable is the eligibility it declares, not a list it belongs to.",
+};
+
 function model(result: ResultRecord): EvidenceSection {
   const rows = [
     row("Canonical model", result.model, {
@@ -193,15 +210,12 @@ function model(result: ResultRecord): EvidenceSection {
       note: "A serving alias. It is not a claim about which weights were loaded.",
     }),
     row("Catalog status",
-      result.schemaVersion === "1.1"
-        ? (result.catalogStatus === "proposed" ? "Proposed — awaiting review" : "Catalogued")
-        : null,
+      result.catalogStatusRecorded ? CATALOG_STATUS[result.catalogStatus] : null,
       {
-        provenance: result.schemaVersion === "1.1" ? "contributor-declared" : null,
-        note: result.catalogStatus === "proposed"
-          ? "This model is not in the catalog. The bundle carries a proposal for review; nothing "
-            + "here makes it an eligible model."
-          : "",
+        // A 1.0 result records no status. What its gate established is that
+        // the model was catalogued, not that anybody declared it here.
+        provenance: result.catalogStatusRecorded ? "contributor-declared" : null,
+        note: result.catalogStatusRecorded ? CATALOG_STATUS_NOTE[result.catalogStatus] : "",
       }),
     row("Quantization", result.quantization, { provenance: "contributor-declared" }),
   ];
@@ -260,6 +274,56 @@ function runtime(result: ResultRecord): EvidenceSection {
   rows.push(row("Startup arguments", result.runtimeArguments.join(" ") || null,
     { provenance: "contributor-declared" }));
   return { id: "runtime", title: "What served it", rows };
+}
+
+function eligibility(result: ResultRecord): EvidenceSection {
+  const declared = result.eligibility;
+  if (!declared) {
+    return {
+      id: "eligibility",
+      title: "What made it publishable",
+      rows: [row("Eligibility", null, {
+        note: result.schemaVersion === "1.2"
+          ? "This result is catalogued, so the catalog's own record of the licence and modality "
+            + "applies. It carries no separate eligibility block."
+          : `Schema ${result.schemaVersion} collected none of this. A result from that era was `
+            + "publishable because the model was on the curated list, which was the whole test.",
+      })],
+    };
+  }
+  return {
+    id: "eligibility",
+    title: "What made it publishable",
+    rows: [
+      // Every one of these is the contributor's word. The site shows what a
+      // reviewer would read; it does not fetch the licence or the weights.
+      row("Licence", declared.licence, {
+        provenance: "contributor-declared",
+        note: "Copied from the publisher, not interpreted.",
+      }),
+      row("Licence text", declared.licenceUrl, { provenance: "contributor-declared" }),
+      row("Weights publicly downloadable",
+        declared.weightsPubliclyDownloadable ? "Yes" : "No",
+        {
+          provenance: "contributor-declared",
+          note: declared.weightsPubliclyDownloadable
+            ? "Accepting the publisher's terms counts; a gated repository still qualifies."
+            : "Nobody else can obtain these weights, so nobody else can repeat this run.",
+        }),
+      row("Modality", declared.modality, {
+        provenance: "contributor-declared",
+        note: "The only modality OmoBench's profiles measure.",
+      }),
+      row("Publisher", declared.publisher, { provenance: "contributor-declared" }),
+      row("Where the weights come from", declared.source, { provenance: "contributor-declared" }),
+      row("Family", declared.family, { provenance: "contributor-declared" }),
+      row("Parameter class", declared.parameterClass, {
+        provenance: "contributor-declared",
+        note: "A label the publisher states, never a measurement, and never a claim about answers.",
+      }),
+      row("Base model", declared.baseModel, { provenance: "contributor-declared" }),
+    ],
+  };
 }
 
 function tokenizer(result: ResultRecord): EvidenceSection {
@@ -343,6 +407,14 @@ export function summarize(result: ResultRecord): EvidenceSummary {
     qualifications.push("This model is not catalogued. The bundle proposes it for review, which "
       + "is a separate decision from accepting this result.");
   }
+  if (result.catalogStatus === "uncatalogued") {
+    qualifications.push("This model is not catalogued and is not asking to be. It was accepted on "
+      + "the eligibility facts this bundle carries, which are listed below.");
+  }
+  if (result.eligibility && !result.eligibility.weightsPubliclyDownloadable) {
+    qualifications.push("This bundle says its weights are not publicly downloadable, so nobody "
+      + "else can repeat this run against the same weights.");
+  }
   if (result.metadataDeclaredAfterExecution) {
     qualifications.push("This bundle was packaged later from saved evidence. The measurements "
       + "are the original ones; the serving details were supplied afterwards.");
@@ -350,7 +422,7 @@ export function summarize(result: ResultRecord): EvidenceSummary {
   return {
     schemaVersion: result.schemaVersion,
     sections: [
-      environments(result), accelerators(result), model(result),
+      environments(result), accelerators(result), model(result), eligibility(result),
       runtime(result), tokenizer(result), transport(result),
     ],
     qualifications,

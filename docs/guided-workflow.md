@@ -28,8 +28,9 @@ whether a run is ready.
 
 A stage is done because the thing it stands for happened, not because a tab
 was clicked. Connect is done once a server check has succeeded for the address
-in the form. Identify is done once the model is settled — either the catalog
-has it, or a complete proposal accompanies it. Check is done when nothing is
+in the form. Identify is done once the model is settled — the catalog
+has it, the result declares its own eligibility, or a complete proposal
+accompanies it. Check is done when nothing is
 standing in the way of running. Run is done when a benchmark produced
 measurements. Review is done when the registry validator accepted the bundle.
 Submit is done when a pull request exists.
@@ -92,12 +93,29 @@ of them. One match is a suggestion to confirm; several make the mapping
 ambiguous and you choose, because choosing for you would publish a measurement
 under a model nobody ran.
 
-When nothing matches, the proposal opens. It tells you whether one is needed,
-what it still lacks, what gets written beside the evidence
+When nothing matches, there are two ways on and the panel offers both.
+
+The first is the model's own **eligibility**: the licence its publisher
+states, an https URL where that licence can be read, that anybody can download
+the weights, and that it is a text-generation model. Typed into the custom
+model fields, those four facts go into the bundle as `model.eligibility` under
+schema 1.2, and the model is recorded as `uncatalogued` — not on the list, and
+not asking to be. The panel reports which of the four are still missing. It
+verifies none of them: it does not open the licence, does not fetch the
+weights, and labels every value as the contributor's word. See
+[model-eligibility.md](model-eligibility.md).
+
+The second is a **proposal**, which opens when it is the route left. It tells
+you what it still lacks, what gets written beside the evidence
 (`model-proposal.json`), and exactly what a reviewer would receive. A proposal
 is a request for review: accepting it is a separate change to
 `catalog/models/`, and merging the result would not make it. See
 [provenance.md](provenance.md).
+
+The two are alternatives, not steps. Opening the proposal section is not
+starting a proposal, and a proposal nobody has typed into never overrides a
+complete declaration. Where both are present, the proposal wins: it is an
+explicit request somebody else has to answer.
 
 ## Check: load the tokenizer before the benchmark does
 

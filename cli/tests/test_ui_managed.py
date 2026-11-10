@@ -80,29 +80,44 @@ class GuidedServiceTests(unittest.TestCase):
 
     # -- static assets --------------------------------------------------------
 
-    def test_guided_assets_are_served_without_exposing_the_token(self):
-        for path, content_type in [("/guided", "text/html"), ("/guided.js", "text/javascript"), ("/guided.css", "text/css")]:
+    def test_panel_assets_are_served_without_exposing_the_token(self):
+        for path, content_type in [("/", "text/html"),
+                                   ("/managed-setup.js", "text/javascript"),
+                                   ("/app.js", "text/javascript"),
+                                   ("/style.css", "text/css")]:
             status, headers, content = self.request(path)
             self.assertEqual(status, 200, path)
             self.assertIn(content_type, headers["Content-Type"])
             self.assertNotIn(self.server.token.encode(), content)
             self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
 
-    def test_root_serves_the_guided_page_by_default(self):
-        """omobench ui now opens the guided experience by default (previously the
-        advanced panel)."""
-        status_root, _, content_root = self.request("/")
-        status_guided, _, content_guided = self.request("/guided")
-        self.assertEqual(status_root, 200)
-        self.assertEqual(content_root, content_guided)
-        self.assertIn(b"Choose your test", content_root)
+    def test_every_panel_address_serves_the_one_panel(self):
+        """There is one page now. The old addresses still answer, because a
+        bookmark should not break, and they serve the same panel rather than
+        redirecting: the connection token lives in the URL fragment, which a
+        redirect would throw away."""
+        bodies = {}
+        for path in ("/", "/guided", "/advanced"):
+            status, _, content = self.request(path)
+            self.assertEqual(status, 200, path)
+            bodies[path] = content
+        self.assertEqual(bodies["/"], bodies["/guided"])
+        self.assertEqual(bodies["/"], bodies["/advanced"])
+        self.assertIn(b"Choose a workload for this hardware", bodies["/"])
 
-    def test_advanced_panel_stays_available_and_cross_links_with_guided(self):
-        status, _, content = self.request("/advanced")
-        self.assertEqual(status, 200)
-        self.assertIn(b'href="/"', content)  # back to the guided page
-        _, _, guided_content = self.request("/")
-        self.assertIn(b'href="/advanced"', guided_content)
+    def test_the_panel_has_one_workload_selector_and_no_second_run_flow(self):
+        _, _, content = self.request("/")
+        self.assertEqual(content.count(b'id="workload-select"'), 1)
+        # The managed component mounts inside the panel; it brings no selector,
+        # stepper or dashboard of its own.
+        self.assertIn(b'id="managed-setup"', content)
+        self.assertEqual(content.count(b'id="managed-setup"'), 1)
+        for gone in (b"/guided.js", b"/guided.css", b'href="/advanced"'):
+            self.assertNotIn(gone, content)
+
+    def test_the_removed_guided_assets_are_gone(self):
+        for path in ("/guided.js", "/guided.css"):
+            self.assertEqual(self.request(path)[0], 404, path)
 
     # -- auth ------------------------------------------------------------------
 

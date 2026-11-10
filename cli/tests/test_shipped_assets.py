@@ -52,7 +52,7 @@ class ShippedAssetTests(unittest.TestCase):
         self.assertEqual(routes["/favicon.svg"], "favicon.svg")
 
     def test_both_pages_declare_the_same_shared_assets(self):
-        for name in ("guided.html", "index.html"):
+        for name in ("index.html",):
             markup = (WEB / name).read_text(encoding="utf-8")
             with self.subTest(page=name):
                 self.assertIn('<script src="/dashboard.js"', markup)
@@ -88,7 +88,7 @@ class ShippedAssetTests(unittest.TestCase):
 
     def test_no_page_references_an_asset_the_panel_does_not_serve(self):
         routes = set(served_assets())
-        for name in ("guided.html", "index.html"):
+        for name in ("index.html",):
             markup = (WEB / name).read_text(encoding="utf-8")
             for reference in re.findall(r'(?:src|href)="(/[^"]*)"', markup):
                 with self.subTest(page=name, reference=reference):

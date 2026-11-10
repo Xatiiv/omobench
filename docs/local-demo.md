@@ -9,7 +9,8 @@ the presentation and filters.
 
 Prefer not to hand-install a model server for this? [Guided CPU setup](guided-launcher.md)
 downloads, verifies, and starts one reviewed small CPU model (`qwen3-4b-cpu-v1`)
-through `omobench prepare`/`omobench launch` or the panel's `/guided` page,
+through `omobench prepare`/`omobench launch` or the panel's managed-setup
+component,
 then runs this same unchanged benchmark. It is a development milestone, not a
 general installer. The rest of this walkthrough uses a model you install and
 start yourself, which stays available either way.
@@ -78,7 +79,7 @@ The panel normally uses port `8765`; the model server uses `8092`. The page
 that opens is the guided benchmark, which downloads and runs its own model;
 since this demo starts a server yourself, open **`/advanced`** instead (same
 token, same origin) for the connect-and-run form below. If you would rather
-skip starting a server by hand, the guided page's default flow does that for
+skip starting a server by hand, choosing a reviewed workload does that for
 you, see [Guided CPU setup](guided-launcher.md).
 
 ### 4. Browser: connect and start

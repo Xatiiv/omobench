@@ -76,6 +76,10 @@ context.CommunitySubmission = class {
   constructor() {} refresh() {} ticket() { return { mode: "community" }; }
   current() { return true; } destination() { return ""; } payload() { return {}; }
 };
+// The managed-setup component is the real one, loaded the way the page loads
+// it: before app.js, which constructs it at module scope. Defining the class
+// costs nothing; it talks to no API until the panel selects a workload.
+runInContext(readFileSync(appPath.replace(/app\.js$/, "managed-setup.js"), "utf8"), context);
 runInContext(source, context, { filename: appPath });
 
 function fill(values) {
@@ -168,5 +172,73 @@ try {
   context.withProvenance(Object.fromEntries(new HarnessFormData(get("package-form"))));
   states.errors.badManifest = "accepted";
 } catch (error) { states.errors.badManifest = error.message; }
+
+fill({ "weights-manifest": "" });
+
+// A model nobody curated, submitted on what makes it publishable rather than
+// on membership of a list it is not asking to join. The panel shows this
+// section only when Custom model is the chosen workload, which is what makes
+// these fields a declaration about this run.
+get("custom-workload").hidden = false;
+fill({
+  "custom-model-id": "someone/Model-7B",
+  "custom-licence": "apache-2.0",
+  "custom-licence-url": "https://huggingface.co/someone/Model-7B/blob/main/LICENSE",
+  "custom-publisher": "someone",
+  "custom-source": "https://huggingface.co/someone/Model-7B",
+  "custom-downloadable": true,
+});
+states.uncatalogued = context.withProvenance(
+  Object.fromEntries(new HarnessFormData(get("package-form"))));
+
+// Weights nobody else can obtain. Still declared, still refused publicly by
+// the validator; the page does not quietly drop the fact.
+fill({ "custom-downloadable": false });
+states.privateWeights = context.withProvenance(
+  Object.fromEntries(new HarnessFormData(get("package-form"))));
+
+// An open proposal section nobody has typed into declares nothing. The panel
+// opens it by itself for an uncatalogued model, so treating that as a started
+// proposal would let it beat a complete declaration without anybody asking.
+get("model-proposal-section").hidden = false;
+fill({
+  "proposal-family": "", "proposal-parameter-class": "", "proposal-source": "",
+  "proposal-licence": "", "proposal-rationale": "", "proposal-public": false,
+  "custom-downloadable": true,
+});
+states.emptyProposalSection = context.withProvenance(
+  Object.fromEntries(new HarnessFormData(get("package-form"))));
+
+// A proposal somebody actually wrote is an explicit request for review and
+// keeps precedence over the eligibility route.
+fill({
+  "proposal-family": "Model", "proposal-parameter-class": "7B",
+  "proposal-source": "https://huggingface.co/someone/Model-7B",
+  "proposal-licence": "apache-2.0", "proposal-rationale": "Measured here.",
+  "proposal-public": true,
+});
+states.proposalWins = context.withProvenance(
+  Object.fromEntries(new HarnessFormData(get("package-form"))));
+get("model-proposal-section").hidden = true;
+
+// Nothing typed in the custom panel declares nothing. A blank form is not a
+// claim that a model has no licence.
+fill({
+  "custom-model-id": "", "custom-licence": "", "custom-licence-url": "",
+  "custom-publisher": "", "custom-source": "", "custom-downloadable": false,
+});
+states.noCustomModel = context.withProvenance(
+  Object.fromEntries(new HarnessFormData(get("package-form"))));
+
+// Switching back to a curated workload stops the typed fields describing this
+// run, without discarding what was typed.
+fill({
+  "custom-model-id": "someone/Model-7B", "custom-licence": "apache-2.0",
+  "custom-licence-url": "https://huggingface.co/someone/Model-7B/blob/main/LICENSE",
+  "custom-downloadable": true,
+});
+get("custom-workload").hidden = true;
+states.curatedAgain = context.withProvenance(
+  Object.fromEntries(new HarnessFormData(get("package-form"))));
 
 console.log(JSON.stringify(states, null, 2));
