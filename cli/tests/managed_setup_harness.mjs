@@ -1,12 +1,16 @@
 // The managed-setup component, driven inside the one panel's DOM.
 //
-// Everything slow about managed setup is the download, so that is what this
-// exercises: resume, cancellation, a checksum the server rejects, and
-// recovery of a job still running when the panel reopened. None of it
-// fetches a model -- the API is a fixture returning the same shapes the real
-// endpoints return, with byte counts small enough to assert on. What this
-// does NOT establish is that a real 2.5 GB download resumes correctly; that
-// needs the real downloader and is noted as untested here.
+// What the component does with a download: report real byte counts, cancel the
+// job it actually started, refuse to turn a rejected checksum into a
+// benchmark, and adopt a job that was still running when the panel reopened.
+//
+// The API here is a fixture returning the same shapes the real endpoints
+// return. It is about the component's behaviour, not the downloader's: resume,
+// quarantine and mid-flight cancellation are exercised against the real
+// `managed_setup.resumable_download` over loopback in
+// cli/tests/test_managed_downloads.py. Neither of them establishes that a real
+// 2.5 GB model download resumes correctly -- same code path, different
+// network, and that remains untested.
 import { createContext, runInContext } from "node:vm";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";

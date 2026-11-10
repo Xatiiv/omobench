@@ -218,6 +218,10 @@ interpret is not evidence.
   identification have never been exercised against real hardware.
 - The managed recipes are CPU recipes. They are useful here for testing
   download, verification, cancellation and recovery, not for measuring the GPU.
+- The downloader's resume, quarantine and cancellation are tested over
+  loopback against a 4 MiB fixture (`cli/tests/test_managed_downloads.py`).
+  Step 5 is the first time that code meets a real 2.5 GB fetch over a real
+  network, which is why step 5 asks you to interrupt it on purpose.
 - Suspension detection cannot see a Hyper-V pause from inside WSL2; a laptop
   lid or a sleeping host is reported as an unconfirmed clock jump, not as a
   confirmed suspension. See [bounded-execution.md](bounded-execution.md).

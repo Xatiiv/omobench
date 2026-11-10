@@ -7,10 +7,14 @@ component inside the panel's DOM.
 
 Everything slow about managed setup is the download, so that is what is
 exercised -- progress, cancellation, a rejected checksum and recovery -- with
-fixtures whose byte counts are small enough to assert on. **This does not
-establish that a real multi-gigabyte download resumes correctly over a real
-network.** That needs the actual downloader against real files, and is listed
-as untested.
+fixtures whose byte counts are small enough to assert on.
+
+This file is about the component. The downloader itself -- resume after a
+dropped connection, quarantine on a checksum mismatch, cancellation partway
+through -- is exercised over loopback in test_managed_downloads.py. **Neither
+establishes that a real multi-gigabyte download resumes correctly over a real
+network.** It is the same code path and a different network, and it remains
+untested.
 """
 from __future__ import annotations
 
