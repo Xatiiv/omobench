@@ -41,6 +41,25 @@ Pass: `windows\installer\build\` contains `OmoBenchSetup.exe`, `version.json`
 and `SHA256SUMS`, and the `-Test` run reports the payload provenance tests and
 the installer harness as passing.
 
+Two notes on that command. Run it in a PowerShell window rather than piping its
+output through a redirect: Windows PowerShell turns a native program's stderr
+into a terminating error, and git prints ordinary line-ending warnings there,
+so a redirect makes a passing run look like a failure. And the build refuses to
+produce a payload from a dirty working tree -- the payload is the committed
+revision, byte for byte -- so commit first.
+
+To watch the real installer window without installing anything, build the
+sandbox fixture as well:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File windows\installer\build.ps1 -WizardFixture
+```
+
+`build\OmoBenchWizardFixture.exe` runs the actual wizard against its own install
+location, registry entries and fake distribution. Nothing runs in WSL and
+nothing of yours is touched, so Stop, retry and closing mid-work can be tried
+on a real desktop. It is never shipped.
+
 Then run `OmoBenchSetup.exe`.
 
 - SmartScreen will say the publisher is unknown. That is accurate: these builds
