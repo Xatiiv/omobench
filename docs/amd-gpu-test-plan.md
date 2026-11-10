@@ -66,7 +66,37 @@ selector. The previous one opened on a list of model cards headed *Choose your
 test* and kept a separate `/advanced` page. If you see model cards first, the
 panel is running the old code, whatever the version files say.
 
-## 1. Build and install
+## 1. Get the installer, and install it
+
+### From CI, which is the one to prefer
+
+Every pull request that touches `windows/**` builds the installer on a clean
+`windows-latest` runner, from the branch's own head commit rather than a
+synthetic merge commit, and refuses to upload anything whose stamped revision,
+recorded checksum and actual bytes do not all agree. That artifact is the one
+to test with.
+
+On the pull request, open **Checks -> Windows installer -> Build and test**.
+The run's summary page lists an artifact named
+`OmoBenchSetup-<version>-<revision>`; the job's log carries a notice line
+giving the same version, revision and SHA-256. Download the artifact, unzip it,
+and check the executable against that line:
+
+```powershell
+Get-FileHash .\OmoBenchSetup.exe -Algorithm SHA256
+Get-Content .\version.json
+```
+
+Pass: the hash matches the notice and `installer_sha256` in `version.json`,
+`source_clean` is `true`, and `revision` is the commit you meant to test.
+
+Artifacts expire after 14 days. **A build is not byte-reproducible** — the same
+revision built twice gives two different checksums, which `version.json`
+records as `"reproducible": false` — so a locally built installer will not
+match the CI one. Check each against its own `version.json`, never against the
+other's.
+
+### Or build it yourself
 
 The installer carries the OmoBench source inside it, so it must be built from a
 **committed** revision. A build from a dirty working tree is refused for the
@@ -100,12 +130,15 @@ location, registry entries and fake distribution. Nothing runs in WSL and
 nothing of yours is touched, so Stop, retry and closing mid-work can be tried
 on a real desktop. It is never shipped.
 
-Then run `OmoBenchSetup.exe`.
+### Installing
+
+Run `OmoBenchSetup.exe`, from whichever of the two you chose.
 
 - SmartScreen will say the publisher is unknown. That is accurate: these builds
   are unsigned. Choose *More info → Run anyway*.
 - Check that the first screen's **source revision** matches the commit you
-  built from, and that its **signing status** says unsigned.
+  meant to test -- the one from `version.json`, not whatever is checked out on
+  this machine -- and that its **signing status** says unsigned.
 - Press **Install**. There should be no administrator prompt.
 
 Pass: the installer finishes by saying OmoBench is ready, and offers to open
