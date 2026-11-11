@@ -15,12 +15,12 @@ async function render(route) {
   return response.text();
 }
 
-test("renders OmoBench with a route to the benchmark and labelled demo data", async () => {
+test("renders OmoBench with a route to the benchmark and published registry data", async () => {
   const html = await render("/");
   assert.match(html, /<title>OmoBench/);
   assert.match(html, /href="\/run"/);
   assert.match(html, /Put your AI/);
-  assert.match(html, /Illustrative local data/i);
+  assert.doesNotMatch(html, /Illustrative local data|Initial coverage plan|No benchmark results published yet/i);
   assert.match(html, /Benchmark registry/i);
 });
 
