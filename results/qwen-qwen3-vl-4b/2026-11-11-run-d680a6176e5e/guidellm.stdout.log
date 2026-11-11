@@ -1,0 +1,108 @@
+✔ BridgeBackend backend validated with model qwen/qwen3-vl-4b
+  {'kind': 'openai_http', 'target': '<LOCAL_ENDPOINT>', 'model':          
+  'qwen/qwen3-vl-4b', 'request_format': '/v1/chat/completions', 'api_key': None,
+  'api_routes': {'/health': 'health', '/v1/models': 'v1/models',                
+  '/v1/completions': 'v1/completions', '/v1/chat/completions':                  
+  'v1/chat/completions', '/v1/embeddings': 'v1/embeddings', '/v1/responses':    
+  'v1/responses', '/v1/audio/transcriptions': 'v1/audio/transcriptions',        
+  '/v1/audio/translations': 'v1/audio/translations', '/pooling': 'pooling'},    
+  'timeout': 300.0, 'timeout_connect': 5.0, 'http2': False, 'follow_redirects': 
+  False, 'verify': False, 'validate_backend': True, 'stream': True, 'extras':   
+  None, 'max_tokens': None, 'server_history': False,                            
+  'tool_call_missing_behavior': 'error_stop', 'multiturn_reasoning': False}     
+✔ Tokenizer resolved, Using tokenizer 'Qwen/Qwen3-VL-4B-Instruct' from arguments
+  {'kind': 'huggingface_auto', 'model': 'Qwen/Qwen3-VL-4B-Instruct',            
+  'load_kwargs': {}}                                                            
+✔ 1 datasets resolved
+  [{'kind': 'synthetic_text', 'load_kwargs': {}, 'prompt_tokens': 1024,         
+  'prompt_tokens_stdev': None, 'prompt_tokens_min': None, 'prompt_tokens_max':  
+  None, 'output_tokens': 256, 'output_tokens_stdev': None, 'output_tokens_min': 
+  None, 'output_tokens_max': None, 'delay': None, 'delay_stdev': None,          
+  'delay_min': None, 'delay_max': None, 'turns': 1, 'tool_call_turns': [],      
+  'tools': None, 'tool_response_tokens': None, 'tool_response_tokens_stdev':    
+  None, 'tool_response_tokens_min': None, 'tool_response_tokens_max': None,     
+  'server_tool_call_turns': [], 'prefix_buckets': None}]                        
+✔ 2 preprocessors resolved
+  [{'kind': 'generative_column_mapper', 'column_mappings': None}, {'kind':      
+  'encode_media', 'audio_kwargs': {}, 'image_kwargs': {}, 'video_kwargs': {}}]  
+✔ Finalizer resolved
+  {'kind': 'generative', 'tool_call_mode': 'client'}                            
+✔ Request loader resolved with inf unique requests
+  {'kind': 'pytorch', 'samples': -1, 'shuffle': False, 'num_workers': 1}        
+✔ SynchronousProfile profile resolved
+  {'kind': 'synchronous', 'rampup_duration': 0.0, 'warmup': {'percent': None,   
+  'value': 4, 'mode': 'requests'}, 'cooldown': {'percent': None, 'value': 4,    
+  'mode': 'requests'}}                                                          
+✔ Output formats resolved
+  [{'kind': 'json', 'path':                                                     
+  '/mnt/c/Users/Xativ/AppData/Local/OmoBench/source/6822f9368c43b0eebe9f08065fd0
+  f58ca0752d0a/.omobench-runs/ui/job-3181deacc33f4c9d/run-d680a6176e5e/guidellm-
+  benchmarks.json'}]                                                            
+✔ Setup complete, starting benchmarks...
+
+
+
+
+
+ℹ Run Summary Info
+|=============|==========|==========|======|======|======|=========|=====|=====|=========|=====|=====|
+| Benchmark   | Timings                              ||||| Input Tokens      ||| Output Tokens     |||
+| Strategy    | Start    | End      | Dur  | Warm | Cool | Comp    | Inc | Err | Comp    | Inc | Err |
+|             |          |          | Sec  | Sec  | Sec  | Tot     | Tot | Tot | Tot     | Tot | Tot |
+|-------------|----------|----------|------|------|------|---------|-----|-----|---------|-----|-----|
+| synchronous | 16:16:01 | 16:17:30 | 89.5 | 9.1  | 8.9  | 51600.0 | 0.0 | 0.0 | 12800.0 | 0.0 | 0.0 |
+|=============|==========|==========|======|======|======|=========|=====|=====|=========|=====|=====|
+
+
+ℹ Text Metrics Statistics (Completed Requests)
+|=============|========|========|=======|=======|=======|=======|=======|=======|========|========|========|========|
+| Benchmark   | Input Tokens                 |||| Input Words                |||| Input Characters               ||||
+| Strategy    | Per Request    || Per Second   || Per Request  || Per Second   || Per Request    || Per Second     ||
+|             | Mdn    | p95    | Mdn   | Mean  | Mdn   | p95   | Mdn   | Mean  | Mdn    | p95    | Mdn    | Mean   |
+|-------------|--------|--------|-------|-------|-------|-------|-------|-------|--------|--------|--------|--------|
+| synchronous | 1032.0 | 1032.0 | 577.2 | 588.1 | 855.0 | 861.0 | 477.9 | 487.3 | 5742.0 | 5852.0 | 3217.2 | 3279.2 |
+|=============|========|========|=======|=======|=======|=======|=======|=======|========|========|========|========|
+| Benchmark   | Output Tokens                |||| Output Words               |||| Output Characters              ||||
+| Strategy    | Per Request    || Per Second   || Per Request  || Per Second   || Per Request    || Per Second     ||
+|             | Mdn    | p95    | Mdn   | Mean  | Mdn   | p95   | Mdn   | Mean  | Mdn    | p95    | Mdn    | Mean   |
+|-------------|--------|--------|-------|-------|-------|-------|-------|-------|--------|--------|--------|--------|
+| synchronous | 256.0  | 256.0  | 143.2 | 145.9 | 167.0 | 190.0 | 93.5  | 92.6  | 1046.0 | 1159.0 | 585.0  | 597.5  |
+|=============|========|========|=======|=======|=======|=======|=======|=======|========|========|========|========|
+
+
+ℹ Request Token Statistics (Completed Requests)
+|=============|========|========|=======|=======|========|========|=======|=======|=========|========|
+| Benchmark   | Input Tok      || Output Tok   || Total Tok      || Stream Iter  || Output Tok      ||
+| Strategy    | Per Req        || Per Req      || Per Req        || Per Req      || Per Stream Iter ||
+|             | Mdn    | p95    | Mdn   | p95   | Mdn    | p95    | Mdn   | p95   | Mdn     | p95    |
+|-------------|--------|--------|-------|-------|--------|--------|-------|-------|---------|--------|
+| synchronous | 1032.0 | 1032.0 | 256.0 | 256.0 | 1288.0 | 1288.0 | 257.0 | 259.0 | 1.0     | 1.0    |
+|=============|========|========|=======|=======|========|========|=======|=======|=========|========|
+
+
+ℹ Request Latency Statistics (Completed Requests)
+|=============|=========|========|=======|=======|=======|=======|=====|=====|=====|=====|
+| Benchmark   | Request Latency || TTFT         || TTFOT        || ITL      || TPOT     ||
+| Strategy    | Sec             || ms           || ms           || ms       || ms       ||
+|             | Mdn     | p95    | Mdn   | p95   | Mdn   | p95   | Mdn | p95 | Mdn | p95 |
+|-------------|---------|--------|-------|-------|-------|-------|-----|-----|-----|-----|
+| synchronous | 1.8     | 1.8    | 242.9 | 259.0 | 242.9 | 259.0 | 6.0 | 6.1 | 7.0 | 7.1 |
+|=============|=========|========|=======|=======|=======|=======|=====|=====|=====|=====|
+
+
+ℹ Server Throughput Statistics (All Requests)
+|=============|=======|======|=========|==============|===============|==============|
+| Benchmark   | Requests             ||| Input Tokens | Output Tokens | Total Tokens |
+| Strategy    | Concurrency || Per Sec | Per Sec      | Per Sec       | Per Sec      |
+|             | Mdn   | Mean | Mean                                               ||||
+|-------------|-------|------|---------|--------------|---------------|--------------|
+| synchronous | 1.0   | 1.0  | 0.6     | 588.1        | 143.4         | 721.3        |
+|=============|=======|======|=========|==============|===============|==============|
+
+
+
+✔ Benchmarking complete, generated 1 benchmark(s)
+…   json    : 
+/mnt/c/Users/Xativ/AppData/Local/OmoBench/source/6822f9368c43b0eebe9f08065fd0f58
+ca0752d0a/.omobench-runs/ui/job-3181deacc33f4c9d/run-d680a6176e5e/guidellm-bench
+marks.json
