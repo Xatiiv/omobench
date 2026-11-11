@@ -27,10 +27,10 @@ export type WindowsRelease = {
 
 export const windowsRelease: WindowsRelease | null = {
   version: "0.1.1",
-  revision: "6822f9368c43b0eebe9f08065fd0f58ca0752d0a",
+  revision: "535df02454421281bda672e5ab5fb7cc2d40db01",
   downloadUrl: "https://github.com/Xatiiv/omobench/releases/download/windows-v0.1.1/OmoBenchSetup.exe",
   releaseUrl: "https://github.com/Xatiiv/omobench/releases/tag/windows-v0.1.1",
-  sha256: "175294739241a4298cd5add46acda84f7f478a5f3951ff83da26d6243e7ed662",
+  sha256: "e1f8c01cdac5fac452f5ad1f1b149987638a9ec35e8d29680c93241e26390b74",
   signed: false,
 };
 
