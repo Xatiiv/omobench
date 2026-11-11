@@ -20,7 +20,6 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { comparisonHref } from "@/app/lib/comparison";
-import { demoResults, type DemoResult } from "@/app/data/demo-results";
 import { registryResults, type RegistryResult } from "@/app/data/registry-results";
 
 const profiles = [
@@ -54,22 +53,6 @@ const profiles = [
   },
 ];
 
-const seedPlan = [
-  ["Qwen3-4B", "vLLM · SGLang · llama.cpp", "Planned"],
-  ["Llama 3.1 8B Instruct", "vLLM · SGLang · llama.cpp", "Planned"],
-  ["DeepSeek-R1-Distill-Qwen-14B", "vLLM · SGLang", "Planned"],
-  ["Mistral Small 3.1 24B", "vLLM · SGLang", "Planned"],
-  ["Qwen3-32B", "vLLM · SGLang", "Planned"],
-];
-
-const getOptions = (key: keyof DemoResult) =>
-  Array.from(new Set(demoResults.map((result) => result[key]))).sort();
-
-const modelOptions = getOptions("model");
-const hardwareOptions = getOptions("hardware");
-const frameworkOptions = getOptions("framework");
-const profileOptions = getOptions("profile");
-
 const getRegistryOptions = (select: (result: RegistryResult) => string) =>
   Array.from(new Set(registryResults.map(select))).sort();
 
@@ -94,7 +77,7 @@ function deviceBadgeClassName(executionDevice: RegistryResult["executionDevice"]
     : "border-amber-400/30 bg-amber-400/10 text-amber-200";
 }
 
-type DemoFilterProps = {
+type RegistryFilterProps = {
   id: string;
   label: string;
   onValueChange: (value: string) => void;
@@ -102,7 +85,7 @@ type DemoFilterProps = {
   value: string;
 };
 
-function DemoFilter({ id, label, onValueChange, options, value }: DemoFilterProps) {
+function RegistryFilter({ id, label, onValueChange, options, value }: RegistryFilterProps) {
   return (
     <div>
       <label className="mb-1.5 block font-mono text-[11px] uppercase tracking-[0.14em] text-slate-500" htmlFor={id}>
@@ -182,12 +165,12 @@ function LocalRegistry() {
         ) : (
           <>
             <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
-              <DemoFilter id="registry-hardware-filter" label="Hardware" onValueChange={setHardware} options={registryHardwareOptions} value={hardware} />
-              <DemoFilter id="registry-device-filter" label="Execution device" onValueChange={setDevice} options={registryExecutionDeviceOptions} value={device} />
-              <DemoFilter id="registry-model-filter" label="Workload model" onValueChange={setModel} options={registryModelOptions} value={model} />
-              <DemoFilter id="registry-catalog-filter" label="Catalog status" onValueChange={setCatalog} options={registryCatalogOptions} value={catalog} />
-              <DemoFilter id="registry-framework-filter" label="Framework" onValueChange={setFramework} options={registryFrameworkOptions} value={framework} />
-              <DemoFilter id="registry-profile-filter" label="Profile" onValueChange={setProfile} options={registryProfileOptions} value={profile} />
+              <RegistryFilter id="registry-hardware-filter" label="Hardware" onValueChange={setHardware} options={registryHardwareOptions} value={hardware} />
+              <RegistryFilter id="registry-device-filter" label="Execution device" onValueChange={setDevice} options={registryExecutionDeviceOptions} value={device} />
+              <RegistryFilter id="registry-model-filter" label="Workload model" onValueChange={setModel} options={registryModelOptions} value={model} />
+              <RegistryFilter id="registry-catalog-filter" label="Catalog status" onValueChange={setCatalog} options={registryCatalogOptions} value={catalog} />
+              <RegistryFilter id="registry-framework-filter" label="Framework" onValueChange={setFramework} options={registryFrameworkOptions} value={framework} />
+              <RegistryFilter id="registry-profile-filter" label="Profile" onValueChange={setProfile} options={registryProfileOptions} value={profile} />
             </div>
             <p aria-live="polite" className="mt-4 text-sm text-slate-400">
               Showing <span className="font-mono text-slate-200">{filteredResults.length}</span> of {registryResults.length} registry results.
@@ -248,23 +231,6 @@ function LocalRegistry() {
 }
 
 export default function Home() {
-  const [model, setModel] = useState("all");
-  const [hardware, setHardware] = useState("all");
-  const [framework, setFramework] = useState("all");
-  const [profile, setProfile] = useState("all");
-
-  const filteredResults = useMemo(
-    () =>
-      demoResults.filter(
-        (result) =>
-          (model === "all" || result.model === model) &&
-          (hardware === "all" || result.hardware === hardware) &&
-          (framework === "all" || result.framework === framework) &&
-          (profile === "all" || result.profile === profile),
-      ),
-    [framework, hardware, model, profile],
-  );
-
   return (
     <main className="product-page min-h-screen text-slate-50">
       <div className="mx-auto max-w-7xl px-6 py-6 sm:px-10 lg:px-12">
@@ -339,101 +305,6 @@ export default function Home() {
         </section>
 
         <LocalRegistry />
-
-        <section className="pb-16" id="compare">
-          <div className="rounded-2xl border border-amber-400/20 bg-amber-400/[0.035] p-6 sm:p-8">
-            <div className="flex flex-col gap-3 border-b border-white/10 pb-6 sm:flex-row sm:items-end sm:justify-between">
-              <div>
-                <p className="font-mono text-xs uppercase tracking-[0.2em] text-amber-300">Interface demonstration</p>
-                <h2 className="mt-2 text-2xl font-semibold tracking-tight">Try the comparison interaction.</h2>
-                <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-400">Choose filters to explore the interaction. Every row below is local demonstration data, not a benchmark claim. Packaged results appear separately above.</p>
-              </div>
-              <Badge className="border-amber-300/30 bg-amber-300/10 text-amber-200" variant="outline">Illustrative local data</Badge>
-            </div>
-            <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <DemoFilter id="model-filter" label="Model" onValueChange={setModel} options={modelOptions} value={model} />
-              <DemoFilter id="hardware-filter" label="Hardware" onValueChange={setHardware} options={hardwareOptions} value={hardware} />
-              <DemoFilter id="framework-filter" label="Framework" onValueChange={setFramework} options={frameworkOptions} value={framework} />
-              <DemoFilter id="profile-filter" label="Profile" onValueChange={setProfile} options={profileOptions} value={profile} />
-            </div>
-            <p aria-live="polite" className="mt-4 text-sm text-slate-400">
-              Showing <span className="font-mono text-slate-200">{filteredResults.length}</span> of {demoResults.length} illustrative rows. Choose <span className="font-mono text-slate-200">Any</span> to remove a filter.
-            </p>
-            <div className="mt-4">
-              <Table>
-                <TableHeader>
-                  <TableRow className="border-white/10 hover:bg-transparent">
-                    <TableHead className="text-slate-400">Hardware</TableHead>
-                    <TableHead className="text-slate-400">Framework</TableHead>
-                    <TableHead className="text-slate-400">Quantization</TableHead>
-                    <TableHead className="text-slate-400">TTFT</TableHead>
-                    <TableHead className="text-slate-400">Output tok/s</TableHead>
-                    <TableHead className="text-right text-slate-400">Record</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {filteredResults.length === 0 ? (
-                    <TableRow className="border-white/10 hover:bg-transparent">
-                      <TableCell className="py-8 text-center text-sm text-slate-400" colSpan={6}>
-                        No illustrative rows match this combination yet.
-                      </TableCell>
-                    </TableRow>
-                  ) : (
-                    filteredResults.map((result) => (
-                    <TableRow className="border-white/10 hover:bg-white/[0.035]" key={result.id}>
-                      <TableCell>
-                        <p className="font-medium text-slate-100">{result.hardware}</p>
-                        <p className="mt-1 font-mono text-xs text-slate-500">{result.model}</p>
-                      </TableCell>
-                      <TableCell className="font-mono text-xs text-slate-300">{result.framework}</TableCell>
-                      <TableCell className="font-mono text-xs text-slate-300">{result.quantization}</TableCell>
-                      <TableCell className="font-mono text-slate-100">{result.ttft}</TableCell>
-                      <TableCell className="font-mono text-amber-300">{result.outputTokensPerSecond}</TableCell>
-                      <TableCell className="text-right">
-                        <a className="font-mono text-xs text-amber-300 transition hover:text-amber-200 hover:underline" href={`/runs/${result.id}`}>
-                          View details
-                        </a>
-                      </TableCell>
-                    </TableRow>
-                    ))
-                  )}
-                </TableBody>
-              </Table>
-            </div>
-          </div>
-        </section>
-
-        <section className="pb-16">
-          <div className="rounded-2xl border border-white/10 bg-white/[0.025] p-6 sm:p-8">
-            <div className="flex flex-col gap-3 border-b border-white/10 pb-6 sm:flex-row sm:items-end sm:justify-between">
-              <div>
-                <p className="font-mono text-xs uppercase tracking-[0.2em] text-slate-500">Seed registry</p>
-                <h2 className="mt-2 text-2xl font-semibold tracking-tight">Initial coverage plan</h2>
-              </div>
-              <Badge className="border-amber-300/30 bg-amber-300/10 text-amber-200" variant="outline">No benchmark results published yet</Badge>
-            </div>
-            <div className="mt-4">
-              <Table>
-                <TableHeader>
-                  <TableRow className="border-white/10 hover:bg-transparent">
-                    <TableHead className="text-slate-400">Model</TableHead>
-                    <TableHead className="text-slate-400">Initial runtime coverage</TableHead>
-                    <TableHead className="text-slate-400">Status</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {seedPlan.map(([model, runtimes, status]) => (
-                    <TableRow className="border-white/10 hover:bg-white/[0.035]" key={model}>
-                      <TableCell className="font-medium text-slate-100">{model}</TableCell>
-                      <TableCell className="font-mono text-xs text-slate-400">{runtimes}</TableCell>
-                      <TableCell><Badge className="border-white/15 bg-white/5 text-slate-300" variant="outline">{status}</Badge></TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          </div>
-        </section>
 
         <footer className="border-t border-white/10 py-8 text-sm text-slate-500">
           OmoBench is being built as a transparent registry for reproducible inference-performance evidence.
