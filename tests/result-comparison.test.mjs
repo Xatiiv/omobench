@@ -10,7 +10,9 @@ async function loadModule(path) {
   return import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`);
 }
 const { readResultRecord } = await loadModule("../app/lib/result-record.ts");
-const { incompatibilities, metricDifference, rankRuns, eligibleLeaderboard, barPercent, comparisonHref, formatMetric } = await loadModule("../app/lib/comparison.ts");
+const { comparisonExamples } = await loadModule("../app/data/comparison-examples.ts");
+const { summarize } = await loadModule("../app/lib/evidence.ts");
+const { assess, comparisonQuestions, suitabilityLabel, incompatibilities, metricDifference, rankRuns, eligibleLeaderboard, barPercent, comparisonHref, formatMetric, transportLabel, servingLabel, placementLabel, tokenizerLabel } = await loadModule("../app/lib/comparison.ts");
 
 function fixture() {
   const checksum = `sha256:${"a".repeat(64)}`;
@@ -137,4 +139,709 @@ test("legacy GPU execution and missing quantization retain their interpretation"
 test("compare links carry only an encoded public run ID", () => {
   assert.equal(comparisonHref("run-fixture-1234"), "/compare?run=run-fixture-1234");
   assert.equal(comparisonHref("a&token=secret"), "/compare?run=a%26token%3Dsecret");
+});
+
+
+// --- Schema 1.1: what served the result, beside what measured it -----------
+
+function fact(value, provenance = "contributor-declared") {
+  return { value, provenance: value === null ? "unknown" : provenance };
+}
+
+// A bridged AMD desktop. Entirely synthetic; no machine like this was measured.
+function bridgedFixture(overrides = {}) {
+  const base = fixture();
+  const checksum = `sha256:${"a".repeat(64)}`;
+  return {
+    ...base,
+    schema_version: "1.1",
+    execution_device: "gpu",
+    runtime: { ...base.runtime, framework: "lmstudio", version: "b10621" },
+    hardware: {
+      cpu: "AMD Ryzen 7 9800X3D", os: "Windows 11 Pro", ram_gb: 64, driver_version: null,
+      gpus: [{ vendor: "amd", model: "AMD Radeon RX 9070", memory_gb: 16, count: 1 }],
+    },
+    model: {
+      ...base.model,
+      served_model_id: "deepseek-r1-distill-qwen-14b",
+      catalog_status: "catalogued",
+      tokenizer: { source: "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B", kind: "huggingface",
+                   loaded: "loaded-before-run", matches_served_weights: "not-verifiable-here",
+                   identity: { class: "LlamaTokenizerFast", vocabulary_size: 152064 } },
+      weights: { kind: "repository", repository: "https://example.invalid/weights",
+                 repository_revision: "immutable-fixture-revision",
+                 identity: "repository-revision", content: null },
+    },
+    environment: {
+      metadata_version: "serving-environment-v1",
+      relationship: "windows-host-wsl-runner",
+      runner: { os: "Linux-6.6-WSL2", kind: "wsl2", python_version: "3.12.3", cpu: "x86_64", ram_gb: 31 },
+      serving: {
+        host: { os: fact("Windows 11 Pro"), cpu: fact("AMD Ryzen 7 9800X3D"), ram_gb: fact(64) },
+        accelerators: [{ vendor: "amd", model: "AMD Radeon RX 9070", memory_gb: 16, count: 1,
+                         role: "inference", provenance: "contributor-declared" }],
+        placement: { mode: "gpu-only", detail: null, provenance: "contributor-declared" },
+        runtime: { application: { name: "LM Studio", version: "0.3.31", provenance: "contributor-declared" },
+                   engine: { name: "llama.cpp", version: "b10621", provenance: "contributor-declared" },
+                   settings: [{ name: "context_length", value: "8192", provenance: "contributor-declared" }] },
+      },
+      transport: { kind: "windows-wsl-stdio-bridge", protocol: "HTTP/1.1",
+                   bridge_version: "windows-stdio-http1-v1", overhead: "included-not-measured" },
+    },
+    configuration_fingerprint: checksum,
+    ...overrides,
+  };
+}
+
+function bridged(overrides) { return readResultRecord("bridged fixture", bridgedFixture(overrides)); }
+
+test("a legacy 1.0 result still reads, and gains no facts it never recorded", () => {
+  const result = record();
+  assert.equal(result.schemaVersion, "1.0");
+  assert.equal(result.serving, null);
+  assert.equal(result.tokenizer, null);
+  assert.equal(result.weights, null);
+  assert.equal(result.servedModelId, null);
+  assert.equal(result.transportRecorded, false);
+  assert.equal(result.metadataDeclaredAfterExecution, false);
+});
+
+test("a 1.0 result cannot carry serving metadata in place", () => {
+  assert.throws(() => readResultRecord("mixed", { ...fixture(), environment: bridgedFixture().environment }), /schema 1.0/);
+});
+
+test("a bridged result reads its two environments separately", () => {
+  const result = bridged();
+  assert.equal(result.serving.relationship, "windows-host-wsl-runner");
+  assert.equal(result.serving.runner.kind, "wsl2");
+  assert.equal(result.hardware.cpu, "AMD Ryzen 7 9800X3D");
+  assert.notEqual(result.hardware.cpu, result.serving.runner.cpu);
+});
+
+test("bridge latency is reported as included, never as corrected for", () => {
+  const result = bridged();
+  assert.equal(result.transport.overheadIncluded, true);
+  assert.match(transportLabel(result), /inside every number/);
+});
+
+test("a legacy result says its transport was not separately recorded", () => {
+  assert.match(transportLabel(record()), /not separately recorded/);
+});
+
+test("a fact and its origin have to agree", () => {
+  for (const host of [
+    { os: { value: null, provenance: "detected" }, cpu: fact("x"), ram_gb: fact(1) },
+    { os: { value: "Windows", provenance: "unknown" }, cpu: fact("x"), ram_gb: fact(1) },
+  ]) {
+    const document = bridgedFixture();
+    document.environment.serving.host = host;
+    assert.throws(() => readResultRecord("bad fact", document));
+  }
+});
+
+test("a result cannot describe its serving hardware two different ways", () => {
+  const document = bridgedFixture();
+  document.hardware.gpus = [{ vendor: "nvidia", model: "NVIDIA RTX 4090", memory_gb: 24, count: 1 }];
+  assert.throws(() => readResultRecord("mismatched", document), /do not match/);
+});
+
+test("a card that was present but idle stays out of the result's hardware", () => {
+  const document = bridgedFixture();
+  document.environment.serving.accelerators.push({
+    vendor: "intel", model: "Intel Arc A770", memory_gb: 16, count: 1,
+    role: "present-not-used", provenance: "detected" });
+  const result = readResultRecord("idle card", document);
+  assert.equal(result.hardware.gpus.length, 1);
+  assert.equal(result.serving.accelerators.length, 2);
+});
+
+test("a split placement has to say how the weights were split", () => {
+  const document = bridgedFixture();
+  document.environment.serving.placement = { mode: "cpu-gpu-offload", detail: null, provenance: "contributor-declared" };
+  assert.throws(() => readResultRecord("split", document), /how the weights were split/);
+  document.environment.serving.placement.detail = "32 of 49 layers on GPU";
+  assert.match(placementLabel(readResultRecord("split", document)), /32 of 49 layers/);
+});
+
+test("a transport and a serving arrangement that describe different setups are refused", () => {
+  const document = bridgedFixture();
+  document.environment.relationship = "same-host";
+  document.environment.runner.kind = "native";
+  assert.throws(() => readResultRecord("mismatched setup", document), /different setups/);
+});
+
+test("a tokenizer that loaded is never read as a tokenizer that matches", () => {
+  const result = bridged();
+  assert.equal(result.tokenizer.loaded, "loaded-before-run");
+  assert.match(tokenizerLabel(result), /loaded before the run/);
+  const document = bridgedFixture();
+  document.model.tokenizer.matches_served_weights = "yes";
+  assert.throws(() => readResultRecord("claimed match", document), /nothing can establish/);
+});
+
+test("a served alias is kept apart from the canonical model", () => {
+  const result = bridged();
+  assert.equal(result.servedModelId, "deepseek-r1-distill-qwen-14b");
+  assert.equal(result.model, "Fixture/Model");
+});
+
+test("content-hashed weights report the files they were hashed from", () => {
+  const document = bridgedFixture();
+  document.model.weights = { kind: "local-files", repository: null, repository_revision: null,
+    identity: "content-hash",
+    content: { manifest_sha256: `sha256:${"c".repeat(64)}`,
+               files: [{ name: "a.gguf", bytes: 1, sha256: `sha256:${"d".repeat(64)}` },
+                       { name: "b.gguf", bytes: 2, sha256: `sha256:${"e".repeat(64)}` }] } };
+  const result = readResultRecord("hashed weights", document);
+  assert.equal(result.weights.identity, "content-hash");
+  assert.equal(result.weights.fileCount, 2);
+  assert.equal(result.weights.repositoryRevision, null);
+});
+
+test("a proposed model is readable and labelled, not silently catalogued", () => {
+  const document = bridgedFixture();
+  document.model.catalog_status = "proposed";
+  const result = readResultRecord("proposed", document);
+  assert.equal(result.catalogStatus, "proposed");
+  assert.throws(() => readResultRecord("proposed on 1.0", { ...fixture(), model: { ...fixture().model, catalog_status: "proposed" } }), /schema 1\.0 result cannot propose/);
+});
+
+// --- Schema 1.2: eligibility carried by the result, not by a list ----------
+
+// The same bridged machine, submitting a model nobody has curated. It is not
+// asking to be curated either: what makes it publishable travels with it.
+function uncataloguedFixture(overrides = {}) {
+  const document = bridgedFixture();
+  document.schema_version = "1.2";
+  document.model = {
+    ...document.model,
+    catalog_status: "uncatalogued",
+    eligibility: {
+      licence: "apache-2.0",
+      licence_url: "https://example.invalid/licence",
+      weights_publicly_downloadable: true,
+      modality: "text-generation",
+      publisher: "Fixture Lab",
+      source: "https://example.invalid/weights",
+      family: "Fixture",
+      parameter_class: "14B",
+      base_model: null,
+      ...(overrides.eligibility ?? {}),
+    },
+    ...(overrides.model ?? {}),
+  };
+  return { ...document, ...(overrides.document ?? {}) };
+}
+
+test("an uncatalogued 1.2 result reads, keeping its status and its eligibility", () => {
+  const result = readResultRecord("uncatalogued", uncataloguedFixture());
+  assert.equal(result.schemaVersion, "1.2");
+  assert.equal(result.catalogStatus, "uncatalogued");
+  assert.equal(result.eligibility.licence, "apache-2.0");
+  assert.equal(result.eligibility.weightsPubliclyDownloadable, true);
+  assert.equal(result.eligibility.parameterClass, "14B");
+  assert.equal(result.eligibility.baseModel, null);
+  // Everything 1.1 recorded is still recorded. 1.2 adds; it does not replace.
+  assert.equal(result.transport.kind, "windows-wsl-stdio-bridge");
+  assert.equal(result.serving.relationship, "windows-host-wsl-runner");
+});
+
+test("the site shows an uncatalogued result's eligibility as what made it publishable", () => {
+  const summary = summarize(readResultRecord("uncatalogued", uncataloguedFixture()));
+  const section = summary.sections.find((entry) => entry.id === "eligibility");
+  assert.ok(section, "an eligibility section is rendered");
+  const rows = Object.fromEntries(section.rows.map((row) => [row.label, row]));
+  assert.equal(rows["Licence"].value, "apache-2.0");
+  assert.equal(rows["Weights publicly downloadable"].value, "Yes");
+  assert.equal(rows["Modality"].value, "text-generation");
+  // Declared, never verified here. The site says whose word each fact is.
+  assert.equal(rows["Licence"].source, "stated by the contributor");
+  assert.match(summary.qualifications.join(" "), /not catalogued and is not asking to be/);
+  const status = summary.sections.find((entry) => entry.id === "model").rows
+    .find((row) => row.label === "Catalog status");
+  assert.match(status.value, /Not catalogued/);
+});
+
+test("a legacy result's eligibility section says nobody collected any, not that there is none", () => {
+  for (const [name, document] of [["1.0", fixture()], ["1.1", bridgedFixture()]]) {
+    const summary = summarize(readResultRecord(name, document));
+    const section = summary.sections.find((entry) => entry.id === "eligibility");
+    assert.equal(section.rows[0].recorded, false, name);
+    assert.match(section.rows[0].note, /collected none of this/, name);
+    assert.doesNotMatch(summary.qualifications.join(" "), /not asking to be/, name);
+  }
+  // And a 1.0 result states no catalog status at all, because it never did.
+  const legacy = summarize(readResultRecord("1.0", fixture()));
+  const status = legacy.sections.find((entry) => entry.id === "model").rows
+    .find((row) => row.label === "Catalog status");
+  assert.equal(status.recorded, false);
+});
+
+test("weights nobody else can obtain are called out on the page", () => {
+  const closed = uncataloguedFixture({ eligibility: { weights_publicly_downloadable: false } });
+  const summary = summarize(readResultRecord("closed weights", closed));
+  assert.match(summary.qualifications.join(" "), /nobody else can repeat this run/);
+});
+
+test("eligibility is a 1.2 statement and cannot appear on an older result", () => {
+  const stale = uncataloguedFixture();
+  stale.schema_version = "1.1";
+  stale.model.catalog_status = "catalogued";
+  assert.throws(() => readResultRecord("eligibility on 1.1", stale), /cannot carry model eligibility/);
+  const older = { ...fixture(), model: { ...fixture().model, catalog_status: "uncatalogued" } };
+  assert.throws(() => readResultRecord("uncatalogued on 1.0", older), /cannot be uncatalogued/);
+});
+
+test("an uncatalogued result with nothing to stand on is refused", () => {
+  const bare = uncataloguedFixture();
+  delete bare.model.eligibility;
+  assert.throws(() => readResultRecord("bare", bare), /eligibility facts a reviewer reads/);
+});
+
+test("eligibility a reviewer could not check is refused rather than displayed", () => {
+  assert.throws(
+    () => readResultRecord("http licence", uncataloguedFixture({ eligibility: { licence_url: "http://example.invalid/licence" } })),
+    /licence URL a reviewer cannot open/);
+  assert.throws(
+    () => readResultRecord("other modality", uncataloguedFixture({ eligibility: { modality: "image-generation" } })),
+    /modality OmoBench's profiles do not measure/);
+  assert.throws(
+    () => readResultRecord("unstated weights", uncataloguedFixture({ eligibility: { weights_publicly_downloadable: "yes" } })),
+    /whether its weights are publicly downloadable/);
+});
+
+test("a catalogued 1.2 result needs no eligibility block of its own", () => {
+  const curated = uncataloguedFixture();
+  curated.model.catalog_status = "catalogued";
+  delete curated.model.eligibility;
+  const result = readResultRecord("catalogued 1.2", curated);
+  assert.equal(result.catalogStatus, "catalogued");
+  assert.equal(result.eligibility, null);
+});
+
+test("metadata declared after the run is reported as such", () => {
+  const document = bridgedFixture();
+  document.submission = { ...document.submission, packaging: {
+    metadata_declared_after_execution: true, derived_from_run_id: "run-original-1234",
+    evidence_sha256: { "reproduce.md": `sha256:${"f".repeat(64)}` } } };
+  assert.equal(readResultRecord("derived", document).metadataDeclaredAfterExecution, true);
+});
+
+// --- Comparison -------------------------------------------------------------
+
+test("a bridged run is not mixed into a direct run's comparison", () => {
+  const direct = record();
+  const relayed = { ...direct, transport: bridged().transport, serving: bridged().serving,
+                    tokenizer: bridged().tokenizer };
+  assert.match(incompatibilities(direct, relayed).join(" "), /Different transport/);
+});
+
+test("two bridged runs stay comparable with each other", () => {
+  assert.deepEqual(incompatibilities(bridged(), bridged()), []);
+});
+
+// --- A run that was not running ---------------------------------------------
+
+function suspendedFixture(state = "suspended", seconds = 4296) {
+  const document = bridgedFixture();
+  document.execution = {
+    contract: "bounded-execution-v1",
+    limits: { inactivity_timeout_seconds: 300, request_deadline_seconds: 5400,
+              measurement_ceiling_seconds: 5400, shutdown_grace_seconds: 60 },
+    interruption: { state, observed_seconds: seconds, longest_seconds: seconds, events: [] },
+  };
+  return document;
+}
+
+test("a run suspended while measuring never ranks, whatever is asked of it", () => {
+  const suspended = readResultRecord("suspended", suspendedFixture());
+  for (const question of Object.keys(comparisonQuestions)) {
+    const assessment = assess(bridged(), suspended, question);
+    assert.equal(assessment.suitability, "unsuitable", question);
+    assert.match(assessment.reasons.join(" "), /suspended for 4296 seconds/);
+    assert.ok(assessment.blockers.includes("Suspended while measuring"), question);
+  }
+});
+
+test("it does not matter which side of the comparison was suspended", () => {
+  const suspended = readResultRecord("suspended", suspendedFixture());
+  assert.match(assess(suspended, bridged()).reasons.join(" "), /This run was suspended/);
+  assert.match(assess(bridged(), suspended).reasons.join(" "), /The other run was suspended/);
+});
+
+test("an unexplained gap is not treated as a suspension", () => {
+  const gapped = readResultRecord("gap", suspendedFixture("gap", 119));
+  assert.equal(assess(bridged(), gapped).suitability, "ranking");
+});
+
+test("an ambiguous clock jump does not rank, and is not called a suspension", () => {
+  const jumped = readResultRecord("jump", suspendedFixture("clock-jump", 4296));
+  const assessment = assess(bridged(), jumped);
+  assert.equal(assessment.suitability, "unsuitable");
+  assert.ok(assessment.blockers.includes("Clocks disagreed while measuring"));
+  assert.match(assessment.reasons.join(" "), /no suspend recorded by the kernel/);
+  assert.doesNotMatch(assessment.reasons.join(" "), /was suspended for/);
+});
+
+test("the website refuses an interruption state it does not understand", () => {
+  const document = suspendedFixture();
+  document.execution.interruption.state = "probably-fine";
+  assert.throws(() => readResultRecord("unknown", document), /unknown interruption state/);
+});
+
+test("a run that recorded no execution block is unaffected", () => {
+  assert.equal(assess(bridged(), bridged()).suitability, "ranking");
+  assert.equal(record().execution, null);
+});
+
+test("a legacy result reads as not recorded rather than as not interrupted", () => {
+  // The distinction the whole module turns on: nobody looked, which is not
+  // the same claim as nothing happened.
+  const legacy = record();
+  assert.equal(legacy.schemaVersion, "1.0");
+  assert.equal(legacy.execution, null);
+  const modern = readResultRecord("modern", bridgedFixture());
+  assert.equal(modern.execution, null, "1.1 without the block is also 'not recorded'");
+  assert.equal(assess(legacy, legacy).suitability, "ranking");
+});
+
+test("the fields a recorded execution block exposes survive ingestion", () => {
+  const ingested = readResultRecord("recorded", suspendedFixture("none", 0));
+  assert.equal(ingested.execution.contract, "bounded-execution-v1");
+  assert.equal(ingested.execution.limits.measurementCeilingSeconds, 5400);
+  assert.equal(ingested.execution.limits.inactivityTimeoutSeconds, 300);
+  assert.equal(ingested.execution.interruption.state, "none");
+});
+
+test("a schema 1.0 result may not carry an execution record", () => {
+  const document = fixture();
+  document.execution = suspendedFixture().execution;
+  assert.throws(() => readResultRecord("legacy", document), /cannot carry an execution record/);
+});
+
+test("a split placement is not compared against an undivided one", () => {
+  const document = bridgedFixture();
+  document.environment.serving.placement = { mode: "cpu-gpu-offload", detail: "32 of 49 layers on GPU", provenance: "contributor-declared" };
+  assert.match(incompatibilities(bridged(), readResultRecord("split", document)).join(" "), /weight placement/i);
+});
+
+test("different tokenizers are not compared as if they counted the same work", () => {
+  const document = bridgedFixture();
+  document.model.tokenizer.source = "Qwen/Qwen3-4B";
+  assert.match(incompatibilities(bridged(), readResultRecord("other tokenizer", document)).join(" "), /tokenizer/i);
+});
+
+test("a proposed model does not join a catalogued leaderboard", () => {
+  const document = bridgedFixture();
+  document.model.catalog_status = "proposed";
+  const proposed = readResultRecord("proposed", document);
+  assert.match(incompatibilities(bridged(), proposed).join(" "), /proposed/i);
+  assert.deepEqual(eligibleLeaderboard([{ key: "p", origin: "registry", result: proposed }], bridged(), "registry"), []);
+});
+
+test("legacy results stay comparable with each other", () => {
+  assert.deepEqual(incompatibilities(record(), record()), []);
+});
+
+test("serving labels say which arrangement produced the numbers", () => {
+  assert.match(servingLabel(bridged()), /Windows host served/);
+  assert.match(servingLabel(record()), /not recorded/i);
+  assert.match(placementLabel(record()), /Not recorded/);
+  assert.match(tokenizerLabel(record()), /Not recorded/);
+});
+
+
+// --- Comparable for which question? ----------------------------------------
+//
+// "Comparable" is a property of two runs and a question. Asking which of two
+// machines is faster requires the hardware to differ; refusing that pair
+// because their hardware differs answers a question nobody asked.
+
+function withServing(overrides = {}) {
+  const base = bridgedFixture();
+  base.environment.relationship = "same-host";
+  base.environment.runner.kind = "native";
+  base.environment.transport = { kind: "direct", protocol: "HTTP/1.1", bridge_version: null,
+                                 overhead: "none-direct" };
+  base.hardware.gpus = [{ vendor: "amd", model: "AMD Radeon RX 9070", memory_gb: 16, count: 1 }];
+  return readResultRecord("question fixture", { ...base, ...overrides });
+}
+
+test("a repeat of the same setup ranks, and says the workload is what matched", () => {
+  const assessment = assess(withServing(), withServing(), "exact");
+  assert.equal(assessment.suitability, "ranking");
+  assert.deepEqual(assessment.blockers, []);
+  assert.match(assessment.reasons.join(" "), /declared workload matches/);
+  assert.equal(suitabilityLabel(assessment), "Directly comparable");
+});
+
+test("hardware and engine build differing never stops a comparison", () => {
+  const other = { ...withServing(), hardware: { ...withServing().hardware, display: "Another box" },
+                  framework: "vllm", frameworkVersion: "0.11.0", executionDevice: "cpu" };
+  for (const question of ["exact", "hardware", "runtime", "model"]) {
+    const assessment = assess(withServing(), other, question);
+    assert.equal(assessment.suitability, "ranking", question);
+    assert.match(assessment.differences.join(" "), /Serving hardware|Runtime build|Execution device/);
+  }
+});
+
+test("a different model is unsuitable unless that is the question", () => {
+  const other = { ...withServing(), model: "Qwen/Qwen3-4B" };
+  assert.equal(assess(withServing(), other, "exact").suitability, "unsuitable");
+  assert.equal(assess(withServing(), other, "hardware").suitability, "unsuitable");
+  const asked = assess(withServing(), other, "model");
+  assert.equal(asked.suitability, "qualified");
+  assert.match(asked.differences.join(" "), /^Model: /);
+  assert.match(asked.reasons.join(" "), /not comparable across models as a measure of work done/);
+});
+
+test("asking what one machine does holds that machine fixed", () => {
+  // The whole point of the question: one computer, several workloads. Two
+  // computers cannot answer it, however well matched they otherwise are.
+  const otherModel = { ...withServing(), model: "Qwen/Qwen3-4B", modelRevision: "another-revision",
+                       modelSource: "https://example.invalid/qwen.gguf", quantization: "Q8_0" };
+  const asked = assess(withServing(), otherModel, "workload");
+  assert.equal(asked.suitability, "qualified");
+  assert.match(asked.differences.join(" "), /Model: /);
+
+  const otherMachine = { ...otherModel, hardware: { ...withServing().hardware, display: "Another box" } };
+  const refused = assess(withServing(), otherMachine, "workload");
+  assert.equal(refused.suitability, "unsuitable");
+  assert.ok(refused.blockers.includes("Different serving hardware"));
+  assert.match(refused.reasons.join(" "), /question about one computer/);
+
+  // The same differing hardware is only reported under every other question,
+  // which is what it has always been.
+  for (const question of ["exact", "hardware", "runtime"]) {
+    const assessment = assess(withServing(), { ...withServing(), hardware: { ...withServing().hardware, display: "Another box" } }, question);
+    assert.equal(assessment.suitability, "ranking", question);
+  }
+});
+
+test("comparing workloads on one machine does not rank the models against each other", () => {
+  const other = { ...withServing(), model: "Qwen/Qwen3-4B", quantization: "Q8_0" };
+  assert.match(assess(withServing(), other, "workload").reasons.join(" "),
+    /not comparable across models as a measure of work done/);
+  assert.match(comparisonQuestions.workload.detail, /quality of an answer/);
+});
+
+test("a different context window is a different measurement, not a faster one", () => {
+  const document = bridgedFixture();
+  document.environment.relationship = "same-host";
+  document.environment.runner.kind = "native";
+  document.environment.transport = { kind: "direct", protocol: "HTTP/1.1", bridge_version: null, overhead: "none-direct" };
+  document.hardware.gpus = [{ vendor: "amd", model: "AMD Radeon RX 9070", memory_gb: 16, count: 1 }];
+  document.environment.serving.runtime.settings = [
+    { name: "context_length", value: "32768", provenance: "contributor-declared" }];
+  const wider = readResultRecord("wider context", document);
+
+  for (const question of ["exact", "hardware", "runtime"]) {
+    const assessment = assess(withServing(), wider, question);
+    assert.equal(assessment.suitability, "unsuitable", question);
+    assert.ok(assessment.blockers.includes("Different context length"), question);
+  }
+  // A different model may well need a different window; that is the workload.
+  assert.equal(assess(withServing(), wider, "workload").suitability, "qualified");
+});
+
+test("two runs that never recorded a context length agree about silence", () => {
+  const document = bridgedFixture();
+  document.environment.relationship = "same-host";
+  document.environment.runner.kind = "native";
+  document.environment.transport = { kind: "direct", protocol: "HTTP/1.1", bridge_version: null, overhead: "none-direct" };
+  document.hardware.gpus = [{ vendor: "amd", model: "AMD Radeon RX 9070", memory_gb: 16, count: 1 }];
+  document.environment.serving.runtime.settings = [];
+  const silent = readResultRecord("no context", document);
+  assert.equal(assess(silent, silent, "exact").suitability, "ranking");
+});
+
+test("a split placement is a difference when the question is about hardware", () => {
+  // The base fixture runs gpu-only; this one splits the weights across both.
+  const document = bridgedFixture();
+  document.environment.relationship = "same-host";
+  document.environment.runner.kind = "native";
+  document.environment.transport = { kind: "direct", protocol: "HTTP/1.1", bridge_version: null, overhead: "none-direct" };
+  document.hardware.gpus = [{ vendor: "amd", model: "AMD Radeon RX 9070", memory_gb: 16, count: 1 }];
+  document.environment.serving.placement = { mode: "cpu-gpu-offload", detail: "32 of 49 layers on GPU", provenance: "contributor-declared" };
+  const split = readResultRecord("split", document);
+  assert.equal(assess(withServing(), split, "exact").suitability, "unsuitable");
+  assert.ok(assess(withServing(), split, "exact").blockers.includes("Different weight placement"));
+  // Two machines place the weights differently; that is the point of asking.
+  assert.equal(assess(withServing(), split, "hardware").suitability, "qualified");
+  assert.equal(assess(withServing(), split, "runtime").suitability, "qualified");
+  assert.equal(assess(withServing(), split, "model").suitability, "unsuitable");
+});
+
+test("a bridged run is never comparable with a direct one, whatever is asked", () => {
+  const relayed = readResultRecord("bridged", bridgedFixture());
+  for (const question of ["exact", "hardware", "runtime", "model"]) {
+    const assessment = assess(withServing(), relayed, question);
+    assert.equal(assessment.suitability, "unsuitable", question);
+    assert.match(assessment.reasons.join(" "), /never subtracted/);
+    assert.ok(assessment.blockers.includes("Different transport"), question);
+  }
+});
+
+test("serving on one machine and measuring on another is never set aside either", () => {
+  const relayed = bridgedFixture();
+  relayed.environment.transport = { kind: "direct", protocol: "HTTP/1.1", bridge_version: null, overhead: "none-direct" };
+  relayed.environment.runner.kind = "native";
+  // relationship stays windows-host-wsl-runner, which the reader is told about
+  assert.throws(() => readResultRecord("mismatch", relayed), /different setups/);
+});
+
+test("information nobody recorded is stated rather than assumed away", () => {
+  const legacy = record();
+  const full = withServing();
+  const assessment = assess(legacy, full, "hardware");
+  assert.notEqual(assessment.suitability, "ranking");
+  assert.match(assessment.missing.join(" "), /not recorded on/);
+});
+
+test("two runs that both omit the same thing agree rather than differ", () => {
+  assert.deepEqual(assess(record(), record(), "exact").blockers, []);
+  assert.deepEqual(assess(record(), record(), "exact").missing, []);
+});
+
+test("quantization is the exception: both omitting it still blocks a ranking", () => {
+  const unknown = { ...record(), quantization: null };
+  const assessment = assess(unknown, unknown, "exact");
+  assert.equal(assessment.suitability, "qualified");
+  assert.deepEqual(assessment.blockers, ["Quantization not recorded"]);
+  assert.match(assessment.missing.join(" "), /not recorded on either run/);
+});
+
+test("a proposed model can be looked at but never ranked", () => {
+  const proposed = withServing({ model: { ...bridgedFixture().model, catalog_status: "proposed" } });
+  const assessment = assess(withServing(), proposed, "exact");
+  assert.equal(assessment.suitability, "unsuitable");
+  assert.match(assessment.reasons.join(" "), /measurements are real; its identity is still a request/);
+  assert.equal(assess(withServing(), proposed, "model").suitability, "qualified");
+});
+
+test("ranking eligibility is exactly what it was, expressed through one rule", () => {
+  assert.deepEqual(incompatibilities(withServing(), withServing()), []);
+  const other = { ...withServing(), model: "Other/Model" };
+  assert.deepEqual(incompatibilities(withServing(), other), assess(withServing(), other, "exact").blockers);
+  assert.deepEqual(eligibleLeaderboard(
+    [{ key: "p", origin: "registry", result: other }], withServing(), "registry"), []);
+});
+
+test("the leaderboard stays strict however exploratory the question is", () => {
+  const other = { ...withServing(), model: "Other/Model" };
+  // assess() would allow this pair for a model question; the ranking does not.
+  assert.equal(assess(withServing(), other, "model").suitability, "qualified");
+  assert.deepEqual(eligibleLeaderboard(
+    [{ key: "p", origin: "registry", result: other }], withServing(), "registry"), []);
+});
+
+test("every question explains itself before it is chosen", () => {
+  for (const [key, value] of Object.entries(comparisonQuestions)) {
+    assert.ok(value.title.length > 5, key);
+    assert.ok(value.detail.length > 40, key);
+  }
+  assert.match(comparisonQuestions.model.detail, /do not measure the same semantic work/);
+});
+
+test("no composite score and no universal threshold is produced", () => {
+  const assessment = assess(withServing(), withServing(), "hardware");
+  for (const value of Object.values(assessment)) {
+    assert.notEqual(typeof value, "number");
+  }
+  assert.ok(["ranking", "qualified", "unsuitable"].includes(assessment.suitability));
+});
+
+// The illustrative examples the comparison page offers before any real result
+// exists. They are fictional and labelled as such on the page; what they have
+// to do is demonstrate the explanations honestly, which means each one has to
+// land where it claims to land.
+const example = (key) => comparisonExamples.find((entry) => entry.key === key).result;
+const verdict = (key, question) => assess(example("example-reference"), example(key), question).suitability;
+
+test("the illustrative examples are not kept out of the public registry", () => {
+  for (const entry of comparisonExamples) {
+    assert.equal(entry.origin, "example");
+    assert.match(entry.result.id, /^example-/);
+    assert.equal(entry.result.submitter, "Illustrative setup");
+  }
+});
+
+test("the uncatalogued example renders its eligibility and never joins a ranking of models", () => {
+  const entry = comparisonExamples.find((candidate) => candidate.key === "example-uncatalogued");
+  assert.ok(entry, "the preview carries a schema 1.2 example to render");
+  assert.equal(entry.result.schemaVersion, "1.2");
+  const summary = summarize(entry.result);
+  const section = summary.sections.find((s) => s.id === "eligibility");
+  assert.equal(section.rows.find((row) => row.label === "Licence").value, "apache-2.0");
+  assert.match(summary.qualifications.join(" "), /not catalogued and is not asking to be/);
+  // A different model on the same machine, with its own context window. Only
+  // the question about what one machine does across workloads lets both of
+  // those differ; asking for a repeat of the same setup says no, and so does
+  // asking about models alone, because the context window is not the model.
+  const verdictFor = (question) =>
+    assess(example("example-reference"), entry.result, question).suitability;
+  assert.equal(verdictFor("exact"), "unsuitable");
+  assert.equal(verdictFor("workload"), "qualified");
+  assert.ok(assess(example("example-reference"), entry.result, "model").blockers
+    .includes("Different context length"));
+});
+
+test("an example pair that differs only in hardware stays directly comparable", () => {
+  // Every question but one: the hardware is free to differ and is merely
+  // reported. "What does this machine do across workloads" is the exception,
+  // because two machines are not one machine.
+  for (const question of Object.keys(comparisonQuestions)) {
+    if (question === "workload") continue;
+    assert.equal(verdict("example-cpu-b", question), "ranking", question);
+  }
+  assert.equal(verdict("example-cpu-b", "workload"), "unsuitable");
+  const assessment = assess(example("example-reference"), example("example-cpu-b"), "hardware");
+  assert.deepEqual(assessment.blockers, []);
+  assert.ok(assessment.differences.some((text) => text.startsWith("Serving hardware:")));
+});
+
+test("a confounded example is comparable only where the question allows it", () => {
+  // The weights are split across CPU and GPU and the engine is a different
+  // one. A question about hardware or runtime expects that; "the same setup
+  // again" does not.
+  assert.equal(verdict("example-runtime-b", "exact"), "unsuitable");
+  assert.equal(verdict("example-runtime-b", "hardware"), "qualified");
+  assert.equal(verdict("example-runtime-b", "runtime"), "qualified");
+  const strict = assess(example("example-reference"), example("example-runtime-b"), "exact");
+  assert.ok(strict.blockers.includes("Different weight placement"));
+  assert.ok(strict.reasons.some((text) => text.includes("Weight placement differs")));
+});
+
+test("an example with gaps reports what nobody recorded, by name", () => {
+  const assessment = assess(example("example-reference"), example("example-missing"), "model");
+  assert.ok(assessment.missing.some((text) => text.includes("Quantization is not recorded")));
+  assert.ok(assessment.missing.some((text) => text.includes("Weights source is not recorded")));
+  // Unrecorded is not the same as different: the gaps are listed separately
+  // from the differences, and nothing is invented to fill them.
+  assert.ok(!assessment.missing.some((text) => text.includes("against")));
+  assert.equal(verdict("example-missing", "exact"), "unsuitable");
+});
+
+test("a bridged example is comparable with a direct one under no question", () => {
+  for (const question of Object.keys(comparisonQuestions)) {
+    assert.equal(verdict("example-bridged", question), "unsuitable", question);
+  }
+  const assessment = assess(example("example-reference"), example("example-bridged"), "hardware");
+  assert.ok(assessment.blockers.includes("Different transport"));
+  assert.ok(assessment.reasons.some((text) => text.includes("never subtracted")));
+});
+
+test("a different-model example is comparable only when that is the question", () => {
+  assert.equal(verdict("example-model-b", "exact"), "unsuitable");
+  assert.equal(verdict("example-model-b", "hardware"), "unsuitable");
+  assert.equal(verdict("example-model-b", "model"), "qualified");
+  const assessment = assess(example("example-reference"), example("example-model-b"), "model");
+  assert.ok(assessment.reasons.some((text) => text.includes("token is not a unit of meaning")));
+  assert.ok(assessment.differences.some((text) => text.startsWith("Model:")));
+});
+
+test("only the directly comparable examples are offered for ranking", () => {
+  const ranked = eligibleLeaderboard(comparisonExamples, example("example-reference"), "example");
+  assert.deepEqual(ranked.map((entry) => entry.key).sort(),
+                   ["example-cpu-b", "example-gpu-a", "example-reference"]);
 });
