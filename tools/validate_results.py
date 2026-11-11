@@ -22,6 +22,10 @@ CATALOG_PATH = ROOT / "catalog" / "models"
 PROFILES_PATH = ROOT / "benchmarks" / "profiles"
 ELIGIBLE_MODALITY = "text-generation"
 MUTABLE_REVISION_LABELS = {"main", "master", "latest"}
+PROPOSAL_SCHEMA_PATH = ROOT / "schema" / "model-proposal.schema.json"
+PROPOSAL_FILENAME = "model-proposal.json"
+MANIFEST_REVISION_PREFIX = "sha256-manifest:"
+BRIDGE_TRANSPORT = "windows-wsl-stdio-bridge"
 
 
 class CatalogError(Exception):
@@ -173,6 +177,11 @@ def historical_profile_bytes(profiles_path: Path, profile_id: str, digest: str) 
         return None
 
 
+def load_proposal_schema() -> dict[str, Any]:
+    """The contract a model proposal is held to, kept beside the result schema."""
+    return json.loads(PROPOSAL_SCHEMA_PATH.read_text(encoding="utf-8"))
+
+
 def safe_artifact_path(result_path: Path, artifact_path: str) -> Path | None:
     candidate = (result_path.parent / artifact_path).resolve()
     try:
@@ -182,58 +191,422 @@ def safe_artifact_path(result_path: Path, artifact_path: str) -> Path | None:
     return candidate
 
 
+def eligibility_errors(
+    relative: Path, result: dict[str, Any], catalog_entry: dict[str, Any] | None
+) -> list[str]:
+    """May this model be published at all, and if not, exactly why not.
+
+    It used to be one question -- is it on the list -- and the answer named
+    the list rather than anything about the model. The list was doing two
+    jobs: recommending models worth trying, and deciding which may exist in
+    the registry. Only the first is what it is good at. What makes a result
+    publishable is the same set of facts whether or not somebody curated it,
+    so those facts are checked here and a refusal names the one that is
+    missing. See docs/model-eligibility.md.
+
+    Being curated is still worth something: the list already records the
+    licence and the modality, so a curated model needs no eligibility block
+    and a reviewer re-establishes nothing.
+    """
+    model = result["model"]
+    model_id = model["id"]
+    status = model.get("catalog_status")
+    eligibility = model.get("eligibility")
+
+    if catalog_entry is not None:
+        if status == "uncatalogued":
+            return [f"{relative}: model.catalog_status: '{model_id}' is on the curated list, so "
+                    "it is not uncatalogued; submit it as 'catalogued'"]
+        if catalog_entry.get("modality") != ELIGIBLE_MODALITY:
+            return [f"{relative}: model.id: '{model_id}' has catalog modality "
+                    f"'{catalog_entry.get('modality')}', not '{ELIGIBLE_MODALITY}'"]
+        return []
+
+    # Not curated. A proposal is one way to arrive -- still supported, and no
+    # longer the only one. Its own contents are checked in proposal_errors().
+    if status == "proposed":
+        return []
+
+    if status != "uncatalogued":
+        return [
+            f"{relative}: model.id: '{model_id}' is not on the curated list "
+            "(catalog/models/*.yaml), which is fine -- the list is a recommendation, not the set "
+            "of models allowed to exist. To submit it, package as schema 1.2 with "
+            "model.catalog_status 'uncatalogued' and a model.eligibility block stating the "
+            "licence, where to read it, whether anybody can download the weights, and the "
+            "modality. See docs/model-eligibility.md"
+        ]
+
+    if not isinstance(eligibility, dict):
+        return [f"{relative}: model.eligibility: required when model.catalog_status is "
+                "'uncatalogued'; without it nothing here says the model may be published"]
+
+    errors: list[str] = []
+    # Each of these is one documented requirement, refused by name. "Not in
+    # the catalog" told a contributor nothing they could act on.
+    if not str(eligibility.get("licence", "")).strip():
+        errors.append(f"{relative}: model.eligibility.licence: a published licence is required, "
+                      "named as its publisher states it")
+    if not str(eligibility.get("licence_url", "")).strip():
+        errors.append(f"{relative}: model.eligibility.licence_url: required, because a licence "
+                      "nobody can open is not a licence anybody can check")
+    if eligibility.get("weights_publicly_downloadable") is not True:
+        errors.append(
+            f"{relative}: model.eligibility.weights_publicly_downloadable: the weights must be "
+            "obtainable by anybody, accepting the publisher's terms if there are any. A gated "
+            "repository qualifies; a private fine-tune, an internal checkpoint, or a hosted API "
+            "with no weights behind it does not, and cannot be published here")
+    if eligibility.get("modality") != ELIGIBLE_MODALITY:
+        errors.append(
+            f"{relative}: model.eligibility.modality: "
+            f"'{eligibility.get('modality')}' is not '{ELIGIBLE_MODALITY}'. OmoBench's profiles "
+            "measure text generation; another modality is out of scope here however good the "
+            "model is")
+    # A fine-tune is its own model. Recording it under its base's identity
+    # would merge two different things in every filter and every comparison.
+    base = eligibility.get("base_model")
+    if base and base == model_id:
+        errors.append(f"{relative}: model.eligibility.base_model: names the model itself; a "
+                      "fine-tune's base is a different model")
+    return errors
+
+
+def execution_errors(relative: Path, result: dict[str, Any]) -> list[str]:
+    """What a run's own execution record has to be consistent about.
+
+    Three separate things, and the registry keeps them separate.
+
+    A measurement taken while the machine was suspended is not a measurement
+    of the model. The benchmark cannot tell a paused virtual machine from slow
+    inference -- it records the wait as latency -- so a confirmed suspension
+    makes the numbers describe the host's power state. That is refused here,
+    and it is refused *for a different reason* than falling short of a
+    profile's thresholds: the bundle is schema-valid, its evidence is intact,
+    and it stays downloadable, inspectable and packageable. It is the
+    publishing that stops.
+
+    An unexplained scheduling gap is not refused. Something did not get to run
+    for a while, which is a question about a busy machine rather than an
+    answer about a suspended one, and treating a question as a verdict would
+    quietly throw away good results from loaded hardware.
+
+    And the record has to agree with itself, because a state nobody can check
+    against its own evidence is just an assertion.
+    """
+    execution = result.get("execution")
+    if not isinstance(execution, dict):
+        return []
+    errors: list[str] = []
+    interruption = execution.get("interruption") or {}
+    state = interruption.get("state")
+    events = interruption.get("events") or []
+    kinds = {event.get("kind") for event in events if isinstance(event, dict)}
+    severity = ["none", "gap", "clock-jump", "suspended"]
+
+    if state in {"suspended", "clock-jump", "gap"} and state not in kinds:
+        errors.append(
+            f"{relative}: execution.interruption: state is {state!r} but no event of that kind "
+            "is recorded; the state has to be derived from the evidence beside it")
+    if state == "none" and events:
+        errors.append(
+            f"{relative}: execution.interruption: state is 'none' but {len(events)} interruption "
+            "event(s) are recorded")
+    if state in severity:
+        worse = [kind for kind in kinds
+                 if kind in severity and severity.index(kind) > severity.index(state)]
+        if worse:
+            errors.append(
+                f"{relative}: execution.interruption: state is {state!r} but {sorted(worse)} "
+                "is recorded; the worst thing observed is what the state reports")
+
+    seconds = interruption.get("observed_seconds")
+    amount = seconds if seconds is not None else "an unrecorded number of"
+    if state == "suspended":
+        errors.append(
+            f"{relative}: interruption: this run was suspended for {amount} seconds while it "
+            "was measuring, so its latencies include time the machine was not running; a "
+            "suspended measurement is not a measurement of the model and is not published. "
+            "The bundle is otherwise valid and stays available for diagnosis")
+    elif state == "clock-jump":
+        # Deliberately not called a suspension. Two clocks disagreed and the
+        # kernel recorded no suspend, which from inside the machine could be
+        # either a pause it was never told about or an adjusted wall clock.
+        # Either way nothing here establishes that it was running throughout,
+        # and a measurement that might contain a pause is not one to publish.
+        errors.append(
+            f"{relative}: interruption: this run's wall clock and monotonic clock disagreed by "
+            f"{amount} seconds while it was measuring, and the kernel recorded no suspend. That "
+            "is either a pause this environment was not told about or an adjusted clock, and "
+            "nothing here can tell which, so it is not established that the machine was running "
+            "throughout. Not published; the bundle stays available for diagnosis")
+    return errors
+
+
+def transport_errors(relative: Path, result: dict[str, Any], snapshot: dict[str, Any]) -> list[str]:
+    """Reconcile the transport a result declares with the transport its evidence recorded.
+
+    A bridged run used to be refused outright, because schema 1.0 has exactly
+    one hardware host and no honest way to say that the server was on Windows
+    while the runner was in WSL. Schema 1.1 says it, so the refusal becomes a
+    reconciliation: the declaration and the environment snapshot written while
+    the benchmark ran must agree, in both directions. A result cannot claim a
+    bridge its evidence does not show, and evidence of a bridge cannot be
+    packaged as though the requests had gone straight to the server.
+    """
+    recorded = snapshot.get("transport")
+    declared = (result.get("environment") or {}).get("transport") or {}
+    declared_kind = declared.get("kind")
+
+    if recorded is None:
+        if declared_kind == BRIDGE_TRANSPORT:
+            return [f"{relative}: transport: this result declares the Windows bridge, but the "
+                    "environment snapshot recorded while it ran shows no bridge"]
+        return []
+
+    if not isinstance(recorded, dict) or not isinstance(recorded.get("kind"), str):
+        return [f"{relative}: transport: the environment snapshot records a transport this "
+                "registry cannot interpret"]
+    # 1.1 is where the serving host and the runner host became separate things,
+    # and every later version keeps them separate. Naming 1.1 exactly was right
+    # when it was the only version that could say it, and became a bug the
+    # moment 1.2 existed: it refused a bridged run for being too new.
+    if result.get("schema_version") in {None, "1.0"}:
+        return [f"{relative}: transport: this run went through the Windows bridge, which schema "
+                f"{result.get('schema_version')} cannot represent; package it as schema 1.1 or "
+                "later, which records the serving host and the runner host separately"]
+    if declared_kind != BRIDGE_TRANSPORT:
+        return [f"{relative}: transport: the environment snapshot shows a bridged run, but the "
+                f"result declares transport {declared_kind!r}"]
+    if declared.get("bridge_version") != recorded["kind"]:
+        return [f"{relative}: transport: the declared bridge version "
+                f"{declared.get('bridge_version')!r} is not the one the run recorded "
+                f"({recorded['kind']!r})"]
+    return []
+
+
+def serving_consistency_errors(relative: Path, result: dict[str, Any]) -> list[str]:
+    """Keep the 1.1 serving metadata and the 1.0-shaped fields from drifting apart.
+
+    `hardware` has always described what performed inference. In 1.1 the same
+    claim is also made, in more detail, by the accelerators marked
+    role=inference. Two places that can disagree are one place that cannot be
+    trusted, so they are required to say the same thing.
+    """
+    environment = result.get("environment")
+    if not isinstance(environment, dict):
+        return []
+    errors: list[str] = []
+    serving = environment.get("serving") or {}
+    accelerators = serving.get("accelerators") or []
+
+    grouped: dict[tuple[Any, Any, Any], int] = {}
+    for device in accelerators:
+        if not isinstance(device, dict) or device.get("role") != "inference":
+            continue
+        key = (device.get("vendor"), device.get("model"), device.get("memory_gb"))
+        grouped[key] = grouped.get(key, 0) + (device.get("count") or 0)
+    inference = sorted(
+        ({"vendor": vendor, "model": model, "memory_gb": memory, "count": count}
+         for (vendor, model, memory), count in grouped.items()),
+        key=lambda entry: (entry["vendor"] or "", entry["model"] or "", entry["memory_gb"] or 0),
+    )
+    declared = sorted(
+        ({"vendor": gpu.get("vendor"), "model": gpu.get("model"),
+          "memory_gb": gpu.get("memory_gb"), "count": gpu.get("count")}
+         for gpu in result["hardware"]["gpus"]),
+        key=lambda entry: (entry["vendor"] or "", entry["model"] or "", entry["memory_gb"] or 0),
+    )
+    if inference != declared:
+        errors.append(
+            f"{relative}: environment.serving.accelerators: the devices marked as having performed "
+            "inference do not match hardware.gpus; one result cannot describe its serving hardware "
+            "two different ways")
+
+    engine = (serving.get("runtime") or {}).get("engine") or {}
+    engine_version = engine.get("version")
+    if engine_version is not None and engine_version != result["runtime"]["version"]:
+        errors.append(
+            f"{relative}: environment.serving.runtime.engine.version: {engine_version!r} is not "
+            f"runtime.version {result['runtime']['version']!r}. runtime.version is the inference "
+            "engine's build; an application release belongs in "
+            "environment.serving.runtime.application.version instead")
+    return errors
+
+
+def weight_identity_errors(relative: Path, result: dict[str, Any]) -> list[str]:
+    """Hold the weight identities apart and make each one carry its proof.
+
+    A repository commit and a file checksum are not interchangeable, and a
+    revision that names neither identifies nothing. When the identity is the
+    bytes, the manifest hash is recomputed here from the listed files: a hash
+    nobody can reproduce is not an identity.
+    """
+    model = result["model"]
+    revision = model["revision"].strip()
+    weights = model.get("weights")
+    errors: list[str] = []
+
+    if weights is None:
+        if revision.startswith(MANIFEST_REVISION_PREFIX):
+            errors.append(
+                f"{relative}: model.revision: a {MANIFEST_REVISION_PREFIX} revision has to be "
+                "backed by model.weights listing the files it hashes")
+        return errors
+
+    if weights.get("identity") == "content-hash":
+        content = weights.get("content") or {}
+        files = content.get("files") or []
+        document = {"manifest_version": "weight-manifest-1",
+                    "files": [{"name": entry["name"], "bytes": entry["bytes"],
+                               "sha256": entry["sha256"]} for entry in files]}
+        recomputed = "sha256:" + hashlib.sha256(
+            json.dumps(document, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        if recomputed != content.get("manifest_sha256"):
+            errors.append(
+                f"{relative}: model.weights.content.manifest_sha256: does not hash the file list "
+                "it is attached to")
+        elif revision != MANIFEST_REVISION_PREFIX + recomputed.split(":", 1)[1]:
+            errors.append(
+                f"{relative}: model.revision: content-hashed weights are published under "
+                f"{MANIFEST_REVISION_PREFIX}<manifest hash>, not {revision!r}")
+        names = [entry["name"] for entry in files]
+        if len(set(names)) != len(names):
+            errors.append(f"{relative}: model.weights.content.files: lists the same file twice")
+    else:
+        repository_revision = (weights.get("repository_revision") or "").strip()
+        if repository_revision.lower() in MUTABLE_REVISION_LABELS:
+            errors.append(
+                f"{relative}: model.weights.repository_revision: {repository_revision!r} is a "
+                "mutable label; pin the commit the weights were taken from")
+        elif repository_revision.startswith(MANIFEST_REVISION_PREFIX):
+            errors.append(
+                f"{relative}: model.weights.repository_revision: a manifest hash is not a "
+                "repository commit")
+        elif repository_revision != revision:
+            errors.append(
+                f"{relative}: model.revision: {revision!r} does not match "
+                f"model.weights.repository_revision {repository_revision!r}; one weight set has "
+                "one revision")
+    return errors
+
+
+def proposal_errors(
+    relative: Path,
+    result_path: Path,
+    result: dict[str, Any],
+    catalog: dict[str, dict[str, Any]],
+    proposal_validator: Draft202012Validator,
+    proposed_ids: dict[str, str],
+) -> list[str]:
+    """Check an uncatalogued model's route to review, without opening it.
+
+    A proposal travels inside the bundle of the run that used the model, so a
+    new model can reach review together with its evidence instead of needing a
+    hand-written catalog change first. What it never does is make the model
+    eligible: catalog/models stays the only source of eligible models, this
+    only records that someone has asked, and acceptance remains a separate
+    reviewed change.
+    """
+    model_id = result["model"]["id"]
+    status = result["model"].get("catalog_status")
+    path = result_path.parent / PROPOSAL_FILENAME
+    present = path.is_file() and not path.is_symlink()
+
+    if status != "proposed":
+        if present:
+            return [f"{relative}: {PROPOSAL_FILENAME} is present, but model.catalog_status is "
+                    f"{status!r}; a bundle carrying a proposal must say so"]
+        return []
+    if model_id in catalog:
+        return [f"{relative}: model.catalog_status: '{model_id}' is already in the catalog, so it "
+                "cannot be proposed; submit it as a catalogued model"]
+    if not present:
+        return [f"{relative}: model.catalog_status is 'proposed' but the bundle has no "
+                f"{PROPOSAL_FILENAME}; an uncatalogued model needs a proposal a reviewer can read"]
+    try:
+        if path.stat().st_size > 64 * 1024:
+            raise ValueError("too large")
+        proposal = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return [f"{relative}: {PROPOSAL_FILENAME}: is not readable JSON under 64 KiB"]
+
+    errors = [f"{relative}: {PROPOSAL_FILENAME}: "
+              + (".".join(str(part) for part in error.path) or "root") + f": {error.message}"
+              for error in sorted(proposal_validator.iter_errors(proposal),
+                                  key=lambda item: list(item.path))]
+    if errors:
+        return errors
+
+    if proposal["proposed_id"] != model_id:
+        errors.append(f"{relative}: {PROPOSAL_FILENAME}: proposes "
+                      f"{proposal['proposed_id']!r} but the result measured {model_id!r}")
+    if proposal["for_run_id"] != result["run_id"]:
+        errors.append(f"{relative}: {PROPOSAL_FILENAME}: names run "
+                      f"{proposal['for_run_id']!r}, not this result's {result['run_id']!r}")
+    if proposal["proposed_by"] != result["submission"]["submitter"]:
+        errors.append(f"{relative}: {PROPOSAL_FILENAME}: proposed_by "
+                      f"{proposal['proposed_by']!r} is not this bundle's submitter "
+                      f"{result['submission']['submitter']!r}")
+    previous = proposed_ids.get(proposal["proposed_id"])
+    if previous is not None:
+        errors.append(f"{relative}: {PROPOSAL_FILENAME}: '{proposal['proposed_id']}' is already "
+                      f"proposed by {previous}; review that proposal rather than adding a second")
+    else:
+        proposed_ids[proposal["proposed_id"]] = str(relative)
+    return errors
+
+
 def validate_result(
     result_path: Path,
     validator: Draft202012Validator,
     catalog: dict[str, dict[str, Any]],
     run_ids: set[str],
     duplicate_keys: set[tuple[str, str]],
+    proposal_validator: Draft202012Validator | None = None,
+    proposed_ids: dict[str, str] | None = None,
 ) -> list[str]:
     errors: list[str] = []
+    relative = result_path.relative_to(ROOT)
     try:
         result: dict[str, Any] = json.loads(result_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as error:
-        return [f"{result_path.relative_to(ROOT)}: invalid JSON ({error.msg})"]
+        return [f"{relative}: invalid JSON ({error.msg})"]
 
     for error in sorted(validator.iter_errors(result), key=lambda item: list(item.path)):
         location = ".".join(str(part) for part in error.path) or "root"
-        errors.append(f"{result_path.relative_to(ROOT)}: {location}: {error.message}")
+        errors.append(f"{relative}: {location}: {error.message}")
     if errors:
         return errors
 
     model_id = result["model"]["id"]
     catalog_entry = catalog.get(model_id)
-    if catalog_entry is None:
-        errors.append(
-            f"{result_path.relative_to(ROOT)}: model.id: '{model_id}' is not present in the model catalog "
-            "(catalog/models/*.yaml); only catalog-listed models are eligible for submission"
-        )
-    elif catalog_entry.get("modality") != ELIGIBLE_MODALITY:
-        errors.append(
-            f"{result_path.relative_to(ROOT)}: model.id: '{model_id}' has catalog modality "
-            f"'{catalog_entry.get('modality')}', not '{ELIGIBLE_MODALITY}'"
-        )
+    errors.extend(eligibility_errors(relative, result, catalog_entry))
 
     revision = result["model"]["revision"]
     if revision.strip().lower() in MUTABLE_REVISION_LABELS:
         errors.append(
-            f"{result_path.relative_to(ROOT)}: model.revision: '{revision}' is a mutable label; "
+            f"{relative}: model.revision: '{revision}' is a mutable label; "
             "submit an immutable revision or commit SHA instead of main, master, or latest"
         )
+    errors.extend(weight_identity_errors(relative, result))
+    errors.extend(serving_consistency_errors(relative, result))
+    if proposal_validator is not None:
+        errors.extend(proposal_errors(relative, result_path, result, catalog,
+                                      proposal_validator, proposed_ids if proposed_ids is not None else {}))
 
     if errors:
         return errors
 
     run_id = result["run_id"]
     if run_id in run_ids:
-        errors.append(f"{result_path.relative_to(ROOT)}: duplicate run_id {run_id}")
+        errors.append(f"{relative}: duplicate run_id {run_id}")
     run_ids.add(run_id)
 
     raw_hash = result["artifacts"]["raw_runner_output"]["sha256"]
     duplicate_key = (result["configuration_fingerprint"], raw_hash)
     if duplicate_key in duplicate_keys:
         errors.append(
-            f"{result_path.relative_to(ROOT)}: duplicate configuration and raw-runner output; "
+            f"{relative}: duplicate configuration and raw-runner output; "
             "submit a new execution or mark it as a separate replication"
         )
     duplicate_keys.add(duplicate_key)
@@ -242,19 +615,34 @@ def validate_result(
         artifact_path = safe_artifact_path(result_path, artifact["path"])
         if artifact_path is None:
             errors.append(
-                f"{result_path.relative_to(ROOT)}: {artifact_name} must stay inside its result directory"
+                f"{relative}: {artifact_name} must stay inside its result directory"
             )
             continue
         if not artifact_path.is_file():
             errors.append(
-                f"{result_path.relative_to(ROOT)}: missing {artifact_name} at {artifact['path']}"
+                f"{relative}: missing {artifact_name} at {artifact['path']}"
             )
             continue
         actual_hash = sha256(artifact_path)
         if actual_hash != artifact["sha256"]:
             errors.append(
-                f"{result_path.relative_to(ROOT)}: hash mismatch for {artifact_name}"
+                f"{relative}: hash mismatch for {artifact_name}"
             )
+        if artifact_name == "environment_snapshot":
+            try:
+                with artifact_path.open("rb") as source:
+                    contents = source.read(1024 * 1024 + 1)
+                if len(contents) > 1024 * 1024:
+                    raise ValueError("Snapshot too large")
+                snapshot = json.loads(contents)
+                if not isinstance(snapshot, dict):
+                    raise ValueError("Snapshot must be an object")
+            except (ValueError, OSError):
+                errors.append(f"{relative}: environment_snapshot: cannot establish transport provenance from a readable JSON object under 1 MiB")
+            else:
+                errors.extend(transport_errors(relative, result, snapshot))
+
+    errors.extend(execution_errors(relative, result))
 
     # Publication acceptance: distinct from the checks above. A schema-valid,
     # hash-correct bundle with intact evidence still may not meet its own
@@ -265,7 +653,7 @@ def validate_result(
         PROFILES_PATH, result["benchmark"]["profile_id"], result["benchmark"]["profile_sha256"]
     )
     if acceptance_error:
-        errors.append(f"{result_path.relative_to(ROOT)}: {acceptance_error}")
+        errors.append(f"{relative}: {acceptance_error}")
     else:
         profile_id = result["benchmark"]["profile_id"]
         succeeded = result["results"]["requests"]["succeeded"]
@@ -274,13 +662,13 @@ def validate_result(
         maximum_error_rate = acceptance["maximum_error_rate_percent"]
         if succeeded < minimum_successful:
             errors.append(
-                f"{result_path.relative_to(ROOT)}: acceptance: {succeeded} successful requests is below "
+                f"{relative}: acceptance: {succeeded} successful requests is below "
                 f"the {profile_id!r} profile's minimum_successful_requests ({minimum_successful}); "
                 "the benchmark finished, but this result does not meet submission requirements"
             )
         if error_rate > maximum_error_rate:
             errors.append(
-                f"{result_path.relative_to(ROOT)}: acceptance: error rate {error_rate}% exceeds the "
+                f"{relative}: acceptance: error rate {error_rate}% exceeds the "
                 f"{profile_id!r} profile's maximum_error_rate_percent ({maximum_error_rate}%); "
                 "the benchmark finished, but this result does not meet submission requirements"
             )
@@ -297,6 +685,7 @@ def main() -> int:
 
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
     validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    proposal_validator = Draft202012Validator(load_proposal_schema(), format_checker=FormatChecker())
     result_files = sorted(RESULTS_PATH.rglob("result.json"))
     if not result_files:
         print("No submitted result bundles yet; schema and validator are ready.")
@@ -304,9 +693,11 @@ def main() -> int:
 
     run_ids: set[str] = set()
     duplicate_keys: set[tuple[str, str]] = set()
+    proposed_ids: dict[str, str] = {}
     errors: list[str] = []
     for result_path in result_files:
-        errors.extend(validate_result(result_path, validator, catalog, run_ids, duplicate_keys))
+        errors.extend(validate_result(result_path, validator, catalog, run_ids, duplicate_keys,
+                                      proposal_validator, proposed_ids))
 
     if errors:
         print("\n".join(errors), file=sys.stderr)

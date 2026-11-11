@@ -2,6 +2,7 @@ import Link from "next/link";
 import { SiteHeader } from "@/components/product/site-header";
 import { Badge } from "@/components/ui/badge";
 import { comparisonHref } from "@/app/lib/comparison";
+import { summarize } from "@/app/lib/evidence";
 import { demoResults, type DemoResult } from "@/app/data/demo-results";
 import {
   getRegistryResult,
@@ -84,12 +85,13 @@ function LocalRunDetails({ result }: Readonly<{ result: RegistryResult }>) {
 
       <Link className="product-button mt-6" href={comparisonHref(result.id)}>Compare this setup ↗</Link>
 
-      <section className="grid gap-4 py-10 sm:grid-cols-2 lg:grid-cols-5">
+      <section className="grid gap-4 py-10 sm:grid-cols-2 lg:grid-cols-6">
         {[
           ["Execution device", result.executionDevice.toUpperCase()],
           ["Profile", result.profile],
           ["Framework", `${result.framework} ${result.frameworkVersion}`],
           ["Quantization", result.quantization ?? "Unspecified"],
+          ["Transport", result.transport.kind === "windows-wsl-stdio-bridge" ? "Windows–WSL bridge" : "Direct"],
           ["Run started", formatStartedAt(result.startedAt)],
         ].map(([label, value]) => (
           <div className="rounded-xl border border-white/10 bg-white/[0.025] p-5" key={label}>
@@ -131,6 +133,35 @@ function LocalRunDetails({ result }: Readonly<{ result: RegistryResult }>) {
               </div>
             ))}
           </dl>
+        </div>
+      </section>
+
+      <section className="border-b border-white/10 py-10" id="provenance">
+        <p className="font-mono text-xs uppercase tracking-[0.18em] text-slate-500">What served this model</p>
+        <h2 className="mt-2 text-2xl font-semibold tracking-tight">What this evidence says.</h2>
+        <div className="mt-4 space-y-2">
+          {summarize(result).qualifications.map((qualification) => (
+            <p className="max-w-3xl text-sm leading-6 text-slate-400" key={qualification}>{qualification}</p>
+          ))}
+        </div>
+        <div className="mt-6 grid gap-4 lg:grid-cols-2">
+          {summarize(result).sections.map((section) => (
+            <div className="rounded-xl border border-white/10 bg-white/[0.025] p-6" key={section.id}>
+              <p className="font-mono text-xs uppercase tracking-[0.16em] text-slate-500">{section.title}</p>
+              <dl className="mt-5 space-y-3 text-sm">
+                {section.rows.map((row, index) => (
+                  <div className="grid gap-1 border-b border-white/10 pb-3 last:border-0 last:pb-0 sm:grid-cols-[11rem_1fr]" key={`${section.id}-${row.label}-${index}`}>
+                    <dt className="text-slate-400">{row.label}</dt>
+                    <dd className="break-words">
+                      <span className={row.recorded ? "font-mono text-xs text-slate-200" : "font-mono text-xs italic text-slate-500"}>{row.value}</span>
+                      {row.source ? <span className="mt-1 block text-[0.7rem] leading-5 text-slate-500">{row.source}</span> : null}
+                      {row.note ? <span className="mt-1 block text-[0.7rem] leading-5 text-slate-500">{row.note}</span> : null}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+          ))}
         </div>
       </section>
 

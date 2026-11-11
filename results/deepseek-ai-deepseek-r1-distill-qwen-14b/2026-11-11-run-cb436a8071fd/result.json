@@ -1,0 +1,190 @@
+{
+  "schema_version": "1.1",
+  "run_id": "run-cb436a8071fd",
+  "started_at": "2026-11-11T12:54:52.117852+00:00",
+  "configuration_fingerprint": "sha256:2a93c1028c1f0787c6f8e925ca88ebe58f4a5b92019f9ad1f5b76bef90f7de2e",
+  "execution_device": "gpu",
+  "environment": {
+    "metadata_version": "serving-environment-v1",
+    "relationship": "windows-host-wsl-runner",
+    "runner": {
+      "os": "Linux-6.18.58.1-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+      "kind": "wsl2",
+      "python_version": "3.14.4",
+      "cpu": "AMD Ryzen 7 5800X3D 8-Core Processor",
+      "ram_gb": 15.58
+    },
+    "serving": {
+      "host": {
+        "os": {
+          "value": "Microsoft Windows 11 Pro Insider Preview 10.0.26220",
+          "provenance": "contributor-declared"
+        },
+        "cpu": {
+          "value": "AMD Ryzen 7 5800X3D 8-Core Processor",
+          "provenance": "contributor-declared"
+        },
+        "ram_gb": {
+          "value": 31.92,
+          "provenance": "contributor-declared"
+        }
+      },
+      "accelerators": [
+        {
+          "vendor": "amd",
+          "model": "AMD Radeon RX 9070",
+          "memory_gb": 16.0,
+          "count": 1,
+          "role": "inference",
+          "provenance": "contributor-declared"
+        }
+      ],
+      "placement": {
+        "mode": "gpu-only",
+        "detail": null,
+        "provenance": "contributor-declared"
+      },
+      "runtime": {
+        "application": {
+          "name": "LM Studio",
+          "version": "0.4.23",
+          "provenance": "contributor-declared"
+        },
+        "engine": {
+          "name": "llama.cpp",
+          "version": "LM Studio 0.4.28 (build 2)",
+          "provenance": "contributor-declared"
+        },
+        "settings": []
+      }
+    },
+    "transport": {
+      "kind": "windows-wsl-stdio-bridge",
+      "protocol": "HTTP/1.1, one request per connection",
+      "bridge_version": "windows-stdio-http1-v1",
+      "overhead": "included-not-measured"
+    }
+  },
+  "execution": {
+    "contract": "bounded-execution-v1",
+    "limits": {
+      "inactivity_timeout_seconds": 300,
+      "request_deadline_seconds": 900,
+      "measurement_ceiling_seconds": 900,
+      "shutdown_grace_seconds": 60.0
+    },
+    "supervisor": {
+      "fired": false,
+      "reason": null,
+      "escalated": false,
+      "at_seconds": null,
+      "anchor": "measurement-start",
+      "detail": ""
+    },
+    "interruption": {
+      "state": "none",
+      "observed_seconds": 0,
+      "longest_seconds": 0.0,
+      "events": [],
+      "method": "CLOCK_BOOTTIME and the wall clock against CLOCK_MONOTONIC, sampled every 1s while measuring"
+    },
+    "sleep_prevention": {
+      "requested": true,
+      "held": true,
+      "mechanism": "windows-power-request-v1",
+      "request": "execution-required",
+      "detail": "Windows granted an execution-required power request. The machine will not idle into sleep while this is held. Closing the lid, a critical battery, an administrator policy or sleeping it deliberately still can."
+    }
+  },
+  "model": {
+    "id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+    "revision": "2f3b082b1356a6123f7ed71e65aea340da25d53c",
+    "quantization": "Q4_K_M",
+    "catalog_status": "catalogued",
+    "served_model_id": "deepseek-r1-distill-qwen-14b",
+    "tokenizer": {
+      "source": "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+      "kind": "huggingface",
+      "loaded": "not-checked",
+      "matches_served_weights": "not-verifiable-here",
+      "identity": null
+    }
+  },
+  "runtime": {
+    "framework": "lmstudio",
+    "version": "LM Studio 0.4.28 (build 2)",
+    "arguments": [],
+    "endpoint_type": "openai-compatible"
+  },
+  "hardware": {
+    "os": "Microsoft Windows 11 Pro Insider Preview 10.0.26220",
+    "cpu": "AMD Ryzen 7 5800X3D 8-Core Processor",
+    "ram_gb": 31.92,
+    "gpus": [
+      {
+        "vendor": "amd",
+        "model": "AMD Radeon RX 9070",
+        "memory_gb": 16.0,
+        "count": 1
+      }
+    ],
+    "driver_version": null,
+    "detection": {
+      "hardware": "user-confirmed",
+      "model": "manual",
+      "runtime": "manual"
+    }
+  },
+  "benchmark": {
+    "profile_id": "chat-small-v2",
+    "profile_sha256": "sha256:efba7d0eff0bc8c639f94af35de03e6d6f5869ea54ec6749f58808d6fd02e4ca",
+    "runner": "guidellm",
+    "runner_version": "0.7.3"
+  },
+  "results": {
+    "requests": {
+      "attempted": 50,
+      "succeeded": 50,
+      "failed": 0
+    },
+    "latency_ms": {
+      "ttft": {
+        "p50": 619.5197105407715,
+        "p95": 635.8907222747803
+      },
+      "inter_token": {
+        "p50": 16.43092305052514,
+        "p95": 16.52488241008684
+      }
+    },
+    "output_tokens_per_second": 53.30234097707353,
+    "total_tokens_per_second": 267.9917447869978,
+    "requests_per_second": 0.20848503840905325,
+    "error_rate_percent": 0.0,
+    "memory_peak_gb": null
+  },
+  "artifacts": {
+    "raw_runner_output": {
+      "path": "guidellm-benchmarks.json.gz",
+      "sha256": "sha256:f227af260bca30ce5e5bd090f91667aabca5429120e907596e022a1d57f3b91c"
+    },
+    "runner_stdout_log": {
+      "path": "guidellm.stdout.log",
+      "sha256": "sha256:005fa0873912abc18fc41a16a7b3764ef504d7bc171d89b1002eaddebde7a239"
+    },
+    "environment_snapshot": {
+      "path": "environment.json",
+      "sha256": "sha256:cb4b1d684e7b6f2a3260e673d46ee541c499c897abb92a487724b4d1be9acfc4"
+    },
+    "reproduce_markdown": {
+      "path": "reproduce.md",
+      "sha256": "sha256:65d10d32d7fff56e5a7e9a210238a6994b76aa4ba6f808a61c138de101730962"
+    }
+  },
+  "submission": {
+    "submitter": "Xatiiv",
+    "run_kind": "initial",
+    "repeat_of_run_id": null,
+    "source_commit": null
+  }
+}

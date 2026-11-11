@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://omobench.com/schema/benchmark-run-v1.json",
   "title": "OmoBench benchmark run v1",
-  "description": "The normalized, reproducible result summary submitted alongside raw benchmark evidence.",
+  "description": "The normalized, reproducible result summary submitted alongside raw benchmark evidence. Version 1.0 is the original contract, unchanged. Version 1.1 adds serving-environment, transport, weight-identity and tokenizer-identity metadata. Every 1.1-only property is forbidden on a 1.0 result, so a stored 1.0 bundle keeps exactly the meaning it was written with and never acquires a fact nobody collected.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -20,7 +20,8 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "1.0"
+      "enum": ["1.0", "1.1", "1.2"],
+      "description": "1.0 is the original contract. 1.1 adds environment (runner, serving, transport) and model.served_model_id / model.weights / model.tokenizer / model.catalog_status. A 1.0 result is never upgraded in place: an absent fact stays unknown rather than being reconstructed."
     },
     "run_id": {
       "type": "string",
@@ -40,6 +41,212 @@
       "type": "string",
       "enum": ["cpu", "gpu"],
       "description": "What performed inference for this run: cpu or gpu. This is a contributor declaration, not independent proof of execution. Absent on results published before execution-device tracking; those are treated as gpu for backward compatibility."
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["metadata_version", "relationship", "runner", "serving", "transport"],
+      "description": "Schema 1.1 only. Separates the environment that ran the benchmark from the environment that served the model, and records how requests travelled between them. Absent on a 1.0 result, where none of it was ever collected.",
+      "properties": {
+        "metadata_version": { "const": "serving-environment-v1" },
+        "relationship": {
+          "enum": ["same-host", "windows-host-wsl-runner"],
+          "description": "How the two environments are arranged. 'same-host': one machine and one operating system did both. 'windows-host-wsl-runner': the model server runs on the Windows host and the benchmark runner runs in a WSL2 distribution on that host. Any other arrangement is not representable here and is not supported for publication."
+        },
+        "runner": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["os", "kind"],
+          "description": "The machine and operating system that ran GuideLLM. On a bridged run this is the WSL2 distribution, and it is deliberately not the serving hardware: what WSL can see about its host is not evidence about what served the model.",
+          "properties": {
+            "os": { "type": "string", "minLength": 1 },
+            "kind": { "enum": ["native", "wsl2"] },
+            "python_version": { "type": ["string", "null"], "minLength": 1 },
+            "cpu": { "type": ["string", "null"], "minLength": 1 },
+            "ram_gb": { "type": ["number", "null"], "exclusiveMinimum": 0 }
+          }
+        },
+        "serving": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["host", "accelerators", "placement", "runtime"],
+          "properties": {
+            "host": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["os", "cpu", "ram_gb"],
+              "properties": {
+                "os": { "$ref": "#/$defs/fact_string" },
+                "cpu": { "$ref": "#/$defs/fact_string" },
+                "ram_gb": { "$ref": "#/$defs/fact_number" }
+              }
+            },
+            "accelerators": {
+              "type": "array",
+              "maxItems": 16,
+              "items": { "$ref": "#/$defs/accelerator" },
+              "description": "Every accelerator this evidence can say something about, each with its own role and provenance. A device that did not perform inference is listed with role 'present-not-used' or 'unknown' rather than omitted or promoted."
+            },
+            "placement": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["mode", "provenance"],
+              "properties": {
+                "mode": {
+                  "enum": ["cpu-only", "gpu-only", "cpu-gpu-offload", "unknown"],
+                  "description": "Where the weights were executed. 'cpu-gpu-offload' means some layers ran on CPU and some on one or more accelerators; detail then carries the split as the serving runtime stated it."
+                },
+                "detail": { "type": ["string", "null"], "minLength": 1 },
+                "provenance": { "$ref": "#/$defs/provenance" }
+              }
+            },
+            "runtime": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["engine"],
+              "properties": {
+                "application": {
+                  "type": ["object", "null"],
+                  "additionalProperties": false,
+                  "required": ["name", "version", "provenance"],
+                  "description": "The desktop application hosting the engine, where there is one. LM Studio's release version is not the llama.cpp build inside it; both are kept, and neither is recorded as the other.",
+                  "properties": {
+                    "name": { "type": "string", "minLength": 1 },
+                    "version": { "type": "string", "minLength": 1 },
+                    "provenance": { "$ref": "#/$defs/provenance" }
+                  }
+                },
+                "engine": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["name", "version", "provenance"],
+                  "description": "The inference engine that executed the weights, and its build. When its version is known it is the same version as runtime.version.",
+                  "properties": {
+                    "name": { "type": "string", "minLength": 1 },
+                    "version": { "type": ["string", "null"], "minLength": 1 },
+                    "provenance": { "$ref": "#/$defs/provenance" }
+                  }
+                },
+                "settings": {
+                  "type": "array",
+                  "maxItems": 32,
+                  "description": "Serving settings that change the measurement: context length, how many layers were given to the GPU, batch size.",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["name", "value", "provenance"],
+                    "properties": {
+                      "name": { "type": "string", "minLength": 1 },
+                      "value": { "type": "string" },
+                      "provenance": { "$ref": "#/$defs/provenance" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "transport": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "protocol", "overhead"],
+          "properties": {
+            "kind": { "enum": ["direct", "windows-wsl-stdio-bridge"] },
+            "protocol": { "type": "string", "minLength": 1 },
+            "bridge_version": { "type": ["string", "null"], "minLength": 1 },
+            "overhead": {
+              "enum": ["none-direct", "included-not-measured"],
+              "description": "'included-not-measured': the transport's own latency is inside every measured number here and has not been separated out. It is never subtracted."
+            }
+          }
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "limits", "interruption"],
+      "description": "Schema 1.1 only. How this run was bounded, and whether the machine executed throughout it. Present only when the run itself recorded it: a bundle packaged from evidence collected before this contract existed has nothing to say here, and nothing may be inferred for it afterwards.",
+      "properties": {
+        "contract": {
+          "enum": ["bounded-execution-v1"],
+          "description": "Which set of execution rules bounded this run. Versioned so a change to what a run does is visible, rather than silently applied to results that predate it."
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["inactivity_timeout_seconds", "request_deadline_seconds", "measurement_ceiling_seconds", "shutdown_grace_seconds"],
+          "description": "Four limits, named for what each one bounds. They are not interchangeable: the inactivity timeout bounds the gap between two chunks of one response and is the runner's HTTP client's, while the request deadline bounds a whole request however lively its stream.",
+          "properties": {
+            "inactivity_timeout_seconds": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+            "request_deadline_seconds": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+            "measurement_ceiling_seconds": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+            "shutdown_grace_seconds": { "type": "number", "exclusiveMinimum": 0 }
+          }
+        },
+        "supervisor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["fired"],
+          "description": "Whether an independent timer had to stop this run, and whether asking politely was enough.",
+          "properties": {
+            "fired": { "type": "boolean" },
+            "reason": { "enum": ["measurement-window-overrun", "request-deadline-exceeded", null] },
+            "escalated": { "type": "boolean" },
+            "at_seconds": { "type": ["number", "null"], "minimum": 0 },
+            "anchor": {
+              "enum": ["measurement-start", "run-start"],
+              "description": "What the measurement window was counted from. The runner's ceiling starts at its first request, so loading weights and building a dataset belong to neither the ceiling nor the grace; 'run-start' means the run never reported a first request and the fallback applied."
+            },
+            "detail": { "type": "string" }
+          }
+        },
+        "interruption": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state"],
+          "description": "Whether wall-clock time passed that this environment did not execute through. Evidence, never a correction: suspended time is never subtracted from a measured latency.",
+          "properties": {
+            "state": {
+              "enum": ["none", "gap", "clock-jump", "suspended"],
+              "description": "Ordered by how much each one claims. 'suspended' is confirmed, and only the kernel's own suspend record (CLOCK_BOOTTIME against CLOCK_MONOTONIC) earns it. 'clock-jump' is the wall clock disagreeing with the monotonic clock while the kernel says nothing happened: from inside that has two causes which cannot be told apart -- the environment was paused without being told, or the wall clock was stepped -- so it is reported as unexplained rather than promoted. 'gap' is a scheduling delay, where the clocks agreed and something merely did not get to run."
+            },
+            "observed_seconds": { "type": "number", "minimum": 0 },
+            "longest_seconds": { "type": "number", "minimum": 0 },
+            "method": { "type": "string" },
+            "events": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["kind", "seconds", "started_at", "ended_at"],
+                "properties": {
+                  "kind": { "enum": ["gap", "clock-jump", "suspended"] },
+                  "seconds": { "type": "number", "minimum": 0 },
+                  "started_at": { "type": "string", "format": "date-time" },
+                  "ended_at": { "type": "string", "format": "date-time" },
+                  "wall_seconds": { "type": "number" },
+                  "monotonic_seconds": { "type": "number" },
+                  "boottime_seconds": { "type": ["number", "null"] }
+                }
+              }
+            }
+          }
+        },
+        "sleep_prevention": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["requested", "held"],
+          "description": "Whether the host was asked to stay awake for this run, and whether it agreed. A granted request is not a guarantee: a lid, a battery, a policy or a person can still suspend a machine.",
+          "properties": {
+            "requested": { "type": "boolean" },
+            "held": { "type": "boolean" },
+            "mechanism": { "type": ["string", "null"] },
+            "request": { "enum": ["execution-required", "system-required", null] },
+            "detail": { "type": "string" }
+          }
+        }
+      }
     },
     "model": {
       "type": "object",
@@ -61,6 +268,116 @@
           "type": "string",
           "format": "uri",
           "description": "The actual weights source, ideally the exact download URL pinned to an immutable revision and filename (for example a quantized re-export repository distinct from id's canonical repository). Optional: absent on results that predate this field, and on any result where the operator did not supply one; both remain valid and keep their existing interpretation, with revision then understood as id's own repository."
+        },
+        "served_model_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Schema 1.1 only. The identifier sent to the server's API, exactly as the server answers to it: an LM Studio alias such as 'deepseek-r1-distill-qwen-14b', for example. It is a serving alias, not an identity claim. model.id stays the canonical identity and is never derived from this string without a person choosing it."
+        },
+        "catalog_status": {
+          "enum": ["catalogued", "proposed", "uncatalogued"],
+          "description": "Schema 1.1 and later. Three different statements. 'catalogued': model.id is on the curated list in catalog/models, whose own record of the licence and modality applies. 'proposed': not on the list, and this bundle carries a proposal asking for it to be added — still supported, no longer required to submit. 'uncatalogued' (schema 1.2 only): not on the list and not asking to be, with eligibility resting on model.eligibility. A proposal never makes a model catalogued, and neither does submission: review, merge and a site build all still follow."
+        },
+        "eligibility": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["licence", "licence_url", "weights_publicly_downloadable", "modality"],
+          "description": "Schema 1.2 only. The facts that make a model publishable, carried by the result instead of by membership of a list, so a model nobody has curated can still be reviewed against the same requirements. Absent on 1.0 and 1.1, which never collected any of it. See docs/model-eligibility.md.",
+          "properties": {
+            "licence": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The licence as the model's own publisher states it, e.g. 'apache-2.0', 'mit', 'llama3.1'. Copied, not interpreted."
+            },
+            "licence_url": {
+              "type": "string",
+              "format": "uri",
+              "pattern": "^https://",
+              "description": "Where a reviewer reads that licence. Required, because a licence nobody can open is not a licence anybody can check."
+            },
+            "weights_publicly_downloadable": {
+              "type": "boolean",
+              "description": "True when anybody can obtain the weights, accepting the publisher's terms if there are any. A gated repository qualifies; a private fine-tune, an internal checkpoint and a hosted API with no weights behind it do not."
+            },
+            "modality": {
+              "const": "text-generation",
+              "description": "The only modality OmoBench's profiles measure. A multimodal model is out of scope here however good it is."
+            },
+            "publisher": { "type": ["string", "null"], "description": "Who published the weights, where that is not simply the first path segment of the source." },
+            "source": { "type": ["string", "null"], "pattern": "^https://|^$", "description": "Where the weights come from. Distinct from model.source, which records the exact artefact this run served." },
+            "family": { "type": ["string", "null"], "description": "The model family, for grouping in the panel and on the site." },
+            "parameter_class": { "type": ["string", "null"], "description": "Rounded parameter count as the publisher states it, e.g. '8B'. A label, never a measurement." },
+            "base_model": { "type": ["string", "null"], "description": "For a fine-tune, the model it was derived from. Kept separate from model.id, which is this model's own identity: a fine-tune is not its base and must not be merged with it." }
+          }
+        },
+        "weights": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "identity"],
+          "description": "Schema 1.1 only. Where the bytes actually came from, kept apart from the canonical model id. A repository commit and a file checksum are different things here and are never interchanged.",
+          "properties": {
+            "kind": { "enum": ["repository", "local-files"] },
+            "repository": { "type": ["string", "null"], "format": "uri" },
+            "repository_revision": {
+              "type": ["string", "null"],
+              "minLength": 1,
+              "description": "An immutable commit of repository. Never a file checksum, and never a label that moves."
+            },
+            "identity": {
+              "enum": ["repository-revision", "content-hash"],
+              "description": "Which route establishes this weight set: a pinned repository commit, or a hash over the bytes of the selected files for weights that have no public immutable revision."
+            },
+            "content": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "required": ["manifest_sha256", "files"],
+              "description": "The weight files themselves, each hashed from its own bytes. A sharded model lists every shard; manifest_sha256 covers the whole ordered set, so one shard differing is a different weight set rather than the same one with a footnote. A filename is never evidence of content.",
+              "properties": {
+                "manifest_sha256": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+                "files": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 128,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["name", "bytes", "sha256"],
+                    "properties": {
+                      "name": { "type": "string", "minLength": 1 },
+                      "bytes": { "type": "integer", "minimum": 0 },
+                      "sha256": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "tokenizer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source", "kind", "loaded", "matches_served_weights"],
+          "description": "Schema 1.1 only. The tokenizer that built and counted this workload, recorded because it decides the token numbers being compared.",
+          "properties": {
+            "source": { "type": "string", "minLength": 1 },
+            "kind": { "enum": ["huggingface", "local-directory", "served-model-default"] },
+            "loaded": {
+              "enum": ["loaded-before-run", "not-checked"],
+              "description": "'loaded-before-run': OmoBench loaded this tokenizer in the runner's own interpreter before the benchmark started. 'not-checked': nothing loaded it here."
+            },
+            "matches_served_weights": {
+              "const": "not-verifiable-here",
+              "description": "Kept explicit so that a successful load is never read as a match. A tokenizer that loads is not thereby the tokenizer the served weights were trained with, and nothing available to OmoBench can establish that it is."
+            },
+            "identity": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "properties": {
+                "class": { "type": ["string", "null"], "minLength": 1 },
+                "vocabulary_size": { "type": ["integer", "null"], "minimum": 0 }
+              }
+            }
+          }
         }
       }
     },
@@ -192,11 +509,165 @@
         "submitter": { "type": "string", "minLength": 1 },
         "run_kind": { "enum": ["initial", "repeat", "replication"] },
         "repeat_of_run_id": { "type": ["string", "null"] },
-        "source_commit": { "type": ["string", "null"] }
+        "source_commit": { "type": ["string", "null"] },
+        "packaging": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["metadata_declared_after_execution"],
+          "description": "Schema 1.1 only. Present when a completed run was packaged again from saved evidence copied out of another directory, which is how a run that could not be packaged when it finished is recovered. It records what that derived bundle came from.",
+          "properties": {
+            "metadata_declared_after_execution": {
+              "type": "boolean",
+              "description": "true when this bundle was built from evidence saved earlier, rather than packaged from the run's own directory. A hardware probe is refused on that path, because a probe taken then describes the machine as it is now and not as it was while the benchmark ran; everything supplied is recorded as declared."
+            },
+            "derived_from_run_id": { "type": ["string", "null"], "minLength": 1 },
+            "evidence_sha256": {
+              "type": "object",
+              "additionalProperties": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+              "description": "The original evidence files, hashed where they sit, so the derived bundle can be shown to carry the same measurements rather than new ones."
+            }
+          }
+        }
       }
     }
   },
   "allOf": [
+    {
+      "if": {
+        "properties": { "schema_version": { "const": "1.1" } },
+        "required": ["schema_version"]
+      },
+      "then": {
+        "description": "1.1 keeps the meaning it was written with. It never collected eligibility facts, and 'uncatalogued' is a 1.2 statement, so a stored 1.1 bundle can acquire neither.",
+        "properties": {
+          "model": {
+            "allOf": [
+              { "not": { "required": ["eligibility"] } },
+              { "properties": { "catalog_status": { "enum": ["catalogued", "proposed"] } } }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "schema_version": { "const": "1.0" } },
+        "required": ["schema_version"]
+      },
+      "then": {
+        "allOf": [
+          { "not": { "required": ["environment"] } },
+          { "not": { "required": ["execution"] } }
+        ],
+        "properties": {
+          "model": {
+            "allOf": [
+              { "not": { "required": ["served_model_id"] } },
+              { "not": { "required": ["weights"] } },
+              { "not": { "required": ["tokenizer"] } },
+              { "not": { "required": ["catalog_status"] } },
+              { "not": { "required": ["eligibility"] } }
+            ]
+          },
+          "submission": { "not": { "required": ["packaging"] } }
+        }
+      },
+      "else": { "required": ["environment"] }
+    },
+    {
+      "if": {
+        "required": ["model"],
+        "properties": { "model": { "required": ["weights"] } }
+      },
+      "then": {
+        "properties": {
+          "model": {
+            "properties": {
+              "weights": {
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": { "identity": { "const": "content-hash" } },
+                      "required": ["identity"]
+                    },
+                    "then": {
+                      "required": ["content"],
+                      "properties": { "content": { "type": "object" } }
+                    },
+                    "else": {
+                      "required": ["repository", "repository_revision"],
+                      "properties": {
+                        "repository": { "type": "string" },
+                        "repository_revision": { "type": "string" }
+                      }
+                    }
+                  },
+                  {
+                    "if": {
+                      "properties": { "kind": { "const": "local-files" } },
+                      "required": ["kind"]
+                    },
+                    "then": { "properties": { "identity": { "const": "content-hash" } } }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["environment"],
+        "properties": {
+          "environment": {
+            "required": ["transport"],
+            "properties": {
+              "transport": {
+                "required": ["kind"],
+                "properties": { "kind": { "const": "windows-wsl-stdio-bridge" } }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "environment": {
+            "properties": {
+              "relationship": { "const": "windows-host-wsl-runner" },
+              "runner": { "properties": { "kind": { "const": "wsl2" } } },
+              "transport": {
+                "required": ["bridge_version"],
+                "properties": {
+                  "bridge_version": { "type": "string" },
+                  "overhead": { "const": "included-not-measured" }
+                }
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "if": { "required": ["environment"] },
+        "then": {
+          "properties": {
+            "environment": {
+              "properties": {
+                "relationship": { "const": "same-host" },
+                "runner": { "properties": { "kind": { "const": "native" } } },
+                "transport": {
+                  "properties": {
+                    "overhead": { "const": "none-direct" },
+                    "bridge_version": { "type": "null" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     {
       "if": {
         "properties": { "execution_device": { "const": "cpu" } },
@@ -227,6 +698,54 @@
     }
   ],
   "$defs": {
+    "provenance": {
+      "enum": ["detected", "server-reported", "contributor-declared", "unknown"],
+      "description": "How this one fact was established. 'detected': a probe running on the machine that owns the fact read it -- which, for a serving host that is not the runner, means a probe run when the result was packaged rather than while the benchmark was running. 'server-reported': the inference server itself reported it over its own API. 'contributor-declared': a person typed it. 'unknown': nobody established it, and the value is then null. A fact is never upgraded between these, however plausible it looks."
+    },
+    "fact_string": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "provenance"],
+      "description": "A string fact with its origin. A null value and 'unknown' always travel together: a value with nothing behind it would be invented, and an 'unknown' that still carried a value would be laundered of its origin.",
+      "properties": {
+        "value": { "type": ["string", "null"], "minLength": 1 },
+        "provenance": { "$ref": "#/$defs/provenance" }
+      },
+      "if": { "properties": { "value": { "type": "null" } } },
+      "then": { "properties": { "provenance": { "const": "unknown" } } },
+      "else": { "properties": { "provenance": { "not": { "const": "unknown" } } } }
+    },
+    "fact_number": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "provenance"],
+      "properties": {
+        "value": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+        "provenance": { "$ref": "#/$defs/provenance" }
+      },
+      "if": { "properties": { "value": { "type": "null" } } },
+      "then": { "properties": { "provenance": { "const": "unknown" } } },
+      "else": { "properties": { "provenance": { "not": { "const": "unknown" } } } }
+    },
+    "accelerator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vendor", "model", "memory_gb", "count", "role", "provenance"],
+      "properties": {
+        "vendor": { "enum": ["nvidia", "amd", "intel", "apple", "other"] },
+        "model": { "type": "string", "minLength": 1 },
+        "memory_gb": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+        "count": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "role": {
+          "enum": ["inference", "present-not-used", "unknown"],
+          "description": "What this device did for this run. 'inference' is a claim about execution, not about presence: detecting a card establishes the card, not that inference touched it, so a detected device nothing ties to the run is 'present-not-used' or 'unknown'."
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance",
+          "description": "How the device facts here (vendor, model, memory) were established. It says nothing about role, which is always a separate claim."
+        }
+      }
+    },
     "percentiles": {
       "type": "object",
       "additionalProperties": false,

@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omobench.com/schema/model-proposal-v1.json",
+  "title": "OmoBench model proposal v1",
+  "description": "A contributor's request that one uncatalogued model be reviewed for the eligible-model catalog, submitted inside the evidence bundle of the run that used it. A proposal is a request for review and nothing else: catalog/models/*.yaml stays the only source of eligible models, and nothing here is read as one.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "proposed_id",
+    "family",
+    "parameter_class",
+    "modality",
+    "source",
+    "licence",
+    "weights_publicly_downloadable",
+    "proposed_by",
+    "proposed_at",
+    "for_run_id",
+    "rationale"
+  ],
+  "properties": {
+    "schema_version": { "const": "model-proposal-1.0" },
+    "status": {
+      "const": "proposed",
+      "description": "The only value a submitted proposal may carry. A proposal cannot describe itself as reviewed or accepted; acceptance is a separate, reviewed change to catalog/models."
+    },
+    "proposed_id": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "description": "The canonical model identity being proposed, in publisher/name form. It must equal the result's model.id, and it is not a serving alias."
+    },
+    "family": { "type": "string", "minLength": 1, "maxLength": 100 },
+    "parameter_class": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 20,
+      "pattern": "^[0-9]+(\\.[0-9]+)?[MB]$",
+      "description": "Nominal parameter count class as the publisher states it, for example 14B or 600M."
+    },
+    "modality": {
+      "const": "text-generation",
+      "description": "OmoBench v1 publishes text-generation results only; a proposal for any other modality is out of scope rather than pending."
+    },
+    "source": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://",
+      "description": "The publisher's own page for the weights."
+    },
+    "licence": { "type": "string", "minLength": 1, "maxLength": 100 },
+    "licence_url": { "type": ["string", "null"], "format": "uri" },
+    "weights_publicly_downloadable": {
+      "const": true,
+      "description": "OmoBench publishes results for open weights anyone can obtain. A proposal cannot be submitted for weights that are not publicly downloadable."
+    },
+    "proposed_by": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "description": "The GitHub account making the proposal; bound to the result's submitter."
+    },
+    "proposed_at": { "type": "string", "format": "date-time" },
+    "for_run_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{7,63}$",
+      "description": "The run this proposal accompanies. A proposal travels with the result that used the model; it is not a standalone catalog edit."
+    },
+    "rationale": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000,
+      "description": "Why this model belongs in the catalog, for the reviewer."
+    },
+    "initial_runtimes": {
+      "type": "array",
+      "maxItems": 10,
+      "items": { "enum": ["vllm", "sglang", "llama.cpp", "lmstudio", "openai-compatible-other"] }
+    }
+  }
+}
