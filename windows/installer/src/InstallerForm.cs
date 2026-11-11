@@ -19,7 +19,21 @@ namespace OmoBench.Installer
     /// </summary>
     public sealed class InstallerForm : Form
     {
-        private enum Step { Welcome, Installing, Environment, Finished }
+        private enum Step { Welcome, Installing, Environment, Upgrade, Finished }
+
+        /// <summary>
+        /// Set while an upgrade of a managed installation is being offered or
+        /// performed. A first preparation and an upgrade run the same stages;
+        /// what differs is that an upgrade has something to go back to.
+        /// </summary>
+        private bool _upgrading;
+
+        /// <summary>The managed source in use before an upgrade, for rollback
+        /// and for bringing previous runs across. Null when not upgrading.</summary>
+        private Configuration _replacing;
+
+        /// <summary>Previous runs an import would bring across, once known.</summary>
+        private int _runsToImport;
 
         private readonly BuildInfo _build;
         private readonly byte[] _payload;
@@ -128,6 +142,7 @@ namespace OmoBench.Installer
             {
                 case Step.Welcome: RunInstall(); break;
                 case Step.Environment: PrepareEnvironment(); break;
+                case Step.Upgrade: StartUpgrade(); break;
                 case Step.Finished: LaunchCompanion(); break;
             }
         }
@@ -138,6 +153,12 @@ namespace OmoBench.Installer
             {
                 case Step.Environment:
                     if (_wizard.Working) { CancelWork(); } else { ShowEnvironment(true); }
+                    break;
+                case Step.Upgrade:
+                    KeepCurrentRevision();
+                    break;
+                case Step.Finished:
+                    ImportPreviousRuns();
                     break;
             }
         }
@@ -349,17 +370,13 @@ namespace OmoBench.Installer
                 return;
             }
 
-            // A saved setup that still works, kept exactly as it is.
+            // A saved setup that still works. What happens next depends on
+            // whose it is: a source this installer created may be upgraded to
+            // the one it carries, and a checkout the person chose may not.
             if (answer.Existing != null)
             {
                 _configuration = answer.Existing;
-                ShowFinished("OmoBench is ready.",
-                    "Your existing settings were checked and still work:\r\n"
-                    + "    Distribution: " + answer.Existing.Distribution + "\r\n"
-                    + "    Checkout:     " + answer.Existing.CheckoutWindowsPath + "\r\n"
-                    + "    Interpreter:  " + answer.Existing.PythonWslPath + "\r\n"
-                    + "    Panel port:   " + answer.Existing.Port.ToString(CultureInfo.InvariantCulture)
-                    + "\r\n\r\nThey were left unchanged, and nothing was downloaded.");
+                ShowExistingInstallation(answer.Existing);
                 return;
             }
 
@@ -421,7 +438,7 @@ namespace OmoBench.Installer
                 + found.Explain() + "\r\n\r\n"
                 + "--------------------------------------------------------------\r\n"
                 + "\"Prepare it for me\" will, inside "
-                + (_system.Distributions.Count > 0 ? FirstWsl2Name() : "your WSL2 distribution") + ":\r\n"
+                + (FirstWsl2Name() ?? "your WSL2 distribution") + ":\r\n"
                 + "  1. download the OmoBench source at revision " + _build.ShortRevision + "\r\n"
                 + "       into " + ManagedEnvironment.SourceDirectory(_build.Revision) + "\r\n"
                 + "  2. create a separate Python environment used only by OmoBench\r\n"
@@ -436,32 +453,155 @@ namespace OmoBench.Installer
 
         private string FirstWsl2Name()
         {
-            foreach (WslDistribution distribution in _system.Distributions)
+            return SelectPreparationDistribution(_upgrading ? _replacing : null, _system);
+        }
+
+        internal static string SelectPreparationDistribution(Configuration replacing, SystemReport system)
+        {
+            // A validated saved installation bypasses discovery. Its distribution
+            // is authoritative for an upgrade; the system report may be absent.
+            if (replacing != null && !string.IsNullOrWhiteSpace(replacing.Distribution))
             {
-                if (distribution.Version == 2) { return distribution.Name; }
+                return replacing.Distribution;
             }
-            return "your WSL2 distribution";
+            if (system != null && system.Distributions != null)
+            {
+                foreach (WslDistribution distribution in system.Distributions)
+                {
+                    if (distribution != null && distribution.Version == 2
+                        && !string.IsNullOrWhiteSpace(distribution.Name))
+                    {
+                        return distribution.Name;
+                    }
+                }
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// What to say about an installation that is already here, and what to
+        /// offer for it.
+        ///
+        /// Three cases, and they are genuinely different. A managed source at
+        /// an older revision can be upgraded, because this installer owns it
+        /// and carries a newer one. A managed source already at this revision
+        /// needs nothing. A checkout the person selected is theirs: this
+        /// installer did not create it, does not know what is in it, and will
+        /// not change it -- which it says rather than leaving somebody to
+        /// discover that the panel is still running their old code.
+        /// </summary>
+        private void ShowExistingInstallation(Configuration existing)
+        {
+            string where =
+                "    Distribution: " + existing.Distribution + "\r\n"
+                + "    Checkout:     " + existing.CheckoutWindowsPath + "\r\n"
+                + "    Interpreter:  " + existing.PythonWslPath + "\r\n"
+                + "    Panel port:   " + existing.Port.ToString(CultureInfo.InvariantCulture);
+
+            if (!ManagedEnvironment.IsManagedSource(existing.CheckoutWindowsPath))
+            {
+                ShowFinished("OmoBench is ready.",
+                    "Your existing settings were checked and still work:\r\n" + where
+                    + "\r\n\r\nThat checkout is yours, not one this installer created, so it has "
+                    + "not been changed and will not be. The panel runs the code in it, which "
+                    + "means installing this build has not moved the panel to revision "
+                    + _build.ShortRevision + ".\r\n\r\n"
+                    + "To run this revision from that checkout, update it yourself. To use the "
+                    + "revision this installer carries instead, point the companion's Setup "
+                    + "window at a different checkout; nothing here is removed either way.");
+                return;
+            }
+
+            string current = ManagedEnvironment.RevisionOf(existing.CheckoutWindowsPath);
+            if (!string.IsNullOrEmpty(current) && !string.IsNullOrEmpty(_build.Revision)
+                && string.Equals(current, _build.Revision, StringComparison.OrdinalIgnoreCase))
+            {
+                ShowFinished("OmoBench is ready.",
+                    "Your existing settings were checked and still work:\r\n" + where
+                    + "\r\n\r\nThis is already revision " + _build.ShortRevision
+                    + ", the one this installer carries. Nothing was downloaded or changed.");
+                return;
+            }
+
+            _step = Step.Upgrade;
+            _replacing = existing;
+            _heading.Text = "An OmoBench installation is already here";
+            _subheading.Text = "It can be upgraded to the revision this installer carries.";
+            _detail.Text =
+                "This installer created the source the panel is running, so it can replace it:"
+                + "\r\n" + where + "\r\n"
+                + "    Revision:     " + (string.IsNullOrEmpty(current) ? "not recorded" : current)
+                + "\r\n\r\nThis installer carries revision " + _build.ShortRevision + ".\r\n\r\n"
+                + "Upgrading unpacks the new source beside the current one and builds it its own "
+                + "Python environment, then checks that environment before anything switches over. "
+                + "The environment you are using now is left exactly as it is, so a failure, a "
+                + "stop, or a change of mind all leave you where you started.\r\n\r\n"
+                + "Your models, storage folder and benchmark evidence are not touched. Previous "
+                + "runs stay in the current source directory and can be brought across afterwards, "
+                + "which this will offer once the upgrade has finished.";
+            _primary.Visible = true;
+            _primary.Text = "Upgrade to " + _build.ShortRevision;
+            _primary.Enabled = true;
+            _secondary.Visible = true;
+            _secondary.Text = "Keep current";
+            _secondary.Enabled = true;
+            _close.Enabled = true;
+        }
+
+        /// <summary>Leave everything as it is, and say so.</summary>
+        private void KeepCurrentRevision()
+        {
+            _upgrading = false;
+            ShowFinished("OmoBench is ready.",
+                "Nothing was changed. The panel still runs the revision it was running before, "
+                + "and this installer's copy was not unpacked.\r\n\r\n"
+                + "Run this installer again whenever you want to upgrade.");
+        }
+
+        private void StartUpgrade()
+        {
+            _upgrading = true;
+            PrepareEnvironment();
         }
 
         private void PrepareEnvironment()
         {
             if (_wizard.Working) { return; }
 
+            string distribution = FirstWsl2Name();
+            if (string.IsNullOrWhiteSpace(distribution))
+            {
+                // Recover through the normal asynchronous discovery UI instead
+                // of launching WSL with a placeholder name or crashing.
+                ShowEnvironment(true);
+                return;
+            }
+
             _primary.Enabled = false;
             _secondary.Text = "Stop";
             _secondary.Enabled = true;
             _close.Enabled = false;
-            _heading.Text = "Preparing the OmoBench environment";
-            _subheading.Text = "This can take several minutes. You can stop at any point.";
+            _heading.Text = _upgrading
+                ? "Building revision " + _build.ShortRevision
+                : "Preparing the OmoBench environment";
+            _subheading.Text = _upgrading
+                ? "Nothing switches over until this has been checked. You can stop at any point."
+                : "This can take several minutes. You can stop at any point.";
             _detail.Text = "";
 
-            string distribution = FirstWsl2Name();
             BuildInfo build = _build;
+            bool upgrading = _upgrading;
             DiscoveryCancel cancel = new DiscoveryCancel();
             int generation = _wizard.Begin(cancel);
             _worker = new Thread(() =>
             {
-                PreparationResult result = ManagedEnvironment.Prepare(
+                PreparationResult result = upgrading
+                    ? ManagedEnvironment.Upgrade(distribution, build, cancel,
+                        snapshot => Post(() =>
+                        {
+                            if (_wizard.IsCurrent(generation)) { RenderStages(snapshot); }
+                        }))
+                    : ManagedEnvironment.Prepare(
                     distribution, build, cancel,
                     // Progress is queued, so it outlives the work that
                     // produced it: a stage update from a replaced operation
@@ -504,29 +644,57 @@ namespace OmoBench.Installer
             {
                 _heading.Text = "Setup stopped";
                 _subheading.Text = result.Summary;
-                _detail.Text += "\r\nNothing further was changed. You can start again with "
-                    + "\"Prepare it for me\".";
+                // An upgrade that stops has switched nothing: the running
+                // configuration was never written to, so there is nothing to
+                // undo and nothing to explain beyond saying so.
+                _detail.Text += _upgrading
+                    ? "\r\nNothing was switched over. The panel is still running the revision it "
+                      + "was running before, and the environment it uses was not touched."
+                    : "\r\nNothing further was changed. You can start again with "
+                      + "\"Prepare it for me\".";
                 _primary.Enabled = true;
-                _primary.Text = "Prepare it for me";
+                _primary.Text = _upgrading ? "Upgrade to " + _build.ShortRevision : "Prepare it for me";
+                if (_upgrading) { _step = Step.Upgrade; _secondary.Text = "Keep current"; }
                 return;
             }
 
             if (!result.Ok)
             {
-                _heading.Text = "The environment is not ready yet";
+                _heading.Text = _upgrading
+                    ? "The new revision is not ready, so nothing was switched"
+                    : "The environment is not ready yet";
                 _subheading.Text = result.Summary;
                 _detail.Text += "\r\n" + (result.Detail ?? "");
+                if (_upgrading)
+                {
+                    _detail.Text += "\r\n\r\nThe panel is still running the revision it was running "
+                        + "before. Its source and its Python environment were not changed, so it "
+                        + "works exactly as it did.";
+                    _step = Step.Upgrade;
+                    _secondary.Text = "Keep current";
+                }
                 _primary.Enabled = true;
-                _primary.Text = "Try again";
+                _primary.Text = _upgrading ? "Try again" : "Try again";
                 return;
             }
 
+            // Only now, with a check that actually passed against the pair
+            // that was just built. On an upgrade the configuration being
+            // replaced is written down first, so going back is reading a file
+            // rather than remembering two Linux paths.
+            bool rollback = false;
+            if (_upgrading) { rollback = Configuration.SavePrevious(); }
             _configuration = result.Configuration;
             if (!SaveConfiguration())
             {
                 return;
             }
-            ShowFinished("OmoBench is ready.", _detail.Text + "\r\n" + (result.Detail ?? ""));
+            if (!_upgrading)
+            {
+                ShowFinished("OmoBench is ready.", _detail.Text + "\r\n" + (result.Detail ?? ""));
+                return;
+            }
+            ShowUpgraded(result, rollback);
         }
 
         /// <summary>
@@ -561,6 +729,99 @@ namespace OmoBench.Installer
                 _close.Enabled = true;
                 return false;
             }
+        }
+
+        /// <summary>
+        /// The upgrade switched over. What is left to say is what became of
+        /// everything that was not part of it.
+        /// </summary>
+        private void ShowUpgraded(PreparationResult result, bool rollback)
+        {
+            string previous = _replacing == null ? null : _replacing.CheckoutWindowsPath;
+            ManagedEnvironment.RunImport survey = previous == null
+                ? new ManagedEnvironment.RunImport()
+                : ManagedEnvironment.SurveyRuns(previous, _configuration.CheckoutWindowsPath);
+            _runsToImport = survey.Ok ? survey.Copied : 0;
+
+            System.Text.StringBuilder detail = new System.Text.StringBuilder();
+            detail.AppendLine(_detail.Text);
+            detail.AppendLine(result.Detail ?? "");
+            detail.AppendLine();
+            detail.AppendLine("The panel now runs revision " + _build.ShortRevision + ".");
+            detail.AppendLine();
+            detail.AppendLine("Left exactly as they were:");
+            detail.AppendLine("    The previous source and its Python environment, at");
+            detail.AppendLine("    " + (previous ?? "their existing location") + ".");
+            detail.AppendLine("    Your downloaded models and the storage folder they are in.");
+            detail.AppendLine("    Every benchmark run already recorded.");
+            detail.AppendLine();
+            if (rollback)
+            {
+                detail.AppendLine("To go back, run this installer again and choose \"Keep current\", "
+                    + "or re-select the previous checkout and interpreter in the companion's "
+                    + "Setup window. The previous settings are saved at");
+                detail.AppendLine("    " + Configuration.PreviousFilePath);
+            }
+            else
+            {
+                detail.AppendLine("No previous settings file was found to record, so going back "
+                    + "means re-selecting the previous checkout and interpreter in the "
+                    + "companion's Setup window. Neither was removed.");
+            }
+            if (_runsToImport > 0)
+            {
+                detail.AppendLine();
+                detail.AppendLine(_runsToImport.ToString(CultureInfo.InvariantCulture)
+                    + " previous run(s) are still in the old source directory. The panel lists "
+                    + "runs beside the source it is running, so they will not appear until they "
+                    + "are copied across. Nothing is copied unless you ask.");
+            }
+
+            ShowFinished("OmoBench is ready at revision " + _build.ShortRevision, detail.ToString());
+            if (_runsToImport > 0)
+            {
+                _secondary.Visible = true;
+                _secondary.Enabled = true;
+                _secondary.Text = "Copy " + _runsToImport.ToString(CultureInfo.InvariantCulture)
+                    + " previous run(s)";
+            }
+        }
+
+        /// <summary>
+        /// Copy previous run evidence into the new source, on request.
+        ///
+        /// Never over anything: a run already present at the destination is
+        /// skipped and named. The originals stay where they are, so the old
+        /// source remains a complete record whatever happens here.
+        /// </summary>
+        private void ImportPreviousRuns()
+        {
+            if (_replacing == null || _configuration == null) { return; }
+            _secondary.Enabled = false;
+            ManagedEnvironment.RunImport outcome = ManagedEnvironment.CopyRuns(
+                _replacing.CheckoutWindowsPath, _configuration.CheckoutWindowsPath, false);
+            System.Text.StringBuilder text = new System.Text.StringBuilder(_detail.Text);
+            text.AppendLine();
+            if (!outcome.Ok)
+            {
+                text.AppendLine("The previous runs could not be copied: " + outcome.Failure);
+                text.AppendLine("Nothing was changed, and they are still in the old source "
+                    + "directory.");
+                _secondary.Enabled = true;
+            }
+            else
+            {
+                text.AppendLine("Copied " + outcome.Copied.ToString(CultureInfo.InvariantCulture)
+                    + " previous run(s). The originals are still in the old source directory.");
+                if (outcome.Skipped.Count > 0)
+                {
+                    text.AppendLine("Left untouched because a run of the same name was already "
+                        + "here (" + outcome.Skipped.Count.ToString(CultureInfo.InvariantCulture)
+                        + "): " + string.Join(", ", outcome.Skipped.ToArray()));
+                }
+                _secondary.Visible = false;
+            }
+            _detail.Text = text.ToString();
         }
 
         private void ShowFinished(string headline, string detail)

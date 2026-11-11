@@ -16,11 +16,15 @@ first-class, publishable OmoBench results, provided the model is in the
 ## Start here
 
 - **Install or update OmoBench:** [Setup guide](docs/quickstart.md).
-- **First time? Just run `omobench ui`:** it opens a guided benchmark by default, download and verify one reviewed CPU model, run it, understand the result, and
-  prepare a submission, with no server address, model revision, runtime argument,
-  or shell command to type. See [Guided CPU setup](docs/guided-launcher.md).
-- **Already run your own model server?** Open `/advanced` in the same panel, or
-  see the [Browser control guide](docs/browser-control.md) and
+- **First time? Just run `omobench ui`:** one page. It reads your hardware
+  first, then asks which workload to put on it. Choose a reviewed CPU model and
+  the panel downloads, verifies and runs it, explains the result and prepares a
+  submission, with no server address, model revision, runtime argument or shell
+  command to type. See [Guided CPU setup](docs/guided-launcher.md).
+- **Already run your own model server?** Same page: the "connect a server you
+  already run" form is on it. See the
+  [Browser control guide](docs/browser-control.md), the
+  [guided workflow](docs/guided-workflow.md) and
   [CPU demo walkthrough](docs/local-demo.md) for that workflow.
 - **On Windows, prefer not to use a terminal?** The
   [Windows installer](docs/windows-installer.md) installs OmoBench, finds or
@@ -37,24 +41,25 @@ first-class, publishable OmoBench results, provided the model is in the
 
 | Component | What it does | How it starts |
 | --- | --- | --- |
-| A reviewed managed CPU model | Downloads, verifies, and serves one pinned model + runtime for you | Automatic, from the panel's default guided page |
-| Your own model server (optional) | Loads weights and performs inference on CPU or GPU | Start llama.cpp, LM Studio, vLLM, or another compatible server separately, then connect from `/advanced` |
+| A reviewed managed CPU model | Downloads, verifies, and serves one pinned model + runtime for you | Automatic, from the panel, once you choose a workload it has a recipe for |
+| Your own model server (optional) | Loads weights and performs inference on CPU or GPU | Start llama.cpp, LM Studio, vLLM, or another compatible server separately, then connect from the same panel |
 | Local OmoBench panel | Runs the CLI, shows logs/results, and prepares submissions | `omobench ui`; normally `127.0.0.1:8765` |
 | Comparison website | Displays illustrative demo rows and a separate registry of committed results | Visit the hosted site, or use `npm run dev` locally |
 
-The guided page downloads and runs one reviewed CPU model for you; the advanced
-panel needs a model server you already run yourself and does not download models,
-start that server, or select its hardware for you. The website's **Run a
-benchmark** page explains how to launch the local panel; visiting the hosted
-site does not start programs on your computer.
+Choosing a reviewed workload lets the panel download and run that model for
+you; connecting your own server needs a model server you already run yourself,
+and the panel does not download models, start that server, or select its
+hardware for you in that case. The website's **Run a benchmark** page explains
+how to launch the local panel; visiting the hosted site does not start programs
+on your computer.
 
 ## Run through the browser
 
-`omobench ui` opens a **guided benchmark by default**, see
-[Guided CPU setup](docs/guided-launcher.md) for that walkthrough. The steps
-below describe the **advanced panel** at `/advanced`: connecting to a model
-server you already run yourself. Both panels run the same CLI, profiles, and
-GuideLLM version; only how you get to a running server differs.
+`omobench ui` opens **one page**. Choosing a reviewed workload hands the
+preparation to the panel, see [Guided CPU setup](docs/guided-launcher.md) for
+that walkthrough. The steps below describe the other route on the same page:
+connecting to a model server you already run yourself. Both run the same CLI,
+profiles and GuideLLM version; only how you get to a running server differs.
 
 ### 1. Prepare OmoBench
 
@@ -117,8 +122,9 @@ omobench ui
 
 Keep both terminals open. If a browser does not open automatically, copy the
 full URL printed by the panel, including `#token=...`, into your browser.
-On WSL, use your normal Windows browser. Open **`/advanced`** for the workflow
-below; the default page is the guided benchmark instead.
+On WSL, use your normal Windows browser. The workflow below is the
+**Connect & run** section of that page. (`/advanced` and `/guided` still work
+as bookmarks; they serve the same page.)
 
 1. Enter the **Server address** and **Server model identifier** from your running
    server. Its address is different from the panel's port `8765`.
@@ -143,9 +149,14 @@ incorrect identifiers, streaming errors, and interrupted runs.
 ## What is supported today
 
 - Locally served models compatible with streaming `/v1/chat/completions` can be
-  tried; public submissions must pass catalog eligibility checks.
+  tried; public submissions must pass catalog eligibility checks, or carry a
+  model proposal asking for the model to be reviewed for the catalog.
 - The panel accepts localhost model servers without authentication headers or
-  redirects. Run it in the same OS/WSL environment as the server.
+  redirects, normally in the same OS/WSL environment as the server. A model
+  server on Windows measured from WSL2 through the explicit bridge is also
+  supported: the result then records the serving host and the runner as the two
+  environments they are, and includes the bridge's latency in every
+  measurement. See [provenance.md](docs/provenance.md).
 - Runtime records distinguish `vllm`, `sglang`, `llama.cpp`, `lmstudio`, and
   `openai-compatible-other` with a meaningful server description.
 - NVIDIA, AMD, Intel, and other GPU metadata are supported through best-effort
@@ -155,9 +166,9 @@ incorrect identifiers, streaming errors, and interrupted runs.
 - Quality/accuracy evaluation, model installation, cloud hardware provisioning,
   and native Windows benchmark execution are outside the current workflow.
 - A guided, reviewed CPU setup path (`omobench prepare`/`launch`, and the
-  panel's default page) can download, verify, run, and, unlike a plain smoke
-  test, package and prepare a submission for one pinned model + runtime
-  recipe, without leaving the guided page. It is a development milestone, not
+  panel's managed-setup component) can download, verify, run, and, unlike a
+  plain smoke test, package and prepare a submission for one pinned model +
+  runtime recipe, without leaving the page. It is a development milestone, not
   a general installer; see [Guided CPU setup](docs/guided-launcher.md).
 
 ## Fixed workloads and measurements
@@ -218,12 +229,18 @@ guidellm-benchmarks.json.gz
 guidellm.stdout.log
 environment.json
 reproduce.md
+model-proposal.json   (only when the bundle proposes a model for the catalog)
 ```
 
 The packager records model/runtime/hardware metadata, an immutable model revision,
 profile hash, and artifact hashes. Validation checks the schema, catalog,
 obviously mutable revision labels, artifact paths/hashes, and duplicates. These
 checks do not independently prove GPU usage or every workload acceptance rule.
+
+A result packaged with serving provenance (schema 1.1) also records what served
+the model separately from what measured it, how each serving fact was
+established, the weight identity, the tokenizer that counted the tokens, and
+the transport. Schema 1.0 results are unchanged and stay valid.
 
 The panel's community submission flow signs in through GitHub in the browser,
 reviews the exact evidence and destination, then uploads to your public fork
@@ -277,6 +294,7 @@ than substituting `next build`.
 | [docs/quickstart.md](docs/quickstart.md) | Installation, updates, and direct CLI commands |
 | [docs/model-server.md](docs/model-server.md) | Starting a server, model identifiers, CPU/GPU settings |
 | [docs/browser-control.md](docs/browser-control.md) | Panel controls, recovery, packaging, and submission |
+| [docs/guided-workflow.md](docs/guided-workflow.md) | The six stages, what may stop a run against what may stop a submission, and which comparisons answer which question |
 | [docs/local-demo.md](docs/local-demo.md) | CPU demonstration and website-only demo |
 | [docs/guided-launcher.md](docs/guided-launcher.md) | Reviewed, managed CPU setup, run, and submission review, the panel's default page |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Common setup and runtime failures |

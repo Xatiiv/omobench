@@ -95,6 +95,93 @@ namespace OmoBench.Installer
         public const string OwnershipMarkerName = ".omobench-managed";
 
         /// <summary>
+        /// Written into a managed source directory, naming the revision it
+        /// holds. The directory name says the same thing, but a name is a
+        /// label somebody can change and this is the thing the panel reads to
+        /// report what it is running.
+        /// </summary>
+        public const string RevisionMarkerName = ".omobench-source-revision";
+
+        /// <summary>
+        /// The root every managed source copy sits directly under. A checkout
+        /// elsewhere is somebody's own and is never upgraded, moved or
+        /// written to.
+        /// </summary>
+        public static string SourceRoot()
+        {
+            return string.IsNullOrEmpty(SourceRootOverride)
+                ? Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "OmoBench", "source")
+                : SourceRootOverride;
+        }
+
+        /// <summary>
+        /// Is this checkout one this installer created, or the person's own?
+        ///
+        /// The distinction decides everything about an upgrade: a managed
+        /// source may be replaced by a newer one, and a developer checkout may
+        /// not be touched at all. Judged by location, because that is what
+        /// this installer actually controls.
+        /// </summary>
+        public static bool IsManagedSource(string checkoutWindowsPath)
+        {
+            if (string.IsNullOrWhiteSpace(checkoutWindowsPath)) { return false; }
+            try
+            {
+                string root = Path.GetFullPath(SourceRoot()).TrimEnd(
+                    Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                string full = Path.GetFullPath(checkoutWindowsPath).TrimEnd(
+                    Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                string parent = Path.GetDirectoryName(full);
+                return parent != null && string.Equals(
+                    parent.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                    root, StringComparison.OrdinalIgnoreCase);
+            }
+            catch (ArgumentException) { return false; }
+            catch (NotSupportedException) { return false; }
+            catch (PathTooLongException) { return false; }
+        }
+
+        /// <summary>
+        /// Which revision a managed source holds, or null when that cannot be
+        /// established. The marker is read first and the directory name is the
+        /// fallback; a guess is never returned for a checkout that is not
+        /// managed, because this installer does not know what is in one.
+        /// </summary>
+        public static string RevisionOf(string checkoutWindowsPath)
+        {
+            if (!IsManagedSource(checkoutWindowsPath)) { return null; }
+            try
+            {
+                string marker = Path.Combine(checkoutWindowsPath, RevisionMarkerName);
+                if (File.Exists(marker))
+                {
+                    string recorded = File.ReadAllText(marker).Trim();
+                    if (LooksLikeRevision(recorded)) { return recorded; }
+                }
+                string name = Path.GetFileName(checkoutWindowsPath.TrimEnd(
+                    Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+                return LooksLikeRevision(name) ? name : null;
+            }
+            catch (IOException) { return null; }
+            catch (UnauthorizedAccessException) { return null; }
+        }
+
+        private static bool LooksLikeRevision(string value)
+        {
+            if (string.IsNullOrEmpty(value) || value.Length < 7 || value.Length > 40) { return false; }
+            foreach (char character in value)
+            {
+                bool hex = (character >= '0' && character <= '9')
+                    || (character >= 'a' && character <= 'f')
+                    || (character >= 'A' && character <= 'F');
+                if (!hex) { return false; }
+            }
+            return true;
+        }
+
+        /// <summary>
         /// Where a managed source copy lives: under the user's local app data,
         /// named by the revision, so two installer versions never fight over
         /// one directory and an older one can simply be deleted.
@@ -102,12 +189,7 @@ namespace OmoBench.Installer
         public static string SourceDirectory(string revision)
         {
             string stamp = string.IsNullOrEmpty(revision) ? "unknown" : Safe(revision);
-            string root = string.IsNullOrEmpty(SourceRootOverride)
-                ? Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "OmoBench", "source")
-                : SourceRootOverride;
-            return Path.Combine(root, stamp);
+            return Path.Combine(SourceRoot(), stamp);
         }
 
         /// <summary>
@@ -125,6 +207,26 @@ namespace OmoBench.Installer
         public static string EnvironmentDirectory(string home)
         {
             return EnvironmentRoot(home) + "/managed-env";
+        }
+
+        /// <summary>
+        /// The environment for one revision, used when upgrading.
+        ///
+        /// An upgrade must not write into the environment that currently
+        /// works: the new one has to be built and checked while the old one is
+        /// still there to go back to, and a pip install that fails halfway
+        /// through the only environment leaves nothing to return to. Each
+        /// revision therefore gets its own, and nothing is removed.
+        /// </summary>
+        public static string EnvironmentDirectory(string home, string revision)
+        {
+            if (string.IsNullOrEmpty(revision)) { return EnvironmentDirectory(home); }
+            return EnvironmentRoot(home) + "/env/" + Safe(revision);
+        }
+
+        public static string EnvironmentInterpreter(string home, string revision)
+        {
+            return EnvironmentDirectory(home, revision) + "/bin/python";
         }
 
         public static string EnvironmentInterpreter(string home)
@@ -249,7 +351,7 @@ namespace OmoBench.Installer
         // -- running it -------------------------------------------------------
 
         /// <summary>
-        /// Prepare the managed environment, reporting each stage as it goes.
+        /// Prepare the managed environment for a machine that has none.
         ///
         /// Nothing is reported as finished until the existing environment
         /// check passes against the pair that was just created: the stages
@@ -258,10 +360,40 @@ namespace OmoBench.Installer
         public static PreparationResult Prepare(
             string distribution, BuildInfo build, DiscoveryCancel cancel, Action<PreparationResult> progress)
         {
+            return Build(distribution, build, cancel, progress, upgrade: false);
+        }
+
+        /// <summary>
+        /// Build this installer's revision beside an existing managed one,
+        /// without touching it.
+        ///
+        /// The only difference from a first preparation is where the Python
+        /// environment goes: an upgrade gets its own, named by revision, so
+        /// the environment that currently works is still there if this fails
+        /// or is stopped. Nothing is switched here -- this returns a
+        /// configuration and the caller decides, after the check passed,
+        /// whether to start using it.
+        /// </summary>
+        public static PreparationResult Upgrade(
+            string distribution, BuildInfo build, DiscoveryCancel cancel, Action<PreparationResult> progress)
+        {
+            return Build(distribution, build, cancel, progress, upgrade: true);
+        }
+
+        private static PreparationResult Build(
+            string distribution, BuildInfo build, DiscoveryCancel cancel,
+            Action<PreparationResult> progress, bool upgrade)
+        {
+            // Which environment this writes into. Null means the single
+            // managed environment a first install creates; a revision means
+            // one of its own, which is what keeps an upgrade reversible.
+            string scope = upgrade ? (build == null ? null : build.Revision) : null;
             PreparationResult result = new PreparationResult();
             PreparationStage locate = Add(result, "Locate the Linux environment");
             PreparationStage fetch = Add(result, "Unpack the bundled OmoBench source (pinned revision)");
-            PreparationStage create = Add(result, "Create an isolated Python environment");
+            PreparationStage create = Add(result, upgrade
+                ? "Create an isolated Python environment for the new revision"
+                : "Create an isolated Python environment");
             PreparationStage install = Add(result, "Install OmoBench and the pinned benchmark runner");
             PreparationStage verify = Add(result, "Check the finished environment");
 
@@ -362,6 +494,17 @@ namespace OmoBench.Installer
             }
             if (Stopped(cancel, result, fetch)) { return result; }
 
+            // The directory is named by revision, but a name is a label. This
+            // is what the panel reads to say which source it is running, so it
+            // is written where the source is rather than inferred later.
+            try
+            {
+                File.WriteAllText(Path.Combine(sourceWindows, RevisionMarkerName),
+                    build.Revision + "\n");
+            }
+            catch (IOException) { /* The panel falls back to the directory name. */ }
+            catch (UnauthorizedAccessException) { }
+
             fetch.State = StageState.Done;
             fetch.Message = "Revision " + build.ShortRevision + " unpacked into " + sourceWindows
                 + (build.SourceClean ? "" :
@@ -373,7 +516,7 @@ namespace OmoBench.Installer
             // 3. An isolated environment, separate from anything already here.
             create.State = StageState.Running;
             Report(progress, result);
-            string environment = EnvironmentDirectory(home);
+            string environment = EnvironmentDirectory(home, scope);
 
             // The Windows source directory was already ownership-checked; the
             // Linux side needs the same guarantee before a venv is created or
@@ -409,7 +552,7 @@ namespace OmoBench.Installer
             install.Message = "Installing the CPU-only runner tensor library (model-server GPU use is unchanged).";
             Report(progress, result);
             ProcessResult cpu = Run(distribution,
-                BuildCpuInstallProgram(EnvironmentInterpreter(home)), 2700000, cancel);
+                BuildCpuInstallProgram(EnvironmentInterpreter(home, scope)), 2700000, cancel);
             if (Stopped(cancel, result, install)) { return result; }
             if (cpu == null || cpu.TimedOut || cpu.ExitCode != 0)
             {
@@ -426,7 +569,7 @@ namespace OmoBench.Installer
             // failed here having already done everything else correctly -- so
             // the budget matches the work rather than an optimistic guess.
             ProcessResult pip = Run(distribution,
-                BuildInstallProgram(EnvironmentInterpreter(home), sourceWsl), 2700000, cancel);
+                BuildInstallProgram(EnvironmentInterpreter(home, scope), sourceWsl), 2700000, cancel);
             if (Stopped(cancel, result, install)) { return result; }
             if (pip == null || pip.TimedOut || pip.ExitCode != 0)
             {
@@ -439,7 +582,7 @@ namespace OmoBench.Installer
                         : ""));
             }
             ProcessResult dependencies = Run(distribution,
-                BuildDependencyCheckProgram(EnvironmentInterpreter(home)), 60000, cancel);
+                BuildDependencyCheckProgram(EnvironmentInterpreter(home, scope)), 60000, cancel);
             if (Stopped(cancel, result, install)) { return result; }
             if (dependencies == null || dependencies.TimedOut || dependencies.ExitCode != 0)
             {
@@ -458,7 +601,7 @@ namespace OmoBench.Installer
             {
                 Distribution = distribution,
                 CheckoutWindowsPath = sourceWindows,
-                PythonWslPath = EnvironmentInterpreter(home),
+                PythonWslPath = EnvironmentInterpreter(home, scope),
                 Port = Configuration.DefaultPort,
             };
             EnvironmentCheckResult check;
@@ -485,10 +628,112 @@ namespace OmoBench.Installer
             verify.Message = check.Summary;
             result.Ok = true;
             result.Configuration = configuration;
-            result.Summary = "OmoBench is ready.";
+            result.Summary = upgrade
+                ? "The new revision is ready to switch to."
+                : "OmoBench is ready.";
             result.Detail = check.Detail;
             Report(progress, result);
             return result;
+        }
+
+        /// <summary>
+        /// What an import of previous runs did, or would do.
+        /// </summary>
+        public sealed class RunImport
+        {
+            /// <summary>Run directories copied into the new source.</summary>
+            public int Copied;
+
+            /// <summary>Present in both, and therefore left exactly as they were.</summary>
+            public readonly List<string> Skipped = new List<string>();
+
+            /// <summary>Why nothing could be done, when that is the answer.</summary>
+            public string Failure;
+
+            public bool Ok { get { return Failure == null; } }
+        }
+
+        /// <summary>
+        /// Where a checkout's run evidence lives.
+        ///
+        /// The panel writes runs beside the source it is running from, so a
+        /// new managed source starts with none. The previous ones are still
+        /// on disk, in the previous source directory, and this is how they
+        /// come across.
+        /// </summary>
+        public static string RunsDirectory(string checkoutWindowsPath)
+        {
+            return string.IsNullOrWhiteSpace(checkoutWindowsPath)
+                ? null : Path.Combine(checkoutWindowsPath, ".omobench-runs");
+        }
+
+        /// <summary>
+        /// Count what an import would bring across, without copying anything.
+        /// </summary>
+        public static RunImport SurveyRuns(string fromCheckout, string toCheckout)
+        {
+            return CopyRuns(fromCheckout, toCheckout, dryRun: true);
+        }
+
+        /// <summary>
+        /// Copy previous run evidence into the new managed source, never over
+        /// anything already there.
+        ///
+        /// Evidence is the point of this program, so the rule is simple and
+        /// absolute: a run directory that exists at the destination is left
+        /// untouched and reported as skipped. Nothing is merged, nothing is
+        /// replaced, and the originals stay where they are either way -- this
+        /// copies, so the previous source remains a complete record on its
+        /// own.
+        /// </summary>
+        public static RunImport CopyRuns(string fromCheckout, string toCheckout, bool dryRun)
+        {
+            RunImport outcome = new RunImport();
+            string from = RunsDirectory(fromCheckout);
+            string to = RunsDirectory(toCheckout);
+            if (from == null || to == null)
+            {
+                outcome.Failure = "Both the previous and the new source have to be known.";
+                return outcome;
+            }
+            if (!Directory.Exists(from))
+            {
+                return outcome;   // Nothing to bring across is not a failure.
+            }
+            try
+            {
+                foreach (string directory in Directory.GetDirectories(from, "*",
+                    SearchOption.TopDirectoryOnly))
+                {
+                    string name = Path.GetFileName(directory);
+                    string destination = Path.Combine(to, name);
+                    if (Directory.Exists(destination) || File.Exists(destination))
+                    {
+                        outcome.Skipped.Add(name);
+                        continue;
+                    }
+                    if (!dryRun) { CopyTree(directory, destination); }
+                    outcome.Copied++;
+                }
+            }
+            catch (IOException error) { outcome.Failure = error.Message; }
+            catch (UnauthorizedAccessException error) { outcome.Failure = error.Message; }
+            return outcome;
+        }
+
+        private static void CopyTree(string from, string to)
+        {
+            Directory.CreateDirectory(to);
+            foreach (string file in Directory.GetFiles(from))
+            {
+                // overwrite: false. A destination file is never replaced, even
+                // inside a directory this call created.
+                File.Copy(file, Path.Combine(to, Path.GetFileName(file)), false);
+            }
+            foreach (string directory in Directory.GetDirectories(from))
+            {
+                CopyTree(directory, Path.Combine(to, Path.GetFileName(directory)));
+            }
         }
 
         /// <summary>

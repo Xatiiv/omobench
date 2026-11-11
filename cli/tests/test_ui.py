@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import gzip
 import http.client
 import json
 import os
@@ -278,6 +279,17 @@ class ExecutionTests(unittest.TestCase):
                 f"pathlib.Path({str(self.root / 'child.pid')!r}).write_text(str(child.pid))\n"
                 "time.sleep(120)\n"
             )
+        elif mode == "deaf":
+            # A runner that refuses to stop politely. Nothing guarantees a benchmark
+            # process handles SIGTERM -- GuideLLM runs a scheduler with worker
+            # processes and its own signal handling -- so the panel's stop path has
+            # to end in something that cannot be ignored.
+            content += (
+                "import os, signal\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                f"pathlib.Path({str(self.root / 'child.pid')!r}).write_text(str(os.getpid()))\n"
+                "time.sleep(600)\n"
+            )
         elif mode == "fail":
             content += "sys.exit(7)\n"
         elif mode != "missing":
@@ -287,6 +299,36 @@ class ExecutionTests(unittest.TestCase):
     def finished(self, job):
         wait_for(lambda: not self.controller.busy)
         return self.controller.detail(job["id"])
+
+    def test_the_submission_preview_carries_no_endpoint_secret_or_local_path(self):
+        """Exactly five files, and nothing in them that was never meant to leave.
+
+        Every byte here is about to be pushed to a public repository, so the
+        check is on the bytes that would actually be uploaded rather than on
+        the files as they sit on disk. The loopback address a contributor
+        serves on is their business, an Authorization header is a credential,
+        and an absolute path names a person's home directory.
+        """
+        from omobench.ui_submission import bundle_snapshot
+
+        self.runner()
+        job = self.finished(self.controller.start(RUN_CONFIG))
+        self.controller.package(job["id"], {
+            "model": "Qwen/Qwen3-4B", "model_revision": "abc123", "framework": "llama.cpp",
+            "framework_version": "test-build", "submitter": "tester",
+        })
+        _, contents, _ = bundle_snapshot(self.root, self.controller.run_directory(job["id"]))
+        self.assertEqual(sorted(contents), [
+            "environment.json", "guidellm-benchmarks.json.gz", "guidellm.stdout.log",
+            "reproduce.md", "result.json"])
+        joined = b"".join(
+            gzip.decompress(content) if name.endswith(".gz") else content
+            for name, content in sorted(contents.items())).decode("utf-8", errors="replace")
+        self.assertIn("<LOCAL_ENDPOINT>", joined)
+        for forbidden in [RUN_CONFIG["endpoint"], "127.0.0.1", str(self.root),
+                          "Authorization", "api_key", "api-key"]:
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, joined)
 
     def test_cpu_uses_real_cli_evidence_and_can_be_packaged_and_reviewed(self):
         """CPU benchmarks are first-class: real evidence, then real packaging and review,
@@ -377,6 +419,36 @@ class ExecutionTests(unittest.TestCase):
         finally:
             unrelated.terminate()
             unrelated.wait(3)
+
+    def test_cancelling_a_runner_that_ignores_sigterm_still_ends_bounded(self):
+        """Stopping is not a request; a long CPU run has to be stoppable.
+
+        The polite signal is tried first and given three seconds, then the
+        process group is killed outright. Without that escalation a runner
+        that traps SIGTERM leaves the panel locked behind a benchmark nobody
+        can stop, which on a 90-minute profile is the whole afternoon.
+        """
+        self.runner("deaf")
+        job = self.controller.start(RUN_CONFIG)
+        pid_file = self.root / "child.pid"
+        wait_for(pid_file.exists)
+        child = int(pid_file.read_text())
+        started = time.monotonic()
+        self.controller.cancel(job["id"])
+        elapsed = time.monotonic() - started
+        # Three seconds of grace, then the kill. Anything near the runner's own
+        # 600-second sleep would mean the escalation never happened.
+        self.assertLess(elapsed, 30, "cancellation did not return promptly")
+
+        def stopped():
+            output = subprocess.run(["ps", "-o", "stat=", "-p", str(child)],
+                                    capture_output=True, text=True).stdout.strip()
+            return not output or output.startswith("Z")
+
+        wait_for(stopped)
+        self.assertEqual(self.finished(job)["status"], "cancelled")
+        # And the panel is usable again rather than stuck behind it.
+        self.assertFalse(self.controller.busy)
 
     def test_shutdown_cancels_and_recovery_marks_interruption(self):
         self.runner("wait")

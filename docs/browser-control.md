@@ -4,14 +4,14 @@
 Its **default page is a guided benchmark**, see
 [Guided CPU setup](guided-launcher.md), that downloads, verifies, runs, and
 helps submit one reviewed small CPU model for you, with nothing to type but a
-submitter identity. This page describes the **advanced panel**, at
-`/advanced` in the same running panel: connecting to a model server you
-already run yourself. You use browser forms and buttons; benchmark execution
+submitter identity. This page describes the **Connect & run** section of
+that same single page: connecting to a model server you already run yourself.
+(`/advanced` and `/guided` are kept as bookmarks and serve the same page.) You use browser forms and buttons; benchmark execution
 still runs through `omobench run --execute`, with the same GuideLLM version,
 profiles, and evidence. Packaging still runs through `omobench package`.
 Submission remains a GitHub PR.
 
-The advanced panel connects to an already-running model server on the same
+That section connects to an already-running model server on the same
 machine. It does not install models, start the model server, or switch its
 execution device. The hosted website links to these launch instructions; it
 does not remotely execute programs on visitors' computers.
@@ -24,7 +24,7 @@ the panel, everything below works exactly as it does when you run
 
 ## What this panel can benchmark
 
-The two guided recipes are presets, not the boundary. The advanced panel will
+The two managed recipes are presets, not the boundary. The panel will
 benchmark any local model server that meets the requirements below, whatever
 serves it and whatever model it holds.
 
@@ -119,9 +119,9 @@ about one check, never about the whole benchmark.
 5. Keep this terminal open. The browser opens automatically when supported.
    Otherwise, copy the **full URL**, including `#token=…`, from the terminal into
    your browser. The default panel port is `8765`; your model server uses a
-   different port, for example `8092`. The page that opens is the guided
-   benchmark; click through to **`/advanced`** (same token, same origin) for
-   the connect-your-own-server workflow this page describes.
+   different port, for example `8092`. The page opens on your hardware and a
+   workload selector; the **Connect & run** section below it is the
+   connect-your-own-server workflow this page describes.
 
 No `npm install`, Node.js, or website development server is needed for this panel.
 On native Windows you can install `./cli[ui]` and open the panel for setup and
@@ -177,7 +177,21 @@ For a CPU demonstration, load a small model with CPU execution explicitly
 enabled in your server, choose **chat-small-v2**, select **CPU**, and run. This is a
 real inference workload on your CPU, not a general CPU hardware test. Slower CPUs
 may reach the profile's time limit; the UI does not shorten or alter the workload.
-CPU and GPU results are both eligible for packaging and submission through the panel.
+CPU and GPU results are both eligible for packaging and submission through the
+panel, and so is a run measured through the Windows–WSL bridge, provided its
+serving machine is described. See [provenance.md](provenance.md).
+
+Running and publishing are two different things with two different requirement
+lists, and the second one used to appear only once the benchmark had finished.
+**Before you start**, beside the server check, groups every check by what it
+would stop: running this benchmark, packaging the evidence, or submitting to
+the public registry. Each says what was looked at, what was seen, where that
+came from and one thing to do about it. Only an actual runner constraint stops
+a run, and a local report needs none of it.
+
+The panel's stages — Connect, Identify, Check, Run, Review, Submit — are
+derived from what is true rather than from what was clicked, so going back to
+fix something clears nothing. See [guided-workflow.md](guided-workflow.md).
 The [CPU demo walkthrough](local-demo.md) gives the two-terminal launch sequence
 and exact form values. [Troubleshooting](troubleshooting.md) covers connection
 failures, missing commands, and slow runs.
@@ -204,7 +218,7 @@ yourself it never downloaded weights, never started the server and never loaded
 a model, so those stages do not exist here: the stages are **starting the
 runner, warming up, running the benchmark, cooling down, saving results**, and
 warmup and cooldown appear only when GuideLLM itself reports them. Everything
-else follows the same rules as the guided page: a missing value reads "Pending"
+else follows the same rules everywhere on the page: a missing value reads "Pending"
 or "unavailable" rather than zero, progress comes from the runner's own
 remaining fraction rather than from elapsed time, a spent time budget is
 labelled instead of shown as a finished run, and 100% appears only once the
@@ -305,10 +319,15 @@ The exact serving runtime version is the runtime's own build, such as
 `llama.cpp b10621`; an application version, for example the LM Studio release,
 is a different thing, and OmoBench will not guess a build for you.
 
-If a model is not in `catalog/models/`, it is not currently eligible for the
-community registry. The panel says so and keeps local viewing and export
-available. It never relabels the run as a different, catalogued model. Adding a
-model to the catalog is a separate, reviewed change.
+If a model is not in `catalog/models/`, it is not catalogued, and the panel
+never relabels the run as a different, catalogued model. Two routes remain
+open. **Suggest a catalog model** offers entries the served alias may mean and
+applies none of them: one match is a suggestion to confirm, several make the
+mapping ambiguous and you choose. When nothing matches, the panel opens a
+**model proposal**, which travels with the result so a reviewer sees the
+request and the evidence together. A proposal does not add the model to the
+catalog and merging the result would not either; accepting one is a separate,
+reviewed change. Local viewing and export need none of this.
 
 1. Enter the canonical model ID, immutable model revision, framework and exact
    version, quantization, submitter, and the server's actual startup arguments.

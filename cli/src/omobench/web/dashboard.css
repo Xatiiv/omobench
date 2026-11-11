@@ -94,6 +94,13 @@
 .status-item.fail{border-color:#825549}
 .status-item.fail strong{color:var(--error)}
 .status-item.pending strong{color:var(--muted)}
+/* Severe is prominence, not a verdict: the check still blocks exactly what it
+   blocked before, so the border and tag shout while the state class keeps its
+   own colour. */
+.status-item.severe{border-color:#b08143;border-left-width:4px;background:rgba(176,129,67,.09)}
+.status-item.severe strong{color:#f0c892}
+.status-item .severity-tag{display:inline-block;align-self:flex-start;margin-bottom:4px;padding:1px 7px;border-radius:4px;background:#b08143;color:#1a1207;font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+.status-item.severe .recovery{color:#f3d7a6}
 
 @media(prefers-reduced-motion:reduce){
   .progress-bar-fill,#chart-line{transition:none}

@@ -59,7 +59,10 @@ $references = @(
     # JavaScriptSerializer, for parsing the panel's startup document and API
     # answers. Part of the in-box .NET Framework, so this adds no dependency
     # to install: it ships in the same place as the compiler above.
-    '/reference:System.Web.Extensions.dll'
+    '/reference:System.Web.Extensions.dll',
+    # CIM queries, for reading this machine's own serving hardware. Also in-box,
+    # and used read-only: four SELECT statements and nothing else.
+    '/reference:System.Management.dll'
 )
 
 $exePath = Join-Path $OutputDirectory 'OmoBenchCompanion.exe'

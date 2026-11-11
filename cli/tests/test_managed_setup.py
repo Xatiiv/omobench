@@ -1,1012 +1,129 @@
+"""Managed preparation, as a component of the one panel.
+
+It used to be a page with its own model chooser, stepper and dashboard. What
+survives is the part that was unique: verifying, downloading, cancelling,
+resuming and recovering a pinned model and runtime. These drive that
+component inside the panel's DOM.
+
+Everything slow about managed setup is the download, so that is what is
+exercised -- progress, cancellation, a rejected checksum and recovery -- with
+fixtures whose byte counts are small enough to assert on.
+
+This file is about the component. The downloader itself -- resume after a
+dropped connection, quarantine on a checksum mismatch, cancellation partway
+through -- is exercised over loopback in test_managed_downloads.py. **Neither
+establishes that a real multi-gigabyte download resumes correctly over a real
+network.** It is the same code path and a different network, and it remains
+untested.
+"""
 from __future__ import annotations
 
-import hashlib
-import io
 import json
-import re
 import shutil
-import tarfile
-import tempfile
-import threading
+import subprocess
 import unittest
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from unittest.mock import patch
-
-from omobench import managed_setup as ms
-from omobench.cli import build_parser, find_repository_root
-
 
 ROOT = Path(__file__).resolve().parents[2]
-
-
-def make_fake_repo_root(root: Path, recipe: dict) -> None:
-    """A minimal repository layout with a real model catalog and a fixture recipe."""
-    shutil.copytree(ROOT / "catalog" / "models", root / "catalog" / "models")
-    (root / "catalog" / "downloads").mkdir(parents=True)
-    (root / "catalog" / "downloads" / "cpu-v1.json").write_text(
-        json.dumps({"catalog_version": 1, "recipes": [recipe]}), encoding="utf-8"
-    )
-    (root / "benchmarks" / "profiles").mkdir(parents=True)
-    (root / "results").mkdir()
-
-
-def base_recipe(**overrides) -> dict:
-    recipe = {
-        "id": "qwen3-4b-cpu-v1",
-        "title": "Qwen3 4B · CPU",
-        "model_id": "Qwen/Qwen3-4B",
-        "quantization": "Q4_K_M",
-        "platform": "linux-x86_64",
-        "supported_environment": "Linux x64 or WSL2, glibc 2.34 or newer",
-        "min_glibc_version": "2.34",
-        "benchmark_profile": "chat-small-v1",
-        "execution_device": "cpu",
-        "model": {
-            "kind": "file",
-            "repository": "ggml-org/Qwen3-4B-GGUF",
-            "revision": "2f3b082b1356a6123f7ed71e65aea340da25d53c",
-            "filename": "Qwen3-4B-Q4_K_M.gguf",
-            "url": "https://huggingface.co/ggml-org/Qwen3-4B-GGUF/resolve/2f3b082b1356a6123f7ed71e65aea340da25d53c/Qwen3-4B-Q4_K_M.gguf",
-            "sha256": "ab27b9bfa375a178d6cba48f3ad892b94b7739659dcc7aae8058ce0ffed6b328",
-            "size_bytes": 2497280640,
-            "licence": "Apache-2.0",
-        },
-        "runtime": {
-            "kind": "archive",
-            "repository": "ggml-org/llama.cpp",
-            "revision": "c1d0e7a004015f23bc0233470b747b596f29b264",
-            "version": "b10621",
-            "filename": "llama-b10621-bin-ubuntu-x64.tar.gz",
-            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b10621/llama-b10621-bin-ubuntu-x64.tar.gz",
-            "sha256": "91d7b03ddae498a39f28fdb85d84d2b4a0fd3838d10b4f897e0ef8975bb9b583",
-            "size_bytes": 16291771,
-            "licence": "MIT",
-            "archive_format": "tar.gz",
-            "executable_path": "llama-b10621/llama-server",
-            "max_extracted_bytes": 209715200,
-            "max_entries": 500,
-        },
-    }
-    recipe.update({k: v for k, v in overrides.items() if k not in {"model", "runtime"}})
-    if "model" in overrides:
-        recipe["model"] = {**recipe["model"], **overrides["model"]}
-    if "runtime" in overrides:
-        recipe["runtime"] = {**recipe["runtime"], **overrides["runtime"]}
-    return recipe
-
-
-class RecipeValidationTests(unittest.TestCase):
-    def test_real_catalog_validates_and_references_a_cataloged_model(self):
-        recipes = ms.load_recipes(ROOT)
-        self.assertEqual(
-            [r["id"] for r in recipes],
-            # The corrected short recipe is offered first; the legacy one stays
-            # so earlier chat-small-v1 results can be reproduced.
-            ["qwen3-4b-cpu-v2", "qwen3-4b-cpu-v1", "qwen3-4b-cpu-extended-v1"],
-        )
-        self.assertEqual(ms.get_recipe(ROOT, "qwen3-4b-cpu-v1")["model_id"], "Qwen/Qwen3-4B")
-        self.assertEqual(ms.get_recipe(ROOT, "qwen3-4b-cpu-extended-v1")["model_id"], "Qwen/Qwen3-4B")
-
-    def test_extended_recipe_reuses_the_exact_same_pinned_artifacts(self):
-        """The extended-duration recipe must never trigger a second download: it
-        references the identical, already-reviewed model and runtime artifacts."""
-        recipes = {r["id"]: r for r in ms.load_recipes(ROOT)}
-        classic = recipes["qwen3-4b-cpu-v1"]
-        extended = recipes["qwen3-4b-cpu-extended-v1"]
-        self.assertEqual(classic["model"], extended["model"])
-        self.assertEqual(classic["runtime"], extended["runtime"])
-        self.assertEqual(extended["benchmark_profile"], "chat-small-extended-v1")
-        self.assertNotEqual(classic["benchmark_profile"], extended["benchmark_profile"])
-
-    def test_recipe_rejects_model_absent_from_catalog(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            make_fake_repo_root(root, base_recipe(model_id="Nonexistent/Model"))
-            with self.assertRaisesRegex(ms.ManagedSetupError, "not an eligible"):
-                ms.load_recipes(root)
-
-    def test_recipe_rejects_mutable_revision_labels(self):
-        for label in ["main", "master", "latest", "HEAD"]:
-            with self.subTest(label=label):
-                with self.assertRaisesRegex(ms.ManagedSetupError, "immutable"):
-                    ms.validate_recipe(ROOT, base_recipe(model={"revision": label}))
-
-    def test_recipe_rejects_short_or_non_hex_revision(self):
-        with self.assertRaises(ms.ManagedSetupError):
-            ms.validate_recipe(ROOT, base_recipe(model={"revision": "abc123"}))
-
-    def test_recipe_rejects_non_https_or_disallowed_host(self):
-        for url in [
-            "http://huggingface.co/ggml-org/Qwen3-4B-GGUF/resolve/2f3b082b1356a6123f7ed71e65aea340da25d53c/Qwen3-4B-Q4_K_M.gguf",
-            "https://evil.example.com/Qwen3-4B-Q4_K_M.gguf",
-            "https://user:pw@huggingface.co/ggml-org/Qwen3-4B-GGUF/resolve/2f3b082b1356a6123f7ed71e65aea340da25d53c/Qwen3-4B-Q4_K_M.gguf",
-        ]:
-            with self.subTest(url=url):
-                with self.assertRaises(ms.ManagedSetupError):
-                    ms.validate_recipe(ROOT, base_recipe(model={"url": url}))
-
-    def test_recipe_rejects_bad_sha256(self):
-        with self.assertRaises(ms.ManagedSetupError):
-            ms.validate_recipe(ROOT, base_recipe(model={"sha256": "not-a-hash"}))
-
-    def test_recipe_rejects_zero_or_negative_size(self):
-        for size in [0, -1]:
-            with self.subTest(size=size):
-                with self.assertRaises(ms.ManagedSetupError):
-                    ms.validate_recipe(ROOT, base_recipe(model={"size_bytes": size}))
-
-    def test_recipe_rejects_unsupported_platform_or_execution_device(self):
-        with self.assertRaises(ms.ManagedSetupError):
-            ms.validate_recipe(ROOT, base_recipe(platform="darwin-arm64"))
-        with self.assertRaises(ms.ManagedSetupError):
-            ms.validate_recipe(ROOT, base_recipe(execution_device="gpu"))
-
-    def test_recipe_rejects_unknown_benchmark_profile(self):
-        with self.assertRaises(ms.ManagedSetupError):
-            ms.validate_recipe(ROOT, base_recipe(benchmark_profile="made-up-profile"))
-
-    def test_recipe_rejects_unsafe_executable_path(self):
-        for bad_path in ["/etc/passwd", "../evil", "a\\b", "a/../b"]:
-            with self.subTest(bad_path=bad_path):
-                with self.assertRaises(ms.ManagedSetupError):
-                    ms.validate_recipe(ROOT, base_recipe(runtime={"executable_path": bad_path}))
-
-    def test_duplicate_recipe_ids_are_rejected(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            recipe = base_recipe()
-            make_fake_repo_root(root, recipe)
-            (root / "catalog" / "downloads" / "cpu-v1.json").write_text(
-                json.dumps({"catalog_version": 1, "recipes": [recipe, dict(recipe)]}), encoding="utf-8"
-            )
-            with self.assertRaisesRegex(ms.ManagedSetupError, "Duplicate"):
-                ms.load_recipes(root)
-
-
-class ReviewIsReadOnlyTests(unittest.TestCase):
-    def test_review_makes_no_network_calls_and_writes_nothing(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            storage_dir = Path(temporary) / "storage"
-            with patch("omobench.managed_setup.build_opener") as opener:
-                report = ms.review(ROOT, "qwen3-4b-cpu-v1", storage_dir)
-            opener.assert_not_called()
-            self.assertEqual(report["recipe"]["id"], "qwen3-4b-cpu-v1")
-            self.assertFalse(storage_dir.exists())
-            self.assertFalse(report["already_installed"]["installed"])
-
-    def test_review_reports_platform_and_space(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            storage_dir = Path(temporary)
-            report = ms.review(ROOT, "qwen3-4b-cpu-v1", storage_dir)
-            self.assertIn("ok", report["platform"])
-            self.assertIsInstance(report["required_bytes"], int)
-            self.assertGreater(report["required_bytes"], 0)
-
-
-class StorageSpaceVerificationTests(unittest.TestCase):
-    """WSL2's own virtual disk can report far more "free" space than its
-    Windows backing drive can actually provide (shutil.disk_usage() there
-    reflects the virtual filesystem's own capacity, not the host drive). A
-    path under a real, mounted Windows drive -- whichever letter is actually
-    mounted, never assumed to be C: -- passes disk usage through to that real
-    volume and stays trustworthy, exactly like ordinary Linux."""
-
-    def test_non_wsl_reports_verified_space(self):
-        with patch("omobench.managed_setup._running_under_wsl", return_value=False), patch(
-            "omobench.managed_setup._disk_usage", return_value=(Path("/"), 500_000_000_000)
-        ):
-            status = ms.storage_space_status(Path("/some/path"))
-        self.assertEqual(status["free_space_bytes"], 500_000_000_000)
-        self.assertTrue(status["free_space_verified"])
-        self.assertIsNone(status["space_note"])
-
-    def test_wsl_internal_virtual_disk_is_unverified(self):
-        """A path on WSL2's own root filesystem (not under /mnt/<drive>) --
-        the common case for a suggested per-user home-directory folder --
-        must not be reported as confidently verified free space."""
-        with patch("omobench.managed_setup._running_under_wsl", return_value=True), patch(
-            "omobench.managed_setup._read_proc_mounts", return_value=[("/", "ext4")]
-        ), patch("omobench.managed_setup._disk_usage", return_value=(Path("/home/user"), 999_000_000_000)):
-            status = ms.storage_space_status(Path("/home/user/OmoBench"))
-        self.assertEqual(status["free_space_bytes"], 999_000_000_000)
-        self.assertFalse(status["free_space_verified"])
-        self.assertIsNotNone(status["space_note"])
-        self.assertIn("virtual disk", status["space_note"])
-        self.assertNotIn("C:", status["space_note"])  # never assumes the backing drive
-
-    def test_wsl_mounted_windows_drive_is_verified(self):
-        """A path under a real, mounted Windows drive -- here /mnt/e, not the
-        commonly-assumed C: or D: -- is trusted exactly like ordinary Linux."""
-        with patch("omobench.managed_setup._running_under_wsl", return_value=True), patch(
-            "omobench.managed_setup._read_proc_mounts", return_value=[("/", "ext4"), ("/mnt/e", "9p")]
-        ), patch("omobench.managed_setup._disk_usage", return_value=(Path("/mnt/e/OmoBench"), 42)):
-            status = ms.storage_space_status(Path("/mnt/e/OmoBench"))
-        self.assertEqual(status["free_space_bytes"], 42)
-        self.assertTrue(status["free_space_verified"])
-        self.assertIsNone(status["space_note"])
-
-    def test_longest_mount_prefix_wins_over_root(self):
-        mounts = [("/", "ext4"), ("/mnt/c", "9p")]
-        self.assertTrue(ms._on_a_mounted_windows_drive(Path("/mnt/c/Users/example/OmoBench"), mounts))
-        self.assertFalse(ms._on_a_mounted_windows_drive(Path("/home/example/OmoBench"), mounts))
-
-    def test_free_disk_usage_unavailable_is_reported_as_unknown_not_unverified(self):
-        """Distinct from the WSL case: when free space cannot be read at all
-        (no existing ancestor), that is "unknown", not "unverified"."""
-        with patch("omobench.managed_setup._disk_usage", return_value=None):
-            status = ms.storage_space_status(Path("/does/not/exist"))
-        self.assertIsNone(status["free_space_bytes"])
-        self.assertTrue(status["free_space_verified"])
-        self.assertIsNone(status["space_note"])
-
-    def test_review_marks_has_enough_space_unverified_not_confidently_true(self):
-        """End to end through review(): even though the raw free-space number
-        would satisfy the requirement, has_enough_space must not claim True
-        while the check itself is unverified."""
-        with tempfile.TemporaryDirectory() as temporary:
-            storage_dir = Path(temporary)
-            with patch("omobench.managed_setup._running_under_wsl", return_value=True), patch(
-                "omobench.managed_setup._read_proc_mounts", return_value=[("/", "ext4")]
-            ):
-                report = ms.review(ROOT, "qwen3-4b-cpu-v1", storage_dir)
-        self.assertFalse(report["free_space_verified"])
-        self.assertIsNone(report["has_enough_space"])
-        self.assertIsNotNone(report["space_note"])
-        self.assertIsNotNone(report["free_space_bytes"])  # still reported, just not trusted
-
-
-class CachedArtifactReuseTests(unittest.TestCase):
-    """Both catalog recipes pin identical model/runtime artifacts; installing
-    one must be reflected as reuse for the other, not a second full download."""
-
-    def test_uncached_recipe_reports_the_full_download(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            storage_dir = Path(temporary)
-            report = ms.review(ROOT, "qwen3-4b-cpu-v1", storage_dir)
-        self.assertFalse(report["files"][0]["already_cached"])
-        self.assertFalse(report["files"][1]["already_cached"])
-        expected_total = report["files"][0]["size_bytes"] + report["files"][1]["size_bytes"]
-        self.assertEqual(report["bytes_to_download"], expected_total)
-
-    def test_files_already_downloaded_for_one_recipe_are_reused_by_the_other(self):
-        """Simulates what a real install leaves behind in the shared
-        downloads/ cache, without actually downloading anything, then
-        confirms a *different*, not-yet-installed recipe with byte-identical
-        artifacts sees them as cached rather than needing a fresh download."""
-        model_content = b"fixture-model-bytes"
-        runtime_content = b"fixture-runtime-bytes"
-        classic = base_recipe(
-            id="fixture-classic",
-            model={"size_bytes": len(model_content), "sha256": hashlib.sha256(model_content).hexdigest()},
-            runtime={"size_bytes": len(runtime_content), "sha256": hashlib.sha256(runtime_content).hexdigest()},
-        )
-        extended = base_recipe(
-            id="fixture-extended",
-            model={"size_bytes": len(model_content), "sha256": hashlib.sha256(model_content).hexdigest()},
-            runtime={"size_bytes": len(runtime_content), "sha256": hashlib.sha256(runtime_content).hexdigest()},
-        )
-        with tempfile.TemporaryDirectory() as root_dir, tempfile.TemporaryDirectory() as storage_temp:
-            root = Path(root_dir)
-            shutil.copytree(ROOT / "catalog" / "models", root / "catalog" / "models")
-            (root / "catalog" / "downloads").mkdir(parents=True)
-            (root / "catalog" / "downloads" / "cpu-v1.json").write_text(
-                json.dumps({"catalog_version": 1, "recipes": [classic, extended]}), encoding="utf-8"
-            )
-            (root / "benchmarks" / "profiles").mkdir(parents=True)
-            (root / "results").mkdir()
-
-            storage_dir = Path(storage_temp)
-            downloads = ms.managed_root(storage_dir) / "downloads"
-            downloads.mkdir(parents=True)
-            (downloads / classic["model"]["filename"]).write_bytes(model_content)
-            (downloads / classic["runtime"]["filename"]).write_bytes(runtime_content)
-
-            report = ms.review(root, "fixture-extended", storage_dir)
-        self.assertFalse(report["already_installed"]["installed"])  # this recipe's own manifest never ran
-        self.assertTrue(report["files"][0]["already_cached"])
-        self.assertTrue(report["files"][1]["already_cached"])
-        self.assertEqual(report["bytes_to_download"], 0)
-
-    def test_a_corrupted_cached_file_is_not_reported_as_cached(self):
-        model_content = b"fixture-model-bytes"
-        runtime_content = b"fixture-runtime-bytes"
-        recipe = base_recipe(
-            model={"size_bytes": len(model_content), "sha256": hashlib.sha256(model_content).hexdigest()},
-            runtime={"size_bytes": len(runtime_content), "sha256": hashlib.sha256(runtime_content).hexdigest()},
-        )
-        with tempfile.TemporaryDirectory() as root_dir, tempfile.TemporaryDirectory() as storage_temp:
-            root = Path(root_dir)
-            make_fake_repo_root(root, recipe)
-            storage_dir = Path(storage_temp)
-            downloads = ms.managed_root(storage_dir) / "downloads"
-            downloads.mkdir(parents=True)
-            (downloads / recipe["model"]["filename"]).write_bytes(b"not the right bytes at all")
-            (downloads / recipe["runtime"]["filename"]).write_bytes(runtime_content)
-
-            report = ms.review(root, recipe["id"], storage_dir)
-        self.assertFalse(report["files"][0]["already_cached"])
-        self.assertTrue(report["files"][1]["already_cached"])
-        self.assertEqual(report["bytes_to_download"], recipe["model"]["size_bytes"])
-
-
-class PlatformCheckTests(unittest.TestCase):
-    def test_native_windows_is_blocked_with_wsl_message(self):
-        with patch("omobench.managed_setup.sys.platform", "win32"):
-            status = ms.check_platform()
-        self.assertFalse(status.ok)
-        self.assertIn("WSL2", status.message)
-
-    def test_non_linux_posix_is_blocked(self):
-        with patch("omobench.managed_setup.sys.platform", "darwin"):
-            status = ms.check_platform()
-        self.assertFalse(status.ok)
-
-    def test_non_x86_64_linux_is_blocked(self):
-        fake_uname = type("Uname", (), {"machine": "aarch64"})()
-        with patch("omobench.managed_setup.sys.platform", "linux"), patch(
-            "omobench.managed_setup.os.uname", return_value=fake_uname, create=True
-        ):
-            status = ms.check_platform()
-        self.assertFalse(status.ok)
-
-    def test_glibc_below_minimum_is_blocked(self):
-        fake_uname = type("Uname", (), {"machine": "x86_64"})()
-        with patch("omobench.managed_setup.sys.platform", "linux"), patch(
-            "omobench.managed_setup.os.uname", return_value=fake_uname, create=True
-        ), patch("omobench.managed_setup.detected_glibc_version", return_value=(2, 33)):
-            status = ms.check_platform()
-        self.assertFalse(status.ok)
-
-    def test_glibc_2_34_boundary_is_accepted(self):
-        """Regression test: glibc 2.34 itself must be accepted, not just newer versions."""
-        fake_uname = type("Uname", (), {"machine": "x86_64"})()
-        with patch("omobench.managed_setup.sys.platform", "linux"), patch(
-            "omobench.managed_setup.os.uname", return_value=fake_uname, create=True
-        ), patch("omobench.managed_setup.detected_glibc_version", return_value=(2, 34)):
-            status = ms.check_platform()
-        self.assertTrue(status.ok)
-        self.assertTrue(ms.meets_minimum_glibc((2, 34)))
-        self.assertFalse(ms.meets_minimum_glibc((2, 33)))
-
-    def test_missing_glibc_detection_is_blocked(self):
-        fake_uname = type("Uname", (), {"machine": "x86_64"})()
-        with patch("omobench.managed_setup.sys.platform", "linux"), patch(
-            "omobench.managed_setup.os.uname", return_value=fake_uname, create=True
-        ), patch("omobench.managed_setup.detected_glibc_version", return_value=None):
-            status = ms.check_platform()
-        self.assertFalse(status.ok)
-
-
-class StorageDirPathTests(unittest.TestCase):
-    def test_wsl_or_linux_rejects_windows_style_path(self):
-        with patch("omobench.managed_setup.os.name", "posix"):
-            for bad in ["D:\\OmoBench", "C:/OmoBench", "relative/path"]:
-                with self.subTest(bad=bad):
-                    with self.assertRaises(ms.ManagedSetupError):
-                        ms.normalize_storage_dir(bad)
-            self.assertEqual(ms.normalize_storage_dir("/mnt/d/OmoBench"), Path("/mnt/d/OmoBench"))
-
-    def test_native_windows_rejects_posix_style_path(self):
-        with patch("omobench.managed_setup.os.name", "nt"):
-            with self.assertRaises(ms.ManagedSetupError):
-                ms.normalize_storage_dir("/mnt/d/OmoBench")
-            self.assertEqual(ms.normalize_storage_dir("D:\\OmoBench"), Path("D:\\OmoBench"))
-
-    def test_empty_storage_dir_is_rejected(self):
-        with self.assertRaises(ms.ManagedSetupError):
-            ms.normalize_storage_dir("   ")
-
-
-def _sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
-class RangeDownloadHandler(BaseHTTPRequestHandler):
-    content = b""
-    received_ranges: list[str] = []
-
-    def do_GET(self):
-        range_header = self.headers.get("Range")
-        body = self.content
-        if range_header:
-            self.received_ranges.append(range_header)
-            match = re.fullmatch(r"bytes=(\d+)-", range_header)
-            start = int(match.group(1)) if match else 0
-            chunk = body[start:]
-            self.send_response(206)
-            self.send_header("Content-Range", f"bytes {start}-{len(body) - 1}/{len(body)}")
-            self.send_header("Content-Length", str(len(chunk)))
-            self.end_headers()
-            self.wfile.write(chunk)
-        else:
-            self.send_response(200)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-    def log_message(self, *args):
-        pass
-
-
-class AlwaysFullContentHandler(BaseHTTPRequestHandler):
-    content = b""
-
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Length", str(len(self.content)))
-        self.end_headers()
-        self.wfile.write(self.content)
-
-    def log_message(self, *args):
-        pass
-
-
-class ResumableDownloadTests(unittest.TestCase):
-    def _serve(self, handler_class):
-        server = ThreadingHTTPServer(("127.0.0.1", 0), handler_class)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(lambda: (server.shutdown(), server.server_close(), thread.join(2)))
-        return server
-
-    def test_resumes_via_range_header_and_verifies_hash(self):
-        content = b"omobench-fixture-bytes" * 500
-        RangeDownloadHandler.content = content
-        RangeDownloadHandler.received_ranges = []
-        server = self._serve(RangeDownloadHandler)
-        with tempfile.TemporaryDirectory() as temporary:
-            managed = Path(temporary) / "managed"
-            part = managed / "downloads" / "model.bin.part"
-            final = managed / "downloads" / "model.bin"
-            part.parent.mkdir(parents=True)
-            half = len(content) // 2
-            part.write_bytes(content[:half])
-            ms.resumable_download(
-                f"http://127.0.0.1:{server.server_port}/model.bin",
-                part_path=part,
-                final_path=final,
-                expected_size=len(content),
-                expected_sha256=_sha256(content),
-                managed=managed,
-                label="model",
-            )
-            self.assertEqual(final.read_bytes(), content)
-            self.assertFalse(part.exists())
-            self.assertTrue(RangeDownloadHandler.received_ranges)
-            self.assertEqual(RangeDownloadHandler.received_ranges[0], f"bytes={half}-")
-
-    def test_progress_callback_and_idempotent_recheck(self):
-        content = b"abc" * 1000
-        RangeDownloadHandler.content = content
-        RangeDownloadHandler.received_ranges = []
-        server = self._serve(RangeDownloadHandler)
-        seen = []
-        with tempfile.TemporaryDirectory() as temporary:
-            managed = Path(temporary) / "managed"
-            part = managed / "downloads" / "model.bin.part"
-            final = managed / "downloads" / "model.bin"
-            ms.resumable_download(
-                f"http://127.0.0.1:{server.server_port}/model.bin",
-                part_path=part,
-                final_path=final,
-                expected_size=len(content),
-                expected_sha256=_sha256(content),
-                managed=managed,
-                label="model",
-                progress=lambda label, done, total: seen.append((label, done, total)),
-            )
-            self.assertTrue(seen)
-            self.assertEqual(seen[-1], ("model", len(content), len(content)))
-            # Re-running with an already-verified final file must not need the server again.
-            with patch("omobench.managed_setup.build_opener") as opener:
-                ms.resumable_download(
-                    f"http://127.0.0.1:{server.server_port}/model.bin",
-                    part_path=part,
-                    final_path=final,
-                    expected_size=len(content),
-                    expected_sha256=_sha256(content),
-                    managed=managed,
-                    label="model",
-                )
-            opener.assert_not_called()
-
-    def test_hash_mismatch_quarantines_and_does_not_install(self):
-        wrong_content = b"wrong-bytes" * 100
-        AlwaysFullContentHandler.content = wrong_content
-        server = self._serve(AlwaysFullContentHandler)
-        with tempfile.TemporaryDirectory() as temporary:
-            managed = Path(temporary) / "managed"
-            part = managed / "downloads" / "model.bin.part"
-            final = managed / "downloads" / "model.bin"
-            with self.assertRaisesRegex(ms.ManagedSetupError, "quarantined"):
-                ms.resumable_download(
-                    f"http://127.0.0.1:{server.server_port}/model.bin",
-                    part_path=part,
-                    final_path=final,
-                    expected_size=len(wrong_content),
-                    expected_sha256=_sha256(b"expected-different-bytes"),
-                    managed=managed,
-                    label="model",
-                )
-            self.assertFalse(final.exists())
-            self.assertFalse(part.exists())
-            quarantined = list((managed / "quarantine").glob("*.quarantined"))
-            self.assertEqual(len(quarantined), 1)
-
-    def test_size_mismatch_is_rejected(self):
-        content = b"x" * 10
-        AlwaysFullContentHandler.content = content
-        server = self._serve(AlwaysFullContentHandler)
-        with tempfile.TemporaryDirectory() as temporary:
-            managed = Path(temporary) / "managed"
-            part = managed / "downloads" / "model.bin.part"
-            final = managed / "downloads" / "model.bin"
-            with self.assertRaises(ms.ManagedSetupError):
-                ms.resumable_download(
-                    f"http://127.0.0.1:{server.server_port}/model.bin",
-                    part_path=part,
-                    final_path=final,
-                    expected_size=999,
-                    expected_sha256=_sha256(content),
-                    managed=managed,
-                    label="model",
-                )
-
-    def test_cancel_event_stops_download(self):
-        content = b"y" * (ms.DOWNLOAD_CHUNK_BYTES * 3)
-        AlwaysFullContentHandler.content = content
-        server = self._serve(AlwaysFullContentHandler)
-
-        class ImmediatelySet:
-            def is_set(self):
-                return True
-
-        with tempfile.TemporaryDirectory() as temporary:
-            managed = Path(temporary) / "managed"
-            part = managed / "downloads" / "model.bin.part"
-            final = managed / "downloads" / "model.bin"
-            with self.assertRaisesRegex(ms.ManagedSetupError, "cancelled"):
-                ms.resumable_download(
-                    f"http://127.0.0.1:{server.server_port}/model.bin",
-                    part_path=part,
-                    final_path=final,
-                    expected_size=len(content),
-                    expected_sha256=_sha256(content),
-                    managed=managed,
-                    label="model",
-                    cancel_event=ImmediatelySet(),
-                )
-            self.assertFalse(final.exists())
-
-    def test_unsafe_redirect_is_rejected(self):
-        class RedirectHandler(BaseHTTPRequestHandler):
-            def do_GET(self):
-                self.send_response(302)
-                self.send_header("Location", "http://127.0.0.1:9/model.bin")  # downgraded scheme
-                self.end_headers()
-
-            def log_message(self, *args):
-                pass
-
-        server = self._serve(RedirectHandler)
-        with tempfile.TemporaryDirectory() as temporary:
-            managed = Path(temporary) / "managed"
-            part = managed / "downloads" / "model.bin.part"
-            final = managed / "downloads" / "model.bin"
-            with self.assertRaises(ms.ManagedSetupError):
-                ms.resumable_download(
-                    f"http://127.0.0.1:{server.server_port}/model.bin",
-                    part_path=part,
-                    final_path=final,
-                    expected_size=10,
-                    expected_sha256="0" * 64,
-                    managed=managed,
-                    label="model",
-                )
-
-
-def build_tar_gz(path: Path, members: list[tuple[str, dict]]) -> None:
-    with tarfile.open(path, "w:gz") as archive:
-        for name, spec in members:
-            info = tarfile.TarInfo(name=name)
-            kind = spec.get("kind", "file")
-            if kind == "file":
-                data = spec.get("content", b"")
-                info.type = tarfile.REGTYPE
-                info.size = len(data)
-                info.mode = spec.get("mode", 0o644)
-                archive.addfile(info, io.BytesIO(data))
-            elif kind == "dir":
-                info.type = tarfile.DIRTYPE
-                info.mode = 0o755
-                archive.addfile(info)
-            elif kind == "symlink":
-                info.type = tarfile.SYMTYPE
-                info.linkname = spec["target"]
-                archive.addfile(info)
-            elif kind == "hardlink":
-                info.type = tarfile.LNKTYPE
-                info.linkname = spec["target"]
-                archive.addfile(info)
-            elif kind == "chardev":
-                info.type = tarfile.CHRTYPE
-                info.devmajor, info.devminor = 1, 3
-                archive.addfile(info)
-            else:
-                raise ValueError(kind)
-
-
-class SafeExtractTests(unittest.TestCase):
-    def _extract(self, temporary, members, *, executable_path="app/run", max_entries=100, max_extracted_bytes=10_000):
-        archive_path = Path(temporary) / "archive.tar.gz"
-        build_tar_gz(archive_path, members)
-        dest = Path(temporary) / "dest"
-        return ms.safe_extract_tar_gz(
-            archive_path,
-            dest,
-            executable_path=executable_path,
-            max_entries=max_entries,
-            max_extracted_bytes=max_extracted_bytes,
-        )
-
-    def test_extracts_expected_executable_and_sets_permissions(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            executable = self._extract(
-                temporary,
-                [("app/run", {"kind": "file", "content": b"#!/bin/sh\necho hi\n"})],
-            )
-            self.assertTrue(executable.is_file())
-            self.assertEqual(executable.read_bytes(), b"#!/bin/sh\necho hi\n")
-
-    def test_missing_expected_executable_is_rejected(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaisesRegex(ms.ManagedSetupError, "did not contain"):
-                self._extract(temporary, [("app/other", {"kind": "file", "content": b"x"})])
-
-    def test_absolute_path_is_rejected(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaises(ms.ManagedSetupError):
-                self._extract(temporary, [("/etc/passwd", {"kind": "file", "content": b"x"})])
-
-    def test_parent_traversal_is_rejected(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaises(ms.ManagedSetupError):
-                self._extract(temporary, [("../evil", {"kind": "file", "content": b"x"})])
-
-    def test_backslash_path_is_rejected(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaises(ms.ManagedSetupError):
-                self._extract(temporary, [("evil\\path", {"kind": "file", "content": b"x"})])
-
-    def test_symlink_is_rejected(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaises(ms.ManagedSetupError):
-                self._extract(temporary, [("app/link", {"kind": "symlink", "target": "/etc/passwd"})])
-
-    def test_internal_relative_symlink_is_materialized_as_a_regular_file(self):
-        """Mirrors a real llama.cpp archive: libmtmd.so -> libmtmd.so.0.0.0 in the same dir."""
-        with tempfile.TemporaryDirectory() as temporary:
-            library_content = b"\x7fELF-fake-shared-library-bytes"
-            executable = self._extract(
-                temporary,
-                [
-                    ("app/run", {"kind": "file", "content": b"#!/bin/sh\necho hi\n", "mode": 0o755}),
-                    (
-                        "app/libmtmd.so.0.0.0",
-                        {"kind": "file", "content": library_content, "mode": 0o755},
-                    ),
-                    ("app/libmtmd.so", {"kind": "symlink", "target": "libmtmd.so.0.0.0"}),
-                ],
-            )
-            link_path = executable.parent / "libmtmd.so"
-            self.assertTrue(link_path.is_file())
-            self.assertFalse(link_path.is_symlink())
-            self.assertEqual(link_path.read_bytes(), library_content)
-            # Executable permission from the archived target is preserved.
-            self.assertTrue(link_path.stat().st_mode & 0o111)
-
-    def test_symlink_pointing_outside_the_destination_via_traversal_is_rejected(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaises(ms.ManagedSetupError):
-                self._extract(
-                    temporary,
-                    [
-                        ("app/run", {"kind": "file", "content": b"x", "mode": 0o755}),
-                        ("app/evil", {"kind": "symlink", "target": "../../../../etc/passwd"}),
-                    ],
-                )
-
-    def test_symlink_cycle_is_rejected(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaisesRegex(ms.ManagedSetupError, "cycle"):
-                self._extract(
-                    temporary,
-                    [
-                        ("app/run", {"kind": "file", "content": b"x", "mode": 0o755}),
-                        ("app/a", {"kind": "symlink", "target": "b"}),
-                        ("app/b", {"kind": "symlink", "target": "a"}),
-                    ],
-                )
-
-    def test_self_referential_symlink_is_rejected(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaisesRegex(ms.ManagedSetupError, "cycle"):
-                self._extract(
-                    temporary,
-                    [
-                        ("app/run", {"kind": "file", "content": b"x", "mode": 0o755}),
-                        ("app/loop", {"kind": "symlink", "target": "loop"}),
-                    ],
-                )
-
-    def test_symlink_to_missing_target_is_rejected(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaisesRegex(ms.ManagedSetupError, "does not exist"):
-                self._extract(
-                    temporary,
-                    [
-                        ("app/run", {"kind": "file", "content": b"x", "mode": 0o755}),
-                        ("app/link", {"kind": "symlink", "target": "missing.so"}),
-                    ],
-                )
-
-    def test_symlink_with_backslash_target_is_rejected(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaises(ms.ManagedSetupError):
-                self._extract(
-                    temporary,
-                    [
-                        ("app/run", {"kind": "file", "content": b"x", "mode": 0o755}),
-                        ("app/link", {"kind": "symlink", "target": "evil\\path"}),
-                    ],
-                )
-
-    def test_symlink_to_directory_is_rejected(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaisesRegex(ms.ManagedSetupError, "not a regular file"):
-                self._extract(
-                    temporary,
-                    [
-                        ("app/run", {"kind": "file", "content": b"x", "mode": 0o755}),
-                        ("app/subdir", {"kind": "dir"}),
-                        ("app/link", {"kind": "symlink", "target": "subdir"}),
-                    ],
-                )
-
-    def test_full_llamacpp_style_archive_is_extracted_safely(self):
-        """One fixture covering an executable, a versioned library, a valid symlink to it,
-        a rejected traversal symlink, a rejected cycle, and a rejected hard link."""
-        with tempfile.TemporaryDirectory() as temporary:
-            archive_path = Path(temporary) / "archive.tar.gz"
-            build_tar_gz(
-                archive_path,
-                [
-                    ("llama-b10621/main", {"kind": "file", "content": b"#!/bin/sh\n", "mode": 0o755}),
-                    (
-                        "llama-b10621/libmtmd.so.0.0.0",
-                        {"kind": "file", "content": b"library-bytes", "mode": 0o755},
-                    ),
-                    (
-                        "llama-b10621/libmtmd.so",
-                        {"kind": "symlink", "target": "libmtmd.so.0.0.0"},
-                    ),
-                ],
-            )
-            dest = Path(temporary) / "dest"
-            executable = ms.safe_extract_tar_gz(
-                archive_path,
-                dest,
-                executable_path="llama-b10621/main",
-                max_entries=100,
-                max_extracted_bytes=10_000,
-            )
-            self.assertTrue(executable.is_file())
-            link_path = dest / "llama-b10621" / "libmtmd.so"
-            self.assertTrue(link_path.is_file())
-            self.assertFalse(link_path.is_symlink())
-            self.assertEqual(link_path.read_bytes(), b"library-bytes")
-
-    def test_hardlink_is_rejected(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaises(ms.ManagedSetupError):
-                self._extract(
-                    temporary,
-                    [
-                        ("app/run", {"kind": "file", "content": b"x"}),
-                        ("app/link", {"kind": "hardlink", "target": "app/run"}),
-                    ],
-                )
-
-    def test_device_file_is_rejected(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaises(ms.ManagedSetupError):
-                self._extract(temporary, [("dev/fake", {"kind": "chardev"})])
-
-    def test_duplicate_path_is_rejected(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaisesRegex(ms.ManagedSetupError, "duplicate"):
-                self._extract(
-                    temporary,
-                    [
-                        ("app/run", {"kind": "file", "content": b"one"}),
-                        ("app/run", {"kind": "file", "content": b"two"}),
-                    ],
-                )
-
-    def test_too_many_entries_is_rejected(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            members = [(f"app/file{i}", {"kind": "file", "content": b"x"}) for i in range(5)]
-            with self.assertRaises(ms.ManagedSetupError):
-                self._extract(temporary, members, max_entries=3)
-
-    def test_oversized_archive_is_rejected(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaises(ms.ManagedSetupError):
-                self._extract(
-                    temporary,
-                    [("app/run", {"kind": "file", "content": b"x" * 1000})],
-                    max_extracted_bytes=10,
-                )
-
-
-class DownloadAndInstallEndToEndTests(unittest.TestCase):
-    """Exercises the full orchestration against a local fixture server, bypassing the
-    huggingface.co/github.com host allowlist by injecting a fixture recipe directly."""
-
-    def setUp(self):
-        self.model_content = b"fixture-model-bytes" * 1000
-        self.executable_content = b"#!/bin/sh\necho ready\n"
-        self.archive_dir = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, self.archive_dir, ignore_errors=True)
-        archive_path = self.archive_dir / "runtime.tar.gz"
-        build_tar_gz(
-            archive_path,
-            [("app/run", {"kind": "file", "content": self.executable_content, "mode": 0o755})],
-        )
-        self.archive_bytes = archive_path.read_bytes()
-
-        model_content = self.model_content
-        archive_bytes = self.archive_bytes
-
-        class Handler(BaseHTTPRequestHandler):
-            def do_GET(self):
-                if self.path == "/model.gguf":
-                    body = model_content
-                elif self.path == "/runtime.tar.gz":
-                    body = archive_bytes
-                else:
-                    self.send_response(404)
-                    self.end_headers()
-                    return
-                self.send_response(200)
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-            def log_message(self, *args):
-                pass
-
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
-        self.addCleanup(lambda: (self.server.shutdown(), self.server.server_close(), self.thread.join(2)))
-
-        self.fixture_recipe = base_recipe(
-            model={
-                "url": f"http://127.0.0.1:{self.server.server_port}/model.gguf",
-                "sha256": _sha256(self.model_content),
-                "size_bytes": len(self.model_content),
-            },
-            runtime={
-                "url": f"http://127.0.0.1:{self.server.server_port}/runtime.tar.gz",
-                "sha256": _sha256(self.archive_bytes),
-                "size_bytes": len(self.archive_bytes),
-                "executable_path": "app/run",
-                "max_extracted_bytes": 10_000,
-                "max_entries": 10,
-            },
-        )
-        self.get_recipe_patch = patch("omobench.managed_setup.get_recipe", return_value=self.fixture_recipe)
-        self.get_recipe_patch.start()
-        self.addCleanup(self.get_recipe_patch.stop)
-        self.platform_patch = patch(
-            "omobench.managed_setup.check_platform", return_value=ms.PlatformStatus(True, "ok")
-        )
-        self.platform_patch.start()
-        self.addCleanup(self.platform_patch.stop)
-
-    def snapshot(self, root: Path) -> set[str]:
-        return {str(p.relative_to(root)) for p in root.rglob("*") if "__pycache__" not in p.parts}
-
-    def test_install_is_atomic_verified_and_writes_only_inside_storage(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            fake_root = Path(temporary) / "repo"
-            make_fake_repo_root(fake_root, self.fixture_recipe)
-            (fake_root / "results" / "marker.txt").write_text("do-not-touch", encoding="utf-8")
-            before = self.snapshot(fake_root)
-
-            storage_dir = Path(temporary) / "storage"
-            manifest = ms.download_and_install(fake_root, "qwen3-4b-cpu-v1", storage_dir)
-
-            after = self.snapshot(fake_root)
-            self.assertEqual(before, after, "download_and_install must not write inside the repository checkout")
-            self.assertEqual((fake_root / "results" / "marker.txt").read_text(encoding="utf-8"), "do-not-touch")
-
-            self.assertTrue(Path(manifest["model"]["path"]).is_relative_to(storage_dir.resolve()))
-            self.assertTrue(Path(manifest["runtime"]["executable_path"]).is_relative_to(storage_dir.resolve()))
-            self.assertFalse((ms.managed_root(storage_dir) / "runtimes" / ".qwen3-4b-cpu-v1.staging").exists())
-
-            installed = ms.verify_installed(fake_root, "qwen3-4b-cpu-v1", storage_dir)
-            self.assertEqual(installed["model_id"], "Qwen/Qwen3-4B")
-            self.assertEqual(Path(installed["executable_path"]).read_bytes(), self.executable_content)
-
-    def test_verify_installed_detects_recipe_hash_change(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            fake_root = Path(temporary) / "repo"
-            make_fake_repo_root(fake_root, self.fixture_recipe)
-            storage_dir = Path(temporary) / "storage"
-            ms.download_and_install(fake_root, "qwen3-4b-cpu-v1", storage_dir)
-
-            changed_recipe = {**self.fixture_recipe, "model": {**self.fixture_recipe["model"], "sha256": "0" * 64}}
-            with patch("omobench.managed_setup.get_recipe", return_value=changed_recipe):
-                with self.assertRaisesRegex(ms.ManagedSetupError, "different recipe revision"):
-                    ms.verify_installed(fake_root, "qwen3-4b-cpu-v1", storage_dir)
-
-    def test_verify_installed_detects_tampered_model_file(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            fake_root = Path(temporary) / "repo"
-            make_fake_repo_root(fake_root, self.fixture_recipe)
-            storage_dir = Path(temporary) / "storage"
-            manifest = ms.download_and_install(fake_root, "qwen3-4b-cpu-v1", storage_dir)
-            model_path = Path(manifest["model"]["path"])
-            same_size_garbage = bytes((b + 1) % 256 for b in model_path.read_bytes())
-            model_path.write_bytes(same_size_garbage)
-            with self.assertRaisesRegex(ms.ManagedSetupError, "failed re-verification"):
-                ms.verify_installed(fake_root, "qwen3-4b-cpu-v1", storage_dir)
-
-    def test_missing_install_reports_clear_error(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaisesRegex(ms.ManagedSetupError, "is not installed"):
-                ms.verify_installed(ROOT, "qwen3-4b-cpu-v1", Path(temporary) / "storage")
-
-    def test_second_concurrent_install_is_blocked_by_storage_lock(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            storage_dir = Path(temporary) / "storage"
-            with ms.storage_lock(storage_dir):
-                with self.assertRaisesRegex(ms.ManagedSetupError, "already preparing"):
-                    with ms.storage_lock(storage_dir):
-                        self.fail("second setup process obtained the lock")
-
-
-class ManagedCliParserTests(unittest.TestCase):
-    def test_prepare_list_parses(self):
-        args = build_parser().parse_args(["prepare", "--list"])
-        self.assertTrue(args.list)
-        self.assertIsNone(args.recipe)
-
-    def test_prepare_review_and_download_parse(self):
-        args = build_parser().parse_args(
-            ["prepare", "--recipe", "qwen3-4b-cpu-v1", "--storage-dir", "/mnt/d/OmoBench"]
-        )
-        self.assertFalse(args.download)
-        args = build_parser().parse_args(
-            ["prepare", "--recipe", "qwen3-4b-cpu-v1", "--storage-dir", "/mnt/d/OmoBench", "--download"]
-        )
-        self.assertTrue(args.download)
-
-    def test_launch_requires_smoke_or_execute_exclusively(self):
-        parser = build_parser()
-        with self.assertRaises(SystemExit):
-            parser.parse_args(["launch", "--recipe", "x", "--storage-dir", "y"])
-        with self.assertRaises(SystemExit):
-            parser.parse_args(["launch", "--recipe", "x", "--storage-dir", "y", "--smoke", "--execute"])
-        args = parser.parse_args(["launch", "--recipe", "x", "--storage-dir", "y", "--smoke"])
-        self.assertTrue(args.smoke)
-        self.assertFalse(args.execute)
-
-    def test_repository_root_is_found_from_this_checkout(self):
-        self.assertIsNotNone(find_repository_root())
+COMPONENT = ROOT / "cli" / "src" / "omobench" / "web" / "managed-setup.js"
+HARNESS = Path(__file__).resolve().parent / "managed_setup_harness.mjs"
+
+
+def _render() -> dict:
+    node = shutil.which("node")
+    if node is None:
+        raise unittest.SkipTest("Node is not available in this environment")
+    completed = subprocess.run([node, str(HARNESS), str(COMPONENT)], capture_output=True,
+                               text=True, encoding="utf-8", timeout=120)
+    if completed.returncode != 0:
+        raise AssertionError(f"managed-setup harness failed:\n{completed.stderr}")
+    return json.loads(completed.stdout)
+
+
+class ManagedSetupTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.states = _render()
+
+    # -- one selector, one flow ----------------------------------------------
+
+    def test_it_takes_its_workload_from_the_panel(self) -> None:
+        """No second model list for the two to disagree about."""
+        state = self.states["usesPanelSelection"]
+        self.assertEqual(state["reviewRequestedFor"]["recipe"], "fixture-cpu-v1")
+        self.assertEqual(state["reviewRequestedFor"]["storage_dir"], "/mnt/d/OmoBench")
+        self.assertFalse(state["visible"] is False)
+        self.assertEqual(state["files"], 2, "the exact files, before anything is downloaded")
+
+    def test_it_owns_no_selector_stepper_or_dashboard(self) -> None:
+        state = self.states["noDuplicateUi"]
+        self.assertFalse(state["mentionsWorkloadSelect"])
+        self.assertFalse(state["mentionsStepper"])
+        self.assertFalse(state["mountsDashboard"])
+
+    def test_a_workload_with_no_recipe_hides_it_and_asks_for_nothing(self) -> None:
+        state = self.states["hiddenForCustom"]
+        self.assertTrue(state["hidden"])
+        self.assertEqual(state["calls"], 0, "a custom model triggers no managed request")
+
+    # -- review: read-only, and exact ----------------------------------------
+
+    def test_review_shows_what_would_be_downloaded_and_downloads_nothing(self) -> None:
+        state = self.states["usesPanelSelection"]
+        self.assertIn("Download and verify", state["startLabel"])
+        self.assertFalse(state["startDisabled"])
+        self.assertIn("enough space", state["space"])
+
+    def test_verified_files_are_never_fetched_again(self) -> None:
+        state = self.states["alreadyInstalled"]
+        self.assertEqual(state["flag"], "1")
+        self.assertEqual(state["label"], "Start benchmark")
+
+    def test_unverifiable_free_space_is_neither_enough_nor_not_enough(self) -> None:
+        """WSL reports its virtual disk, which can exceed the drive behind it."""
+        text = self.states["unverifiableSpace"]
+        self.assertIn("Virtual filesystem free space", text)
+        self.assertNotIn("enough space.", text)
+
+    def test_a_folder_that_cannot_be_used_says_so_and_refuses_to_start(self) -> None:
+        state = self.states["badFolder"]
+        self.assertFalse(state["hidden"])
+        self.assertIn("not writable", state["error"])
+        self.assertTrue(state["startDisabled"])
+
+    # -- download: progress, completion, and the run that follows ------------
+
+    def test_a_download_reports_real_byte_counts_then_starts_the_run(self) -> None:
+        state = self.states["downloadThenRun"]
+        self.assertTrue(state["sawPartialProgress"])
+        self.assertIn("preparing:true", state["stages"])
+        self.assertTrue(state["startedRunAfterDownload"])
+        self.assertTrue(state["outcome"]["success"])
+        self.assertEqual(state["outcome"]["benchmarkJobId"], "job-abc")
+
+    def test_cancelling_a_download_cancels_the_download(self) -> None:
+        """And not a run, which at that point does not exist."""
+        state = self.states["cancelDownload"]
+        self.assertTrue(state["cancelled"])
+        self.assertFalse(state["cancelledTheRun"])
+
+    def test_a_rejected_checksum_never_becomes_a_benchmark(self) -> None:
+        state = self.states["checksumRejected"]
+        self.assertFalse(state["success"])
+        self.assertIn("sha256 mismatch", state["message"])
+        self.assertFalse(state["startedARun"],
+                         "a failed verification must not fall through into a run")
+
+    # -- recovery -------------------------------------------------------------
+
+    def test_a_download_still_running_is_adopted_rather_than_restarted(self) -> None:
+        self.assertEqual(self.states["recoversDownload"], {"kind": "setup", "id": "mjob-4"})
+
+    def test_a_run_still_going_is_adopted_in_preference_to_a_finished_download(self) -> None:
+        self.assertEqual(self.states["recoversRun"], {"kind": "run", "id": "mrun-5"})
+
+    def test_nothing_to_recover_is_not_an_error(self) -> None:
+        self.assertIsNone(self.states["recoversNothing"])
 
 
 if __name__ == "__main__":

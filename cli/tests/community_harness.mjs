@@ -63,10 +63,12 @@ resolveOld({enabled: true, generation: 'obsolete', status: 'signed_in', account:
 await delayed;
 assert.equal(w.state.status, 'signed_out');
 assert.equal(w.generation, 'signed-out');
-for (const page of ['guided.html', 'index.html']) {
-  const html = readFileSync(`${root}/${page}`, 'utf8');
-  for (const id of elements.keys()) assert.ok(html.includes(`id="${id}"`), `${page} missing ${id}`);
-  const main = page === 'guided.html' ? 'guided.js' : 'app.js';
-  assert.ok(html.indexOf('/community.js') < html.indexOf('/' + main));
+// One page now. The contract is the same one it always was: every element
+// the sign-in code touches exists, and community.js is loaded before the
+// script that uses it.
+{
+  const html = readFileSync(`${root}/index.html`, 'utf8');
+  for (const id of elements.keys()) assert.ok(html.includes(`id="${id}"`), `index.html missing ${id}`);
+  assert.ok(html.indexOf('/community.js') < html.indexOf('/app.js'));
 }
-console.log('Community sign-in rendering, review invalidation, and both page contracts passed.');
+console.log('Community sign-in rendering, review invalidation, and the page contract passed.');

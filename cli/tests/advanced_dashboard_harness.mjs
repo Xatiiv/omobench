@@ -7,12 +7,20 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createContext, runInContext } from "node:vm";
-import { makeDocument } from "./dom_stub.mjs";
+import { makeDocument, makeElement } from "./dom_stub.mjs";
 
 const appPath = process.argv[2];
 const webDirectory = dirname(appPath);
 
-const document = makeDocument();
+// The six stages as index.html declares them, so the shared workflow view has
+// a real stepper to mark up rather than silently finding nothing.
+const stepTabs = ["connect", "identify", "check", "run", "review", "submit"].map((stage) => {
+  const tab = makeElement(`step-${stage}`);
+  tab.dataset.stage = stage;
+  tab.dataset.target = "configure";
+  return tab;
+});
+const document = makeDocument({ selectors: { ".step-tab": stepTabs } });
 const get = (id) => document.getElementById(id);
 
 // The package form, driven through values the harness sets directly.
@@ -42,13 +50,59 @@ const SETUP = {
   frameworks: ["llama.cpp", "vllm", "openai-compatible-other"],
   catalog: ["Qwen/Qwen3-4B"],
   can_execute: true, can_validate: true, runner_message: "GuideLLM 0.7.3 ready.",
+  // What the profile will do and what its result has to clear, as
+  // cli.profile_briefing() reads it from the profile's own YAML.
+  profile_briefings: {
+    "chat-small-v1": {
+      profile_id: "chat-small-v1", title: "Fixture chat latency", summary: "A fixture profile.",
+      input_tokens: 1024, requested_output_tokens: 256, concurrency: 1, streaming: true,
+      warmup_requests: 5, measured_requests: 40, cooldown_requests: 5, total_requests: 50,
+      maximum_duration_seconds: 900, request_timeout_seconds: 300,
+      seconds_per_request_budget: 18, minimum_successful_requests: 32,
+      maximum_error_rate_percent: 1, longer_alternative: "chat-small-extended-v1",
+    },
+  },
+};
+const WORKFLOW = {
+  stages: [
+    { id: "connect", label: "Connect", state: "done" },
+    { id: "identify", label: "Identify", state: "blocked" },
+    { id: "check", label: "Check", state: "done" },
+    { id: "run", label: "Run", state: "done" },
+    { id: "review", label: "Review", state: "current" },
+    { id: "submit", label: "Submit", state: "todo" },
+  ],
+  checks: [
+    { id: "runner", label: "The benchmark runner can start here", state: "ok",
+      observed: "ready", source: "this machine", blocks: "run", recovery: "", detail: "", field: null },
+    // Severe without being a failure: the pair of states the memory reading
+    // produces, and the one the shared view has to render differently.
+    { id: "memory", label: "Memory to spare in the WSL environment running this panel",
+      state: "attention", observed: "0.26 GB available of 7.85 GB allocated to this WSL environment",
+      source: "this machine", blocks: "run", recovery: "fixture memory recovery",
+      detail: "fixture memory detail", field: null, severity: "severe" },
+    { id: "catalog", label: "This model may be published here", state: "attention",
+      observed: "Qwen/Qwen3-VL-4B-Instruct", source: "you", blocks: "submit",
+      recovery: "fixture catalog recovery", detail: "fixture catalog detail", field: "model" },
+    { id: "tokenizer-match", label: "The tokenizer matches the served weights", state: "unknown",
+      observed: null, source: "not checked yet", blocks: null, recovery: "", detail: "fixture", field: null },
+  ],
+  blocking: { run: [], package: [], submit: ["catalog"] },
+  proposal: null,
+  completion: [
+    { id: "benchmark", label: "Benchmark completed", state: "done", detail: "fixture" },
+    { id: "published", label: "Accepted and published", state: "pending", detail: "fixture" },
+  ],
+  gates: { run: "fixture run gate", package: "fixture package gate", submit: "fixture submit gate" },
+  local_report: "fixture local report note",
+  has_run: true,
 };
 const REQUIREMENTS = {
   model: "Qwen/Qwen3-VL-4B-Instruct", catalog: ["Qwen/Qwen3-4B"], catalogued: false,
   ready: false, local_export_available: true,
   items: [
     { field: null, label: "Benchmark completed with measurements", ok: true, detail: "This run produced measurements." },
-    { field: "model", label: "Canonical model ID is in the OmoBench catalog", ok: false, detail: "Qwen/Qwen3-VL-4B-Instruct is not currently eligible for the community registry." },
+    { field: "model", label: "This model may be published here", ok: false, detail: "Qwen/Qwen3-VL-4B-Instruct is not currently eligible for the community registry." },
     { field: "model_revision", label: "Immutable revision of the actual weights source", ok: false, detail: "A commit SHA of the weights repository." },
     { field: "framework_version", label: "Exact serving runtime version", ok: false, detail: "The runtime build, not the application version." },
   ],
@@ -86,6 +140,13 @@ const context = createContext({
     else if (path === "/api/runs" && method === "GET") data = state.jobs;
     else if (path === "/api/github/auth") data = { status: "signed_out", enabled: true, generation: "g1", account: null, repository: "Xatiiv/omobench" };
     else if (path === "/api/tokenizer-check") data = { ok: true, kind: "huggingface", source: "Qwen/Qwen3-VL-4B-Instruct", cached: false, message: "fixture tokenizer message" };
+    // The workflow the page now reads for its stepper and preflight. Shaped
+    // like the real answer, with the uncatalogued model this harness uses.
+    else if (path === "/api/workflow") data = WORKFLOW;
+    else if (path === "/api/model-proposal") data = { model: ALIAS, catalogued: false, required: true,
+      missing: ["family"], summary: "fixture proposal summary", review_note: "fixture review note",
+      saved_as: "model-proposal.json", document: null, catalog: SETUP.catalog, conflict: null };
+    else if (/\/evidence$/.test(path)) data = { schema_version: "1.0", sections: [], qualifications: [] };
     else if (detail) {
       if (state.pendingDetail && state.pendingDetail.id === detail[1]) {
         return state.pendingDetail.promise.then((value) => ({ ok: true, json: async () => value }));
@@ -103,6 +164,10 @@ const context = createContext({
 
 runInContext(readFileSync(join(webDirectory, "dashboard.js"), "utf8"), context);
 runInContext(readFileSync(join(webDirectory, "community.js"), "utf8"), context);
+runInContext(readFileSync(join(webDirectory, "workflow.js"), "utf8"), context);
+// The managed-setup component the one panel mounts: preparation, download,
+// cancellation and recovery, with no selector or dashboard of its own.
+runInContext(readFileSync(join(webDirectory, "managed-setup.js"), "utf8"), context);
 get("submission-mode").value = "community";
 runInContext(readFileSync(appPath, "utf8"), context, { filename: appPath });
 context.download = (blob, name) => downloads.push({ blob, name });
@@ -186,6 +251,11 @@ function snapshot() {
     startOverHidden: get("start-over-button").hidden,
     errorHidden: get("run-error").hidden,
     error: get("run-error").textContent,
+    runGate: get("gate-run").children.map((item) => ({
+      className: item.className,
+      parts: item.children.map((part) => part.className || part.id),
+      text: item.children.map((part) => part.textContent),
+    })),
     metricsHidden: get("metrics").hidden,
     metricCount: get("metrics").children.length,
     exportHidden: get("download-summary").hidden,
@@ -242,6 +312,9 @@ const running = job();
 state.jobs = [running];
 state.details[running.id] = running;
 state.telemetry[running.id] = null;
+// The page's own start-up finishes first, so its single polling loop is
+// attributed to start-up and not to the selection measured next.
+await settle();
 scheduledTimers = 0;
 await context.selectRun(running.id);
 await settle();
@@ -352,8 +425,11 @@ results.localExport = {
   content: JSON.parse(await downloads[downloads.length - 1].blob.text()),
 };
 get("package-form").formValues = { model: "Qwen/Qwen3-VL-4B-Instruct", model_revision: "", framework: "llama.cpp", framework_version: "", submitter: "" };
+const checkRequestsBefore = requests.length;
 await get("check-requirements").trigger("click");
 await settle();
+results.checkRequirementsRequests = requests.slice(checkRequestsBefore)
+  .map((entry) => `${entry.method} ${entry.path.replace(/job-[a-f0-9]{16}/, "<job>")}`);
 results.checklist = {
   items: get("publication-checklist").children.map((item) => `${item.className.replace("status-item ", "")}:${item.children[0].textContent}`),
   summary: get("publication-summary").textContent,
@@ -363,6 +439,18 @@ results.checklist = {
 await get("check-tokenizer").trigger("click");
 await settle();
 results.tokenizerCheck = get("tokenizer-result").textContent;
+
+// What the contributor is told about the profile before starting it.
+results.profileBriefing = {
+  line: get("profile-detail").textContent,
+  facts: get("profile-facts").children.map((node) => node.textContent),
+  qualifies: get("profile-qualifies").textContent,
+  ceiling: get("profile-ceiling").textContent,
+};
+
+// The stepper, marked up by the shared view from the same workflow answer.
+results.stepper = stepTabs.map((tab) => tab.dataset.stage + ":"
+  + ["done", "current", "todo", "blocked"].filter((state) => tab.classList.contains(`stage-${state}`)).join(","));
 
 results.allRequests = [...new Set(requests.map((entry) => `${entry.method} ${entry.path.replace(/job-[a-f0-9]{16}/, "<job>")}`))];
 console.log(JSON.stringify(results));

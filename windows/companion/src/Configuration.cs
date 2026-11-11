@@ -329,6 +329,78 @@ namespace OmoBench.Companion
             File.WriteAllLines(FilePath, lines, new UTF8Encoding(false));
         }
 
+        /// <summary>
+        /// The configuration that was in use before the last switch.
+        ///
+        /// An upgrade changes which source and interpreter the panel runs.
+        /// Writing the previous pair down first is what makes that reversible
+        /// without anybody having to remember two Linux paths: nothing is
+        /// deleted, so going back is re-reading this file.
+        /// </summary>
+        public static string PreviousFilePath
+        {
+            get { return FilePath + ".previous"; }
+        }
+
+        /// <summary>
+        /// Record the configuration currently on disk as the one to go back
+        /// to. Returns false when there is nothing recorded yet, which is the
+        /// ordinary case on a first install and is not a failure.
+        /// </summary>
+        public static bool SavePrevious()
+        {
+            if (!File.Exists(FilePath)) { return false; }
+            try
+            {
+                File.Copy(FilePath, PreviousFilePath, true);
+                return true;
+            }
+            catch (IOException) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
+        }
+
+        /// <summary>
+        /// The configuration to go back to, or null when none was recorded or
+        /// it no longer describes a usable pair of paths. Reading it never
+        /// changes anything.
+        /// </summary>
+        public static Configuration LoadPrevious()
+        {
+            if (!File.Exists(PreviousFilePath)) { return null; }
+            string saved = FilePathOverride;
+            try
+            {
+                FilePathOverride = PreviousFilePath;
+                Configuration previous = Load();
+                return previous.IsComplete ? previous : null;
+            }
+            finally { FilePathOverride = saved; }
+        }
+
+        /// <summary>
+        /// Go back to the recorded configuration. The one being replaced
+        /// becomes the new rollback point, so this is reversible too, and
+        /// neither environment is removed by it.
+        /// </summary>
+        public static bool Rollback()
+        {
+            Configuration previous = LoadPrevious();
+            if (previous == null) { return false; }
+            Configuration current = Load();
+            previous.Save();
+            if (current.IsComplete)
+            {
+                string saved = FilePathOverride;
+                try
+                {
+                    FilePathOverride = PreviousFilePath;
+                    current.Save();
+                }
+                finally { FilePathOverride = saved; }
+            }
+            return true;
+        }
+
         /// <summary>Remove this companion's own configuration. Touches nothing else.</summary>
         public static bool Delete()
         {

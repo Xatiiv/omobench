@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Text;
+using System.Web.Script.Serialization;
 
 namespace OmoBench.Companion.Tests
 {
@@ -45,6 +47,7 @@ namespace OmoBench.Companion.Tests
             DiscoveryOutcomeTests();
             SetupStateTests();
             RegistrationTests();
+            HardwareProbeTests();
 
             Console.WriteLine();
             Console.WriteLine(_passed + " passed, " + Failures.Count + " failed");
@@ -2294,6 +2297,89 @@ namespace OmoBench.Companion.Tests
         }
 
         // -- harness -----------------------------------------------------------
+
+        // -- reading the hardware that served, on the machine that owns it ---
+
+        private static void HardwareProbeTests()
+        {
+            Section("Serving hardware probe");
+
+            // A protocol activation can never reach it: Windows hands the whole
+            // URI as one argument, and every URI begins with its scheme.
+            foreach (string link in new[]
+            {
+                "omobench://open", "omobench://--hardware-probe-v1",
+                "omobench://open?--hardware-probe-v1",
+            })
+            {
+                Check("a link cannot spell the probe switch: " + Show(link),
+                    link != "--hardware-probe-v1");
+            }
+
+            Dictionary<string, object> document = HardwareProbe.Collect();
+            Check("the document names its own kind",
+                Equals(document["kind"], HardwareProbe.Kind));
+            Check("it reports exactly the four facts it reads",
+                document.Count == 5 && document.ContainsKey("os") && document.ContainsKey("cpu")
+                    && document.ContainsKey("ram_gb") && document.ContainsKey("accelerators"));
+
+            object memory = document["ram_gb"];
+            Check("installed memory is a positive number of gigabytes, or unknown",
+                memory == null || Convert.ToDouble(memory, CultureInfo.InvariantCulture) > 0);
+
+            List<Dictionary<string, object>> accelerators =
+                (List<Dictionary<string, object>>)document["accelerators"];
+            bool memoryAlwaysNull = true;
+            bool vendorsKnown = true;
+            bool rolesAbsent = true;
+            foreach (Dictionary<string, object> device in accelerators)
+            {
+                // AdapterRAM is capped and wrong under modern drivers: it
+                // reports 4 GB for a 16 GB card. Reporting it would quietly
+                // publish the wrong VRAM for the exact hardware this exists for.
+                if (device["memory_gb"] != null) { memoryAlwaysNull = false; }
+                string vendor = (string)device["vendor"];
+                if (vendor != "nvidia" && vendor != "amd" && vendor != "intel" && vendor != "other")
+                {
+                    vendorsKnown = false;
+                }
+                // Finding a card is not evidence that inference used it.
+                if (device.ContainsKey("role")) { rolesAbsent = false; }
+            }
+            Check("video memory is never taken from AdapterRAM", memoryAlwaysNull);
+            Check("every vendor is one the result schema has", vendorsKnown);
+            Check("no device is given a role by detection alone", rolesAbsent);
+
+            foreach (string[] pair in new[]
+            {
+                new[] { "NVIDIA GeForce RTX 4090", "nvidia" },
+                new[] { "AMD Radeon RX 9070", "amd" },
+                new[] { "Intel(R) Arc(TM) A770 Graphics", "intel" },
+                new[] { "Some Unlabelled Display Adapter", "other" },
+            })
+            {
+                Check("classifies " + Show(pair[0]) + " as " + pair[1],
+                    HardwareProbe.Vendor(pair[0]) == pair[1]);
+            }
+
+            foreach (string virtualAdapter in new[]
+            {
+                "Microsoft Basic Display Adapter", "VMware SVGA 3D",
+                "Citrix Indirect Display Adapter", "Hyper-V Video",
+            })
+            {
+                Check("skips the non-physical adapter " + Show(virtualAdapter),
+                    HardwareProbe.IsNonPhysical(virtualAdapter));
+            }
+            Check("keeps a real card", !HardwareProbe.IsNonPhysical("AMD Radeon RX 9070"));
+
+            string json = new JavaScriptSerializer().Serialize(document);
+            Check("the document serializes to JSON the panel can read",
+                json.StartsWith("{") && json.Contains("\"" + HardwareProbe.Kind + "\""));
+            Check("the document carries no path, token or configuration value",
+                !json.Contains("\\\\") && !json.ToLowerInvariant().Contains("token")
+                    && !json.ToLowerInvariant().Contains("password"));
+        }
 
         private static Configuration Clone(Configuration source)
         {

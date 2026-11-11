@@ -1,0 +1,211 @@
+catalog_version: 3
+# Workload recipes: ways of running a model, for evaluating hardware.
+#
+# OmoBench measures hardware. A model is the load you put on a machine to find
+# out what it does. A model has one identity, one publisher and one licence,
+# and those live in catalog/models/ -- the authoritative record. A model has
+# many ways of being run, and those live here. Every recipe below names a
+# `model` from that file and repeats none of its identity facts, because a
+# licence copied into six recipes is how five of them end up wrong.
+#
+# Membership is a recommendation, never a condition of submission. See
+# docs/model-eligibility.md.
+purpose: >-
+  Curated ways of running catalogued models, with the memory each one is known
+  or estimated to need. Recipes reference catalog/models for identity.
+
+# WHAT THE NUMBERS ARE, AND WHAT NOBODY KNOWS.
+#
+# Four quantities, kept apart because conflating them is how this project
+# shipped a recommendation its own hardware could not meet:
+#
+#   weights_gb                  the file on disk
+#   load_memory_gb              occupied once loaded and serving
+#   observed_before_failure_gb  the largest figure actually seen, and what
+#                               happened next
+#   completion_requirement_gb   what a FULL profile needs
+#
+# The fourth is unknown for every entry in this file. It is not 6.99 GB for
+# Qwen3-4B Q4_K_M: that is the number the process had reached when the kernel
+# killed it, so it is a lower bound on a failure, not a measurement of success.
+# The run never completed, so nothing here knows what completing would have
+# taken. Saying otherwise would turn an observed failure into a specification.
+#
+#     Out of memory: Killed process 197464 (llama-server)
+#       total-vm:12792992kB, anon-rss:6990392kB
+#
+# `growth_hint` below is a heuristic and is labelled as one everywhere it
+# surfaces. It is one ratio, from one engine, one model and one run. It is not
+# applied to produce verdicts: a recipe whose only evidence is this heuristic
+# reports its fit as unknown, because that is what it is.
+estimate_basis:
+  context_tokens: 2048
+  growth_hint:
+    ratio: 1.63
+    source: >-
+      llama.cpp b10621, Qwen3-4B Q4_K_M, 34 requests of chat-small-extended-v1
+      on 2026-11-06: 4.30 GB resident at start, 6.99 GB anonymous at the OOM
+      kill. ONE observation, ONE engine, ONE model, and the run it came from
+      failed.
+    uncertainty: >-
+      Unquantified. There is no second data point, so there is no spread to
+      report. Do not use this to decide whether a different model fits; it is
+      offered so a reader knows growth happens at all, which is the part most
+      people do not expect.
+    applies_to: llama.cpp
+  caveat: >-
+    Expected to fit is arithmetic about memory. It predicts nothing about
+    speed, acceptance, or the quality of what a model produces. Only a
+    completed benchmark establishes that a machine ran something.
+
+recipes:
+  # --- Qwen3 4B ------------------------------------------------------------
+  - model: Qwen/Qwen3-4B
+    quantisation: Q4_K_M
+    runtime: llama.cpp
+    artefact: ggml-org/Qwen3-4B-GGUF
+    managed_recipe: qwen3-4b-cpu-v2
+    weights_gb: 2.5
+    weights_measured: true
+    load_memory_gb: 4.3
+    load_measured: true
+    observed_before_failure_gb: 6.99
+    observation_note: >-
+      Reached by request 34 of a 60-request profile on a 7.49 GB WSL
+      allocation, where the kernel then killed the server. A lower bound on a
+      failure, not a requirement for success.
+    completion_requirement_gb: null
+    benchmark: not-qualified
+    benchmark_note: >-
+      chat-small-v1 ran to its 900 s ceiling with 14 measured requests, which
+      is a completed run and not a qualifying one. chat-small-extended-v1 was
+      killed by the kernel at 29 successful. No profile has qualified on that
+      machine.
+  - model: Qwen/Qwen3-4B
+    quantisation: Q8_0
+    runtime: llama.cpp
+    artefact: ggml-org/Qwen3-4B-GGUF
+    weights_gb: 4.28
+    weights_measured: true
+    load_memory_gb: null
+    load_measured: false
+    completion_requirement_gb: null
+    benchmark: never-run
+  - model: Qwen/Qwen3-4B
+    quantisation: F16
+    runtime: llama.cpp
+    artefact: ggml-org/Qwen3-4B-GGUF
+    weights_gb: 8.05
+    weights_measured: true
+    load_memory_gb: null
+    load_measured: false
+    completion_requirement_gb: null
+    benchmark: never-run
+
+  # --- Qwen3 8B ------------------------------------------------------------
+  - model: Qwen/Qwen3-8B
+    quantisation: Q4_K_M
+    runtime: llama.cpp
+    weights_gb: 4.9
+    weights_measured: false
+    load_memory_gb: null
+    load_measured: false
+    completion_requirement_gb: null
+    benchmark: never-run
+  - model: Qwen/Qwen3-8B
+    quantisation: BF16
+    runtime: vllm
+    weights_gb: 16.4
+    weights_measured: false
+    load_memory_gb: null
+    load_measured: false
+    completion_requirement_gb: null
+    # vLLM pre-allocates its KV cache rather than growing into it, so the
+    # llama.cpp growth hint is the wrong shape here and is not offered.
+    growth_hint_applies: false
+    benchmark: never-run
+
+  # --- Mistral 7B ----------------------------------------------------------
+  - model: mistralai/Mistral-7B-Instruct-v0.3
+    quantisation: Q4_K_M
+    runtime: llama.cpp
+    weights_gb: 4.4
+    weights_measured: false
+    load_memory_gb: null
+    load_measured: false
+    completion_requirement_gb: null
+    benchmark: never-run
+  - model: mistralai/Mistral-7B-Instruct-v0.3
+    quantisation: BF16
+    runtime: vllm
+    weights_gb: 14.5
+    weights_measured: false
+    load_memory_gb: null
+    load_measured: false
+    completion_requirement_gb: null
+    growth_hint_applies: false
+    benchmark: never-run
+
+  # --- Phi-4 ---------------------------------------------------------------
+  - model: microsoft/phi-4
+    quantisation: Q4_K_M
+    runtime: llama.cpp
+    weights_gb: 9.1
+    weights_measured: false
+    load_memory_gb: null
+    load_measured: false
+    completion_requirement_gb: null
+    benchmark: never-run
+  - model: microsoft/phi-4
+    quantisation: BF16
+    runtime: vllm
+    weights_gb: 29.3
+    weights_measured: false
+    load_memory_gb: null
+    load_measured: false
+    completion_requirement_gb: null
+    growth_hint_applies: false
+    benchmark: never-run
+
+  # --- Llama 3.1 8B --------------------------------------------------------
+  - model: meta-llama/Llama-3.1-8B-Instruct
+    quantisation: Q4_K_M
+    runtime: llama.cpp
+    weights_gb: 4.9
+    weights_measured: false
+    load_memory_gb: null
+    load_measured: false
+    completion_requirement_gb: null
+    benchmark: never-run
+  - model: meta-llama/Llama-3.1-8B-Instruct
+    quantisation: BF16
+    runtime: vllm
+    weights_gb: 16.1
+    weights_measured: false
+    load_memory_gb: null
+    load_measured: false
+    completion_requirement_gb: null
+    growth_hint_applies: false
+    benchmark: never-run
+
+  # --- DeepSeek R1 Distill 14B ---------------------------------------------
+  - model: deepseek-ai/DeepSeek-R1-Distill-Qwen-14B
+    quantisation: Q4_K_M
+    runtime: llama.cpp
+    weights_gb: 9.0
+    weights_measured: false
+    load_memory_gb: null
+    load_measured: false
+    completion_requirement_gb: null
+    benchmark: never-run
+
+# Checked and deliberately excluded, so the reasoning is on the record rather
+# than looking like an oversight.
+excluded:
+  - id: google/gemma-3-4b-it
+    reason: >-
+      Multimodal. Its model card states "Gemma 3 models are multimodal,
+      handling text and image input and generating text output", and its
+      pipeline tag is image-text-to-text. No managed recipe is provided; eligible
+      text-only runs can be submitted through the custom-model workflow.
+    checked: 2026-11-06

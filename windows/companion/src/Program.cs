@@ -27,6 +27,28 @@ namespace OmoBench.Companion
         [STAThread]
         private static int Main(string[] argv)
         {
+            // Explicit local stdio worker, never reachable from a URI and
+            // deliberately outside the GUI singleton/configuration lifecycle.
+            if (argv.Length == 2 && argv[0] == "--bridge-stdio-v1")
+            {
+                int port;
+                return int.TryParse(argv[1], out port) ? BridgeWorker.Run(port) : 2;
+            }
+            // Reads this machine's serving hardware and prints it. Like the
+            // bridge worker above, it is outside the GUI singleton and
+            // configuration lifecycle, and is unreachable from a URI.
+            if (argv.Length == 1 && argv[0] == "--hardware-probe-v1")
+            {
+                return HardwareProbe.Run();
+            }
+            // Holds a Windows power request while a benchmark measures, and
+            // releases it when its standard input closes. Same shape as the
+            // two above: no listener, no window, no file, no registry key, no
+            // network, and unreachable from a URI.
+            if (argv.Length == 1 && argv[0] == "--keep-awake-v1")
+            {
+                return KeepAwake.Run();
+            }
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 

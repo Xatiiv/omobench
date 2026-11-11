@@ -25,7 +25,8 @@ def _render_states() -> dict:
     if node is None:
         raise unittest.SkipTest("Node is not available in this environment")
     completed = subprocess.run(
-        [node, str(HARNESS), str(APP_JS)], capture_output=True, text=True, timeout=120,
+        [node, str(HARNESS), str(APP_JS)], capture_output=True, text=True,
+        encoding="utf-8", timeout=120,
     )
     if completed.returncode != 0:
         raise AssertionError(f"app.js harness failed:\n{completed.stderr}")
@@ -36,6 +37,62 @@ class AdvancedDashboardTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.states = _render_states()
+
+    def test_the_profile_is_explained_before_the_run_not_after_it(self):
+        """Workload, limits and what qualifying takes, from the profile itself.
+
+        The thing a contributor cannot discover afterwards is the arithmetic:
+        a ceiling divided by a request budget is how much time each request
+        gets, and a run that ends on the clock instead of on its budget loses
+        the request still streaming -- which counts against the error rate the
+        registry checks. Finding that out from a validator message after an
+        hour of CPU time is the failure this replaces.
+        """
+        brief = self.states["profileBriefing"]
+        facts = " | ".join(brief["facts"])
+        self.assertIn("5 warmup + 40 measured + 5 cooldown = 50 requests", facts)
+        self.assertIn("15 minutes", facts)
+        self.assertIn("18 seconds per request on average", facts)
+        self.assertIn("not an estimate for your machine", facts)
+        self.assertIn("300 seconds", facts)
+        self.assertIn("at least 32 successful measured requests", brief["qualifies"])
+        self.assertIn("no higher than 1%", brief["qualifies"])
+        self.assertIn("cancelled", brief["ceiling"])
+        self.assertIn("chat-small-extended-v1", brief["ceiling"])
+
+    def test_the_stepper_is_marked_up_from_the_workflow_answer(self):
+        """One computation, two pages: the shared view only renders it."""
+        self.assertEqual(self.states["stepper"], [
+            "connect:done", "identify:blocked", "check:done",
+            "run:done", "review:current", "submit:todo"])
+
+    def test_checking_the_requirements_also_refreshes_the_preflight(self):
+        """The checks describe the form, so asking about the form asks them.
+
+        Without this the preflight sits there reporting a revision as missing
+        while it is on screen, which is the opposite of deriving progress from
+        real state.
+        """
+        self.assertEqual(self.states["checkRequirementsRequests"],
+                         ["POST /api/runs/<job>/requirements", "POST /api/workflow"])
+
+    def test_severe_pressure_is_marked_without_being_recoloured_as_a_failure(self):
+        """Prominence and gate are separate axes, and the view renders both.
+
+        The memory reading is "attention" -- it blocks nothing and a
+        contributor may have a reason for it -- while being the one thing on
+        the page worth seeing before an hour of CPU time goes into a run.
+        """
+        gate = {item["className"]: item for item in self.states["selected"]["runGate"]}
+        severe = next(item for name, item in gate.items() if "severe" in name)
+        self.assertEqual(severe["className"], "status-item pending severe")
+        self.assertEqual(severe["parts"][0], "severity-tag")
+        self.assertEqual(severe["text"][0], "Severe")
+        self.assertIn("allocated to this WSL environment", " ".join(severe["text"]))
+        # Nothing else in the gate is marked, and nothing became a failure.
+        self.assertEqual([name for name in gate if "severe" in name],
+                         ["status-item pending severe"])
+        self.assertEqual([name for name in gate if "fail" in name], [])
 
     # -- one shared component --------------------------------------------------
 
@@ -112,6 +169,7 @@ class AdvancedDashboardTests(unittest.TestCase):
         self.assertTrue(overrunning["metricsHidden"])  # not presented as a finished run
 
     def test_a_completed_run_stops_estimating_remaining_time(self):
+        self.assertEqual(self.states["completed"]["heading"], "Benchmark completed")
         self.assertEqual(self.states["completed"]["facts"]["eta"], "Completed")
 
     def test_an_unproven_request_total_is_not_presented_as_a_limit(self):
@@ -228,14 +286,19 @@ class AdvancedDashboardTests(unittest.TestCase):
     def test_every_missing_publication_requirement_is_listed_at_once(self):
         checklist = self.states["checklist"]
         self.assertEqual(len([item for item in checklist["items"] if item.startswith("fail:")]), 3)
-        self.assertIn("fail:Canonical model ID is in the OmoBench catalog", checklist["items"])
+        self.assertIn("fail:This model may be published here", checklist["items"])
         self.assertIn("fail:Immutable revision of the actual weights source", checklist["items"])
         self.assertIn("3 requirements still missing", checklist["summary"])
         self.assertIn("Save local report", checklist["summary"])
 
     def test_viewing_a_run_never_packages_uploads_or_executes(self):
+        # Every one of these is a read. /api/workflow and /api/workloads take
+        # a body because they read the form's current values and compute from
+        # them; neither writes anything, and in particular /api/workloads
+        # downloads nothing -- it answers what this hardware could run.
         allowed_posts = {"POST /api/runs/<job>/cancel", "POST /api/runs/<job>/requirements",
-                         "POST /api/tokenizer-check"}
+                         "POST /api/tokenizer-check", "POST /api/workflow",
+                         "POST /api/workloads"}
         posts = {entry for entry in self.states["allRequests"] if entry.startswith("POST")}
         self.assertTrue(posts <= allowed_posts, posts)
 

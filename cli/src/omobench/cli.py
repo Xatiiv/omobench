@@ -17,6 +17,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -25,7 +26,7 @@ from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from . import __version__
+from . import __version__, model_identity, model_proposal, result_provenance
 
 
 GUIDELLM_VERSION = "0.7.3"
@@ -730,6 +731,27 @@ def doctor_report() -> dict[str, Any]:
     }
 
 
+def catalog_model_ids(root: Path) -> list[str]:
+    """The catalogued, text-generation model IDs: the registry's source of truth.
+
+    A model is eligible because it is here, never because a result named it. A
+    catalog file that cannot be read contributes nothing rather than being
+    guessed at, so a damaged file narrows eligibility instead of widening it.
+    """
+    import yaml
+
+    catalog: list[str] = []
+    for path in sorted((root / "catalog" / "models").glob("*.yaml")):
+        try:
+            document = yaml.safe_load(path.read_text(encoding="utf-8"))
+            catalog.extend(entry["id"] for entry in document.get("models", [])
+                           if isinstance(entry, dict) and entry.get("modality") == "text-generation"
+                           and isinstance(entry.get("id"), str))
+        except (OSError, ValueError, AttributeError, yaml.YAMLError):
+            continue
+    return sorted(set(catalog))
+
+
 def find_repository_root() -> Path | None:
     current = Path.cwd().resolve()
     for candidate in (current, *current.parents):
@@ -1110,6 +1132,151 @@ def profile_measured_requests(root: Path, profile_id: str) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def running_under_wsl() -> bool:
+    """Is this Linux a WSL distribution rather than the machine itself?
+
+    Asked of the kernel, which says so in its own release string, rather than
+    of an environment variable a shell may or may not have exported.
+    """
+    try:
+        release = Path("/proc/sys/kernel/osrelease").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return "microsoft" in release.lower() or "wsl" in release.lower()
+
+
+def memory_pressure() -> dict[str, Any] | None:
+    """What *this environment* has left, read from the kernel rather than guessed.
+
+    A benchmark competing for memory measures the paging. The model server
+    holds the weights resident and the runner holds a tokenizer and its own
+    process tree, and on a small WSL virtual machine the two together can
+    exhaust it -- at which point per-request latency stops describing the
+    inference stack at all.
+
+    Which environment this describes is part of the reading, not a detail to
+    work out later. Inside WSL, `MemTotal` is what Windows handed this
+    distribution, not the memory installed in the machine, and on a bridged
+    run the model is served somewhere else entirely -- so a number labelled
+    only "this machine" would be read as a fact about the serving host that
+    nothing here established. The label travels with the numbers.
+
+    Returns None where there is nothing to read (anything but Linux), because
+    a number nobody measured is worse than no number.
+    """
+    try:
+        text = Path("/proc/meminfo").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    values: dict[str, int] = {}
+    for line in text.splitlines():
+        name, _, rest = line.partition(":")
+        amount = rest.strip().split(" ")[0]
+        if amount.isdigit():
+            values[name] = int(amount)
+    if "MemTotal" not in values or "MemAvailable" not in values:
+        return None
+    swap_total = values.get("SwapTotal", 0)
+    swap_free = values.get("SwapFree", 0)
+    wsl = running_under_wsl()
+    return {
+        "total_gb": round(values["MemTotal"] / 1024 / 1024, 2),
+        "available_gb": round(values["MemAvailable"] / 1024 / 1024, 2),
+        "swap_total_gb": round(swap_total / 1024 / 1024, 2),
+        "swap_used_gb": round((swap_total - swap_free) / 1024 / 1024, 2),
+        "environment": "wsl" if wsl else "linux",
+        # What the total actually counts, in the words the reader needs. A WSL
+        # distribution cannot see the host's installed memory from in here, and
+        # must not imply that it can.
+        "total_means": ("allocated to this WSL environment" if wsl
+                        else "on the machine running this panel"),
+        "environment_label": ("the WSL environment running this panel" if wsl
+                              else "the machine running this panel"),
+    }
+
+
+def profile_document(root: Path, profile_id: str) -> dict[str, Any]:
+    """The profile's own YAML, or an empty mapping when it cannot be read."""
+    try:
+        import yaml
+
+        document = yaml.safe_load(
+            (root / "benchmarks" / "profiles" / f"{profile_id}.yaml").read_text(encoding="utf-8"))
+    except (OSError, ValueError, ImportError):
+        return {}
+    return document if isinstance(document, dict) else {}
+
+
+def longer_alternative(profile_id: str) -> str | None:
+    """Another shipped profile with the same workload and more time.
+
+    Not a recommendation engine and not a list maintained by hand: it matches
+    on the whole runner mapping, so the answer is only ever the *same*
+    measurement with a larger ceiling. A host whose requests do not fit one
+    budget needs more clock, not a different workload, and two profiles that
+    differ in anything else are not interchangeable.
+    """
+    spec = PROFILE_SPECS.get(profile_id)
+    if spec is None:
+        return None
+
+    def workload(entry: dict[str, Any]) -> tuple:
+        return (entry["input_tokens"], entry["output_tokens"], entry["profile"], entry["max_requests"])
+
+    longer = sorted(
+        (other["max_duration_seconds"], name) for name, other in PROFILE_SPECS.items()
+        if name != profile_id and workload(other) == workload(spec)
+        and other["max_duration_seconds"] > spec["max_duration_seconds"])
+    return longer[0][1] if longer else None
+
+
+def profile_briefing(root: Path, profile_id: str) -> dict[str, Any]:
+    """What this profile will do, and what its result has to clear.
+
+    Everything here is read from the profile's own YAML and from the runner
+    mapping that executes it; nothing is estimated and nothing is predicted
+    about a particular machine. The one derived number,
+    `seconds_per_request_budget`, is division: the duration ceiling over the
+    request budget. It says what the profile allows on average, not how long
+    anybody's run will take.
+
+    The reason it is worth showing before a run: when the ceiling arrives
+    first, the request still streaming is cancelled, and a cancelled request
+    is attempted-but-not-successful in the measured window. So a run that ends
+    on the clock rather than on its request budget usually misses its own
+    error-rate threshold -- which is a scheduling fact a contributor can act
+    on beforehand, and an unpleasant surprise afterwards.
+    """
+    spec = PROFILE_SPECS.get(profile_id)
+    if spec is None:
+        return {}
+    document = profile_document(root, profile_id)
+    execution = document.get("execution", {}) if isinstance(document.get("execution"), dict) else {}
+    acceptance = document.get("acceptance", {}) if isinstance(document.get("acceptance"), dict) else {}
+    max_duration = spec.get("max_duration_seconds")
+    max_requests = spec.get("max_requests")
+    return {
+        "profile_id": profile_id,
+        "title": document.get("title"),
+        "summary": " ".join((document.get("description") or "").split()) or None,
+        "input_tokens": spec["input_tokens"],
+        "requested_output_tokens": spec["output_tokens"],
+        "concurrency": execution.get("concurrency"),
+        "streaming": True,
+        "warmup_requests": execution.get("warmup_requests"),
+        "measured_requests": execution.get("measured_requests"),
+        "cooldown_requests": execution.get("cooldown_requests"),
+        "total_requests": max_requests,
+        "maximum_duration_seconds": max_duration,
+        "request_timeout_seconds": execution.get("request_timeout_seconds"),
+        "seconds_per_request_budget": (
+            None if not max_duration or not max_requests else max_duration / max_requests),
+        "minimum_successful_requests": acceptance.get("minimum_successful_requests"),
+        "maximum_error_rate_percent": acceptance.get("maximum_error_rate_percent"),
+        "longer_alternative": longer_alternative(profile_id),
+    }
+
+
 # A benchmark that ran, but whose required evidence log could not be
 # finalized (flushed and closed): the measurements exist, but the bundle is
 # incomplete, so the run is not a completed result. Value borrowed from
@@ -1135,6 +1302,113 @@ class RunnerOutcome:
 
     returncode: int
     evidence_log_finalized: bool = True
+    # Whether the supervisor had to stop this run, filled in by the path that
+    # actually ran it; and the assembled record of how the run was bounded and
+    # whether anything interrupted it, filled in by its caller. Both are None
+    # only where a caller built an outcome by hand, which the tests do.
+    supervisor: Any = None
+    execution: Any = None
+
+
+# A run the supervisor had to stop the hard way: the graceful stop was asked
+# for, its grace expired, and the runner was still going. Distinct from the
+# runner's own codes so nothing mistakes it for something the benchmark said.
+EXECUTION_ABANDONED_EXIT_CODE = 75
+
+
+def signal_process_group(process: Any, number: int) -> None:
+    """Signal the runner, and its workers too when they are its own to signal.
+
+    Ownership is the whole question here. A runner started in its own process
+    group can be signalled as a group, which reaches the worker processes it
+    spawned -- stopping the leader alone would leave them measuring into a
+    file nobody will read. A runner sharing *this* process's group cannot:
+    signalling that group would signal us, and on the panel's path it is this
+    process's own group that the panel signals to cancel a run. So a shared
+    group gets the leader only, exactly as before this supervisor existed.
+    """
+    if process.poll() is not None:
+        return
+    with contextlib.suppress(ProcessLookupError, OSError, PermissionError):
+        if os.name == "nt":
+            process.kill()
+            return
+        group = os.getpgid(process.pid)
+        if group == os.getpgid(0):
+            os.kill(process.pid, number)
+        else:
+            os.killpg(group, number)
+
+
+def abandon_run(code: int) -> None:
+    """Leave, taking everything this process started with it.
+
+    The last resort on the in-process path: the runner is past the grace a
+    stop was allowed and is still going, so nothing polite is left. Exiting
+    alone would orphan the runner's worker processes, which would carry on
+    measuring into a file nobody will read, so the whole process group goes.
+
+    Only when this process leads that group -- which it does when the panel
+    started it, because the panel gives every run its own session. Run
+    straight from a shell it does not, and killing the shell's group would
+    take the contributor's terminal with it, so that case exits alone.
+    """
+    with contextlib.suppress(OSError, PermissionError):
+        if os.name != "nt" and os.getpid() == os.getpgid(0):
+            os.killpg(os.getpgid(0), signal.SIGKILL)
+    os._exit(code)
+
+
+def profile_deadlines(root: Path, profile_id: str) -> Any:
+    """What bounds this profile's run, read from the profile itself.
+
+    The request deadline defaults to the measurement ceiling, which is not a
+    new limit: a request cannot outlive the window it runs in. A profile may
+    declare a tighter `execution.request_deadline_seconds`, and one that does
+    is a different execution contract and gets its own version -- none of the
+    profiles shipped today declares one, so nothing any existing result
+    measured is changed by any of this.
+    """
+    from .execution import Deadlines
+
+    execution = profile_document(root, profile_id).get("execution", {})
+    ceiling = execution.get("maximum_duration_seconds")
+    declared = execution.get("request_deadline_seconds")
+    return Deadlines(
+        inactivity_seconds=execution.get("request_timeout_seconds"),
+        request_seconds=declared if isinstance(declared, (int, float)) else ceiling,
+        window_seconds=ceiling if isinstance(ceiling, (int, float)) else None,
+    )
+
+
+def telemetry_progress(telemetry_dir: Path | None) -> Any:
+    """The run's own account of itself: what it has done, and for how long.
+
+    Returns `(processed_requests, measured_seconds)`. The first changes when
+    a request finishes; the second is how long the run says it has been
+    measuring, which is what the supervisor anchors its window to -- the
+    runner's ceiling starts at its first request, not when this process did,
+    and loading a model is not part of anybody's ninety minutes.
+
+    Deliberately read from the telemetry snapshot the run already writes,
+    rather than from inside the runner: the supervisor's whole purpose is to
+    be outside the control flow it is watching.
+    """
+    if telemetry_dir is None:
+        return None
+    snapshot = telemetry_dir / "telemetry.json"
+
+    def read() -> Any:
+        try:
+            document = json.loads(snapshot.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        requests = document.get("requests") or {}
+        elapsed = document.get("elapsed_seconds")
+        return (requests.get("processed"),
+                elapsed if isinstance(elapsed, (int, float)) and elapsed > 0 else None)
+
+    return read
 
 
 def guidellm_runner_invocation(command: list[str]) -> list[str]:
@@ -1163,13 +1437,64 @@ def guidellm_runner_invocation(command: list[str]) -> list[str]:
     return [sys.executable, "-m", "guidellm", *command[1:]]
 
 
-def run_guidellm_command(
+def run_guidellm_command(command, *, log_path, root, profile_id, telemetry_dir, bridge_credentials=None):
+    """Run the benchmark, bounded, with the machine asked to stay awake.
+
+    Three things wrap the run and none of them can change what it measures.
+    A power request, so the computer does not idle into sleep and turn its own
+    suspension into the model's latency. A clock watch, so that if it is
+    suspended anyway the result says so instead of pretending. And a
+    supervisor, because the runner's duration ceiling is evaluated while
+    handling a request update rather than by a timer, and a run with one
+    long-streaming request can leave it unevaluated for hours.
+    """
+    from .execution import ClockWatch, ExecutionRecord, keep_the_machine_awake
+
+    deadlines = profile_deadlines(root, profile_id)
+    watch = ClockWatch()
+    awake = keep_the_machine_awake()
+    kwargs = dict(log_path=log_path, root=root, profile_id=profile_id,
+                  telemetry_dir=telemetry_dir, deadlines=deadlines,
+                  # Handed down so that even the hard stop releases it first,
+                  # rather than relying on the pipe closing as this process
+                  # dies. That fallback is real and tested, but a request
+                  # released deliberately is released sooner.
+                  release=awake.close)
+    try:
+        with watch:
+            if bridge_credentials is None:
+                outcome = _run_guidellm_command(command, **kwargs)
+            else:
+                from .bridge_runner import authenticated_backend
+
+                with authenticated_backend(bridge_credentials):
+                    outcome = _run_guidellm_command(
+                        command, bridge_credentials=bridge_credentials, **kwargs)
+    finally:
+        # Released on every path: success, failure, cancellation, and -- by
+        # the pipe closing when this process dies -- termination.
+        awake.close()
+    from .execution import SupervisorOutcome
+
+    outcome.execution = ExecutionRecord(
+        deadlines=deadlines,
+        interruption=watch.document(),
+        supervisor=outcome.supervisor or SupervisorOutcome(),
+        sleep_prevention=awake.status,
+    )
+    return outcome
+
+
+def _run_guidellm_command(
     command: list[str],
     *,
     log_path: Path,
     root: Path,
     profile_id: str,
     telemetry_dir: Path | None,
+    deadlines: Any = None,
+    release: Any = None,
+    bridge_credentials: dict | None = None,
 ) -> RunnerOutcome:
     """Run `command` (as built by build_guidellm_command) exactly as the
     plain subprocess path always has -- unless `telemetry_dir` is given, in
@@ -1185,6 +1510,37 @@ def run_guidellm_command(
     truncate the evidence it already wrote.
     """
     invocation = guidellm_runner_invocation(command)
+    private_input = {}
+    if bridge_credentials is not None:
+        invocation = [sys.executable, "-m", "omobench.bridge_runner", *command[1:]]
+        private_input = {"input": json.dumps(bridge_credentials) + "\n"}
+
+    from .execution import ExecutionSupervisor
+
+    supervisor_outcome = None
+
+    def supervise(stop, escalate, finished):
+        """Run the supervisor around one execution path, or not at all.
+
+        Not at all when nothing declared a limit: a supervisor with no
+        deadline would be a thread that only ever costs something.
+        """
+        nonlocal supervisor_outcome
+        if deadlines is None or (deadlines.window_seconds is None
+                                 and deadlines.request_seconds is None):
+            return contextlib.nullcontext()
+        supervisor = ExecutionSupervisor(
+            deadlines, stop=stop, escalate=escalate, finished=finished,
+            progress=telemetry_progress(telemetry_dir))
+
+        @contextlib.contextmanager
+        def running():
+            with supervisor:
+                yield
+            nonlocal supervisor_outcome
+            supervisor_outcome = supervisor.outcome
+
+        return running()
 
     def plain_subprocess(note: str | None = None) -> RunnerOutcome:
         log_file = log_path.open("w", encoding="utf-8")
@@ -1192,7 +1548,21 @@ def run_guidellm_command(
             if note is not None:
                 log_file.write(note)
                 log_file.flush()
-            returncode = subprocess.run(invocation, stdout=log_file, stderr=subprocess.STDOUT, text=True).returncode
+            # Popen rather than run(), so the supervisor has a handle to stop.
+            # Deliberately *not* in a new session: the panel cancels a run by
+            # signalling this process's own group, and a runner moved out of
+            # it would stop being reachable that way -- which is the one stop
+            # path a contributor actually presses.
+            process = subprocess.Popen(
+                invocation, stdout=log_file, stderr=subprocess.STDOUT, text=True,
+                stdin=subprocess.PIPE if private_input else None)
+            with supervise(
+                stop=lambda _reason: signal_process_group(process, signal.SIGTERM),
+                escalate=lambda _reason: signal_process_group(process, signal.SIGKILL),
+                finished=lambda: process.poll() is not None,
+            ):
+                process.communicate(**({"input": private_input["input"]} if private_input else {}))
+            returncode = process.returncode
         except BaseException:
             with contextlib.suppress(OSError, ValueError):
                 log_file.close()
@@ -1206,8 +1576,9 @@ def run_guidellm_command(
             log_file.close()
         except (OSError, ValueError) as error:
             print(f"Could not finalize the required evidence log {log_path}: {error}", file=sys.stderr)
-            return RunnerOutcome(returncode or EVIDENCE_FINALIZATION_EXIT_CODE, evidence_log_finalized=False)
-        return RunnerOutcome(returncode)
+            return RunnerOutcome(returncode or EVIDENCE_FINALIZATION_EXIT_CODE,
+                                 evidence_log_finalized=False, supervisor=supervisor_outcome)
+        return RunnerOutcome(returncode, supervisor=supervisor_outcome)
 
     if telemetry_dir is None:
         return plain_subprocess()
@@ -1231,17 +1602,40 @@ def run_guidellm_command(
     # -- happens after execution began: catching it would reopen the log with
     # "w", destroying the finished run's output, and launch a duplicate
     # benchmark. It is allowed to propagate instead.
+    #
+    # This path runs the benchmark in *this* process, so the supervisor's
+    # graceful stop is the same SIGTERM a contributor's cancel sends: the
+    # telemetry runner installs an asyncio handler for it that cancels the
+    # benchmark task, which is what unwinds the scheduler and writes the
+    # evidence. Escalation is the one blunt instrument left -- the runner is
+    # past its grace and still going -- and it costs the files this function's
+    # caller would have written afterwards. That is the trade: a run nobody
+    # can stop is worse than a run that ends incomplete and says so.
+    finished = threading.Event()
     try:
-        returncode = telemetry_module.run_generative_benchmark_with_telemetry(
-            argv,
-            snapshot_path=telemetry_dir / "telemetry.json",
-            history_path=telemetry_dir / "telemetry-history.json",
-            stdout_log_path=log_path,
-            run_label=profile_id,
-            total_measured_requests=profile_measured_requests(root, profile_id),
-            configured_max_requests=PROFILE_SPECS[profile_id].get("max_requests"),
-            phase_contract=profile_phase_contract(root, profile_id),
-        )
+        def abandon(_reason: str) -> None:
+            if release is not None:
+                release()
+            abandon_run(EXECUTION_ABANDONED_EXIT_CODE)
+
+        with supervise(
+            stop=lambda _reason: os.kill(os.getpid(), signal.SIGTERM),
+            escalate=abandon,
+            finished=finished.is_set,
+        ):
+            try:
+                returncode = telemetry_module.run_generative_benchmark_with_telemetry(
+                    argv,
+                    snapshot_path=telemetry_dir / "telemetry.json",
+                    history_path=telemetry_dir / "telemetry-history.json",
+                    stdout_log_path=log_path,
+                    run_label=profile_id,
+                    total_measured_requests=profile_measured_requests(root, profile_id),
+                    configured_max_requests=PROFILE_SPECS[profile_id].get("max_requests"),
+                    phase_contract=profile_phase_contract(root, profile_id),
+                )
+            finally:
+                finished.set()
     except telemetry_module.TelemetryUnavailable as error:
         return plain_subprocess(f"OmoBench: live telemetry unavailable ({error}); running without it.\n")
     # telemetry.py reports an unfinalized required log through this code, and
@@ -1249,11 +1643,120 @@ def run_guidellm_command(
     return RunnerOutcome(
         returncode,
         evidence_log_finalized=returncode != EVIDENCE_FINALIZATION_EXIT_CODE,
+        supervisor=supervisor_outcome,
     )
 
 
 def redact_endpoint(text: str, endpoint: str) -> str:
-    return text.replace(endpoint.rstrip("/"), "<LOCAL_ENDPOINT>")
+    """The address this run was measured against, wherever it was written."""
+    if endpoint and endpoint.strip("/"):
+        text = text.replace(endpoint.rstrip("/"), "<LOCAL_ENDPOINT>")
+    return text
+
+
+# A URL carrying its own credentials, anywhere -- not only at the endpoint the
+# run was configured with. The bridge builds an ephemeral authenticated target,
+# a contributor may paste one into the panel, and a runner is free to echo
+# whatever it was handed into its own report. Matched by shape rather than by
+# value, because the value is the thing nobody should have to supply twice.
+#
+# The host goes with the credentials. A URL that carries a password is private
+# by construction -- nobody puts one on a public address -- so replacing the
+# secret and publishing the machine it opens would be half a redaction. Any
+# path after the authority is kept: `/v1/chat/completions` is the protocol,
+# not the contributor.
+CREDENTIALLED_URL = re.compile(
+    r"[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s/@\"'<>]+:[^\s/@\"'<>]*@[^\s/\"'<>]*")
+# A loopback address is a private fact about a contributor's machine -- which
+# port they chose, and that it was theirs. The project already replaced the one
+# endpoint it was told about; this catches the same address written anywhere
+# else in the same evidence.
+LOOPBACK_URL = re.compile(
+    r"https?://(?:127(?:\.\d{1,3}){3}|localhost|\[::1\]|0\.0\.0\.0)(?::\d{1,5})?")
+# A home directory names a person. The run directory and the checkout are
+# replaced first and usually cover it; this is the backstop for evidence that
+# mentions a path neither of those contains.
+HOME_DIRECTORIES = (
+    re.compile(r"(?<![\w.\-])/home/[^/\s\"':,;)\]]+"),
+    re.compile(r"(?<![\w.\-])/Users/[^/\s\"':,;)\]]+"),
+    re.compile(r"(?<![\w.\-])[A-Za-z]:[\\/]{1,2}Users[\\/]{1,2}[^\\/\s\"':,;)\]]+"),
+)
+
+
+# A secret that is not part of a URL: the runner writes the key it was given
+# into its own report, under a name that says what it is. Matched on the field
+# name ending in a credential word, so `api_key` and `access_token` are caught
+# while `audio_tokens`, `prompt_tokens` and `first_output_token_iteration` --
+# all of which are in every report -- are not.
+CREDENTIAL_PLACEHOLDER = "<REDACTED_CREDENTIAL>"
+CREDENTIAL_FIELD = re.compile(
+    r'("[A-Za-z0-9_\-]*?(?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|'
+    r'bearer[_-]?token|session[_-]?token|secret|password|passphrase|authorization)"\s*:\s*)'
+    r'"([^"]*)"',
+    re.IGNORECASE)
+BEARER_TOKEN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=\-]{8,}")
+
+
+def redact_credentials(text: str) -> str:
+    """Secrets, in the three shapes evidence actually carries them.
+
+    Inside a URL, as a named field in the runner's JSON, and as an
+    Authorization header echoed into a log. An empty value is left alone:
+    replacing `""` with a placeholder would claim a credential was there.
+    """
+    text = CREDENTIALLED_URL.sub("<LOCAL_ENDPOINT>", text)
+    text = CREDENTIAL_FIELD.sub(
+        lambda match: match.group(1) + (
+            f'"{CREDENTIAL_PLACEHOLDER}"' if match.group(2) else '""'), text)
+    return BEARER_TOKEN.sub(f"Bearer {CREDENTIAL_PLACEHOLDER}", text)
+
+
+def redact_loopback_endpoints(text: str) -> str:
+    return LOOPBACK_URL.sub("<LOCAL_ENDPOINT>", text)
+
+
+def redact_home_directories(text: str) -> str:
+    for pattern in HOME_DIRECTORIES:
+        text = pattern.sub("<HOME>", text)
+    return text
+
+
+def redact_local_paths(text: str, run_directory: Path, root: Path) -> str:
+    """Take the contributor's own filesystem out of evidence meant to be public.
+
+    A staging path is `/home/<their name>/<their checkout>/.omobench-runs/...`.
+    It says nothing about the measurement and it names a person and the layout
+    of their machine, in a file that is about to be pushed to a public
+    repository. The run directory is replaced first because it sits inside the
+    checkout, so replacing the checkout first would leave half a path behind.
+    """
+    for actual, placeholder in ((run_directory, "<RUN_DIRECTORY>"), (root, "<CHECKOUT>")):
+        for form in {str(actual), str(actual.resolve()), actual.as_posix(),
+                     actual.resolve().as_posix()}:
+            if form:
+                text = text.replace(form, placeholder)
+    return text
+
+
+def redact_evidence(text: str, *, endpoint: str, run_directory: Path, root: Path) -> str:
+    """Everything evidence is redacted for, in one place.
+
+    The runner's own report, its log and the reproduce instructions are
+    redacted identically; an address the project judged worth hiding in one of
+    them is not public information in another.
+
+    Ordered deliberately. The configured endpoint goes first, because it is
+    the one string known to be the address and replacing it whole beats
+    finding its parts. Credentials anywhere else follow -- a URL that carries
+    a password loses its host along with the password, since nobody puts one
+    on a public address. Then any other loopback address. Paths come last and
+    from the most specific outwards -- run directory, checkout, home -- so a
+    staging path becomes `<RUN_DIRECTORY>` rather than a home replacement
+    with the rest of somebody's layout still attached.
+    """
+    text = redact_endpoint(text, endpoint)
+    text = redact_loopback_endpoints(redact_credentials(text))
+    return redact_home_directories(redact_local_paths(text, run_directory, root))
 
 
 def compress_file(path: Path) -> Path:
@@ -1270,6 +1773,130 @@ def sha256_file(path: Path) -> str:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     return f"sha256:{digest.hexdigest()}"
+
+
+# The distributable files, and whether each one is read as text or has to be
+# decompressed first. A rule that only looked at what it could read without
+# unpacking would miss the file with the most of a contributor's machine in it.
+COMPRESSED_EVIDENCE = "guidellm-benchmarks.json.gz"
+
+
+def read_evidence_text(path: Path) -> str:
+    """One distributable file as text, decompressing where that is what it is."""
+    if path.name.endswith(".gz"):
+        with gzip.open(path, "rt", encoding="utf-8", errors="replace") as source:
+            return source.read()
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def write_evidence_text(path: Path, text: str) -> None:
+    """The counterpart, recompressed without a timestamp.
+
+    gzip records the modification time of what it compressed, so the same
+    bytes compressed twice hash differently. The hash of a distributable file
+    is recorded in the result and checked by the registry, so it is written
+    reproducibly: the same evidence redacted twice produces the same file.
+    """
+    if path.name.endswith(".gz"):
+        with path.open("wb") as raw, gzip.GzipFile(
+                filename="", mode="wb", fileobj=raw, mtime=0) as destination:
+            destination.write(text.encode("utf-8"))
+        return
+    path.write_text(text, encoding="utf-8")
+
+
+def evidence_privacy_findings(text: str) -> list[str]:
+    """What is still in this text that should not leave the machine.
+
+    Deliberately re-derived from the content rather than from what redaction
+    was asked to remove: a scan that only looked for the strings it had just
+    replaced could only ever agree with itself.
+    """
+    findings: list[str] = []
+    # A secret is never quoted back: printing it into a terminal and a shell
+    # history in the course of reporting it would be the same disclosure
+    # again. Only the field's name is named.
+    if CREDENTIALLED_URL.search(text):
+        findings.append("a URL carrying credentials")
+    for field, value in dict.fromkeys(
+            (match.group(1).split('"')[1], match.group(2))
+            for match in CREDENTIAL_FIELD.finditer(text)):
+        if value and value != CREDENTIAL_PLACEHOLDER:
+            findings.append(f'a credential in the field "{field}"')
+    if BEARER_TOKEN.search(text.replace(f"Bearer {CREDENTIAL_PLACEHOLDER}", "")):
+        findings.append("an Authorization bearer token")
+    for label, pattern in (("a loopback address", LOOPBACK_URL),
+                           ("a home directory", HOME_DIRECTORIES[0]),
+                           ("a home directory", HOME_DIRECTORIES[1]),
+                           ("a home directory", HOME_DIRECTORIES[2])):
+        for found in dict.fromkeys(match.group(0) for match in pattern.finditer(text)):
+            findings.append(f"{label}: {found}")
+    return findings
+
+
+def scan_evidence_privacy(directory: Path) -> dict[str, list[str]]:
+    """Every distributable file in a bundle, including the compressed report."""
+    return {name: evidence_privacy_findings(read_evidence_text(directory / name))
+            for name in EVIDENCE_FILENAMES if (directory / name).is_file()}
+
+
+def redact_run_evidence(
+    source: Path,
+    destination: Path,
+    *,
+    endpoint: str = "",
+    run_directory: Path | None = None,
+    root: Path | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Put a finished run's evidence through the redaction path, into a copy.
+
+    This exists because the redaction the runner now applies while it writes
+    cannot reach backwards. Evidence collected before it was there is real
+    evidence -- hours of measurement that nothing would be gained by taking
+    again -- but it carries the contributor's home directory and the loopback
+    address their server listened on, and those were on their way to a public
+    repository.
+
+    `source` is never written to. The measurements are not touched: only
+    addresses, credentials and paths change, and a file with none of those in
+    it is copied byte for byte so its hash does not move for no reason. The
+    compressed report is unpacked, redacted and packed again, because that is
+    the file with the most of a contributor's machine in it.
+    """
+    run_directory = run_directory or source
+    root = root or checkout_above(source) or source
+    destination.mkdir(parents=True, exist_ok=True)
+    report: dict[str, dict[str, Any]] = {}
+    for name in EVIDENCE_FILENAMES:
+        original, copy = source / name, destination / name
+        text = read_evidence_text(original)
+        redacted = redact_evidence(text, endpoint=endpoint,
+                                   run_directory=run_directory, root=root)
+        if redacted == text:
+            shutil.copyfile(original, copy)
+        else:
+            write_evidence_text(copy, redacted)
+        report[name] = {
+            "changed": redacted != text,
+            "source_sha256": sha256_file(original),
+            "distributable_sha256": sha256_file(copy),
+            "remaining": evidence_privacy_findings(read_evidence_text(copy)),
+        }
+    return report
+
+
+def checkout_above(run_directory: Path) -> Path | None:
+    """The checkout a staging directory sits in, named by its own layout.
+
+    Staging lives at `<checkout>/.omobench-runs/...`, so the checkout is the
+    parent of the `.omobench-runs` this run is under -- not something to be
+    guessed at, and not the checkout doing the redacting, which is frequently
+    a different one.
+    """
+    for parent in run_directory.resolve().parents:
+        if parent.name == ".omobench-runs":
+            return parent.parent
+    return None
 
 
 def sha256_json(value: Any) -> str:
@@ -1628,6 +2255,24 @@ def artifact_metadata(path: Path, run_directory: Path) -> dict[str, str]:
     return {"path": relative_path, "sha256": sha256_file(path)}
 
 
+def execution_from_environment(environment: dict[str, Any]) -> dict[str, Any] | None:
+    """The run's own execution record, taken from its evidence or not at all.
+
+    A run made before this existed has nothing to say here, and packaging must
+    not invent an answer for it: "nothing was recorded" and "nothing was
+    observed" are different claims, and only the run itself could have made
+    the second one. An unrecognised contract is also left out rather than
+    copied, because a value this code does not understand is not a fact it can
+    vouch for.
+    """
+    from .execution import EXECUTION_CONTRACT
+
+    record = environment.get("execution")
+    if not isinstance(record, dict) or record.get("contract") != EXECUTION_CONTRACT:
+        return None
+    return record
+
+
 def hardware_from_environment(
     environment: dict[str, Any],
     cpu_override: str | None,
@@ -1773,6 +2418,26 @@ def hardware_from_environment(
 
 
 def write_local_run(args: argparse.Namespace) -> int:
+    if getattr(args, "windows_bridge", False) and args.execute:
+        from .bridge import BridgeSession, provenance
+        from .bridge_http import Destination
+        try:
+            target = Destination.parse(args.endpoint.removesuffix("/v1").rstrip("/"))
+            if target.host != "127.0.0.1":
+                raise ValueError("The first Windows bridge supports IPv4 loopback only.")
+            with BridgeSession(target.port) as session:
+                bridged = argparse.Namespace(**vars(args))
+                bridged.endpoint = session.endpoint
+                bridged._bridge_credentials = session.credentials
+                bridged._bridge_provenance = provenance(target.port)
+                return _write_local_run(bridged)
+        except (ValueError, OSError) as error:
+            print(str(error), file=sys.stderr)
+            return 2
+    return _write_local_run(args)
+
+
+def _write_local_run(args: argparse.Namespace) -> int:
     root = find_repository_root()
     if root is None:
         print("Could not find an OmoBench checkout.", file=sys.stderr)
@@ -1803,7 +2468,10 @@ def write_local_run(args: argparse.Namespace) -> int:
         raw_output_path=raw_output_path,
         tokenizer=tokenizer,
     )
-    safe_command = redact_endpoint(shlex.join(command), args.endpoint)
+    if getattr(args, "_bridge_credentials", None):
+        command[command.index("--backend") + 1] += ",http2=false"
+    safe_command = redact_evidence(shlex.join(command), endpoint=args.endpoint,
+                                   run_directory=run_directory, root=root)
 
     if not args.execute:
         print("Dry run — this command has not contacted the endpoint:\n")
@@ -1825,19 +2493,34 @@ def write_local_run(args: argparse.Namespace) -> int:
         root=root,
         profile_id=args.profile,
         telemetry_dir=(root / telemetry_dir).resolve() if telemetry_dir else None,
+        **({"bridge_credentials": args._bridge_credentials} if getattr(args, "_bridge_credentials", None) else {}),
     )
     returncode = outcome.returncode
 
     log_path.write_text(
-        redact_endpoint(log_path.read_text(encoding="utf-8"), args.endpoint),
+        redact_evidence(log_path.read_text(encoding="utf-8"), endpoint=args.endpoint,
+                        run_directory=run_directory, root=root),
         encoding="utf-8",
     )
     environment_path = run_directory / "environment.json"
-    environment_path.write_text(json.dumps(doctor_report(), indent=2) + "\n", encoding="utf-8")
+    environment = doctor_report()
+    if getattr(args, "_bridge_provenance", None):
+        environment["transport"] = args._bridge_provenance
+    # How the run was bounded, whether anything stopped it, and whether the
+    # machine executed throughout. Written into the run's own evidence rather
+    # than computed at packaging time, because packaging happens later -- and
+    # possibly on another day -- and none of this can be recovered afterwards.
+    if outcome.execution is not None:
+        environment["execution"] = outcome.execution.document()
+    environment_path.write_text(json.dumps(environment, indent=2) + "\n", encoding="utf-8")
     reproduce_path = run_directory / "reproduce.md"
     reproduce_path.write_text(
         "# Reproduce this local staging run\n\n"
         f"GuideLLM version: `{GUIDELLM_VERSION}`\n\n"
+        + ("Transport: experimental Windows stdio bridge, HTTP/1.1, local reports only. "
+           "Its latency is included. Reopen through the updated companion and select Windows bridge "
+           f"with Windows port {args._bridge_provenance['windows_port']}; the private ephemeral endpoint "
+           "below cannot be reused directly.\n\n" if getattr(args, "_bridge_provenance", None) else "")
         # Two identities, recorded separately: the string the server answered to,
         # and the tokenizer that built and counted the workload.
         + (f"Server model identifier: `{args.model}`\n\nTokenizer source (explicit override): `{tokenizer}`\n\n"
@@ -1851,6 +2534,16 @@ def write_local_run(args: argparse.Namespace) -> int:
     )
 
     if raw_output_path.exists():
+        # The runner writes its own report, and it writes the backend target and
+        # the output path into it. Redacted before it is compressed, and
+        # therefore before it is hashed, so the published file and its recorded
+        # hash agree. Only those strings change: every measurement in the
+        # report is untouched.
+        raw_output_path.write_text(
+            redact_evidence(raw_output_path.read_text(encoding="utf-8"), endpoint=args.endpoint,
+                            run_directory=run_directory, root=root),
+            encoding="utf-8",
+        )
         compress_file(raw_output_path)
 
     if not outcome.evidence_log_finalized:
@@ -1946,13 +2639,37 @@ def package_local_run(args: argparse.Namespace) -> int:
         )
         if not isinstance(environment, dict):
             raise ValueError("environment.json must contain an object at its root.")
-        hardware = hardware_from_environment(
-            environment,
-            args.cpu,
-            args.ram_gb,
-            getattr(args, "gpu_memory_gb", None),
-            execution_device=args.execution_device,
-        )
+        transport_provenance = environment.get("transport")
+        execution_record = execution_from_environment(environment)
+        declaration = None
+        provenance_path = getattr(args, "provenance", None)
+        if provenance_path:
+            declaration = result_provenance.read_declaration(Path(provenance_path).expanduser())
+        elif transport_provenance is not None:
+            # The old refusal said only that this could not be published. It
+            # can: schema 1.1 records the Windows serving host and the WSL
+            # runner separately, and what it needs is the serving machine's own
+            # facts, which nothing in a WSL snapshot can supply.
+            raise ValueError(
+                "This run went through the Windows bridge, so its model server and its benchmark "
+                "runner were different environments. Package it with --provenance, declaring the "
+                "serving machine, its runtime and its hardware; what WSL can see about the "
+                "Windows host is not evidence about what served the model.")
+
+        if declaration is None:
+            hardware = hardware_from_environment(
+                environment,
+                args.cpu,
+                args.ram_gb,
+                getattr(args, "gpu_memory_gb", None),
+                execution_device=args.execution_device,
+            )
+        else:
+            if args.cpu or args.ram_gb is not None or getattr(args, "gpu_memory_gb", None) is not None:
+                raise ValueError(
+                    "--cpu, --ram-gb and --gpu-memory-gb describe the machine this snapshot came "
+                    "from. Under --provenance the serving machine is declared there instead, so "
+                    "there is one place a reader can look.")
         profile_path = root / "benchmarks" / "profiles" / f"{args.profile}.yaml"
         if not profile_path.is_file():
             raise ValueError(f"Missing profile definition: {profile_path}")
@@ -1988,6 +2705,32 @@ def package_local_run(args: argparse.Namespace) -> int:
             "runner": "guidellm",
             "runner_version": normalized["runner_version"],
         }
+        provenance = None
+        declared_after = bool(getattr(args, "_declared_after_execution", False))
+        if declaration is not None:
+            if declaration.get("result") is not None and not declared_after:
+                raise ValueError(
+                    "The declaration's \"result\" section is for `omobench repackage`, which "
+                    "rebuilds a finished run. When packaging directly, those values come from "
+                    "this command's own options.")
+            provenance = result_provenance.build(
+                declaration,
+                model_id=model["id"],
+                revision=model["revision"],
+                run_id=run_id,
+                submitter=required_text(args.submitter, "Submitter"),
+                runner_report=environment,
+                transport_provenance=transport_provenance,
+                catalog=catalog_model_ids(root),
+                execution_device=args.execution_device,
+                # Nothing declared after a run can be a detection of it. A
+                # probe taken today describes today's machine, not the machine
+                # as it was while the benchmark was running.
+                allow_probe=not declared_after,
+            )
+            hardware = provenance["hardware"]
+            model.update(provenance["model_fields"])
+
         # execution_device is deliberately excluded from this payload: a gpu run's
         # fingerprint must stay identical to what pre-execution_device code
         # computed for the same configuration, so an old GPU bundle and a newly
@@ -2012,11 +2755,18 @@ def package_local_run(args: argparse.Namespace) -> int:
             },
         }
         result = {
-            "schema_version": "1.0",
+            "schema_version": "1.0" if provenance is None else provenance["schema_version"],
             "run_id": run_id,
             "started_at": normalized["started_at"],
             "configuration_fingerprint": sha256_json(fingerprint_payload),
             "execution_device": args.execution_device,
+            **({"environment": provenance["environment"]} if provenance else {}),
+            # Schema 1.1 only, and only when the run recorded one: 1.0 is
+            # frozen, and a bundle written before this existed must not
+            # acquire a fact nobody collected. Copied from the run's own
+            # evidence, never recomputed -- a clock read today says nothing
+            # about whether a benchmark executed last week.
+            **({"execution": execution_record} if provenance and execution_record else {}),
             "model": model,
             "runtime": runtime,
             "hardware": hardware,
@@ -2031,6 +2781,10 @@ def package_local_run(args: argparse.Namespace) -> int:
                 "run_kind": args.run_kind,
                 "repeat_of_run_id": args.repeat_of_run_id,
                 "source_commit": current_git_commit(),
+                **({"packaging": {
+                    "metadata_declared_after_execution": True,
+                    **(getattr(args, "_derived_from", None) or {}),
+                }} if declared_after and provenance else {}),
             },
         }
     except ValueError as error:
@@ -2038,6 +2792,17 @@ def package_local_run(args: argparse.Namespace) -> int:
         return 2
 
     result_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    proposal_path = run_directory / model_proposal.FILENAME
+    if provenance and provenance["proposal"] is not None:
+        proposal_path.write_text(json.dumps(provenance["proposal"], indent=2) + "\n",
+                                 encoding="utf-8")
+        print(f"Wrote a model proposal for review at {proposal_path}")
+        print(f"{result['model']['id']} is not catalogued yet. This result is marked as proposed: "
+              "a reviewer decides whether the model is added, and nothing here makes it eligible.")
+    elif proposal_path.exists():
+        # A repackage that no longer proposes anything must not leave the old
+        # request behind, where the registry would read it as this bundle's.
+        proposal_path.unlink()
     print(f"Created normalized local result at {result_path}")
     print("This is still local evidence. Copy the complete run directory into results/ only when you are ready to submit it.")
     return 0
@@ -2244,6 +3009,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--model", required=True, help="canonical model ID served by the endpoint")
     run.add_argument("--profile", required=True, choices=sorted(PROFILE_SPECS), help="versioned OmoBench profile")
     run.add_argument("--output-dir", default=".omobench-runs", help="local staging directory, relative to repository root")
+    run.add_argument("--windows-bridge", action="store_true", help="explicit Windows loopback bridge, local reports only")
     run.add_argument("--execute", action="store_true", help="actually invoke GuideLLM; omit for a safe dry run")
     run.add_argument(
         "--tokenizer",
@@ -2314,7 +3080,89 @@ def build_parser() -> argparse.ArgumentParser:
             "memory for an already-detected GPU and does not invent a GPU model or vendor."
         ),
     )
+    package.add_argument(
+        "--provenance",
+        help=(
+            "path to a JSON declaration of the serving environment, weight identity, tokenizer "
+            "identity and -- for an uncatalogued model -- a proposal for review. Supplying it "
+            "packages the result under schema 1.1, which records the serving host and the "
+            "benchmark runner separately and is the only way to publish a bridged run. Omit it "
+            "to keep the existing schema 1.0 output byte for byte. See docs/provenance.md."
+        ),
+    )
     package.add_argument("--force", action="store_true", help="allow replacement of an existing local result.json")
+
+    repackage = subcommands.add_parser(
+        "repackage",
+        help="package a completed run again under schema 1.1, without touching its evidence",
+    )
+    repackage.add_argument("--run-dir", required=True, help="the completed staging run to repackage")
+    repackage.add_argument(
+        "--provenance",
+        required=True,
+        help="JSON declaration of the serving environment and model identity for that run",
+    )
+    repackage.add_argument("--output-dir", help="where to write the derived bundle; defaults to a sibling directory")
+    repackage.add_argument("--submitter", help="override the submitter recorded in the original result")
+    repackage.add_argument("--force", action="store_true", help="allow replacement of an existing derived bundle")
+
+    redact = subcommands.add_parser(
+        "redact",
+        help="write a redacted copy of a finished run's evidence, leaving the original alone",
+    )
+    redact.add_argument("--run-dir", required=True, help="the finished staging run to read")
+    redact.add_argument("--output-dir", required=True,
+                        help="where to write the redacted copy; never the run directory itself")
+    redact.add_argument("--endpoint", default="",
+                        help="the endpoint this run was measured against, if it is not a "
+                             "loopback address the scan recognises on its own")
+    redact.add_argument("--force", action="store_true",
+                        help="allow replacement of an existing redacted copy")
+
+    scan = subcommands.add_parser(
+        "scan-evidence",
+        help="report private material left in a run's distributable files, changing nothing",
+    )
+    scan.add_argument("--run-dir", required=True, help="the directory to read")
+
+    weights = subcommands.add_parser(
+        "weights", help="identify local weight files by hashing their bytes"
+    )
+    weights.add_argument("--directory", required=True, help="folder holding the weight files")
+    weights.add_argument(
+        "--file",
+        action="append",
+        default=[],
+        help=(
+            "one weight file inside --directory to include; repeat for a sharded model. Omit to "
+            "list the candidates without hashing anything."
+        ),
+    )
+    weights.add_argument("--output", help="write the manifest here instead of to standard output")
+
+    tokenizer = subcommands.add_parser(
+        "tokenizer", help="load a tokenizer source in the runner's own interpreter, before benchmarking"
+    )
+    tokenizer.add_argument("--source", help="Hugging Face repository id or local tokenizer folder")
+    tokenizer.add_argument(
+        "--model",
+        help=(
+            "the identifier your server answers to. Checked when --source is omitted, because "
+            "that is what the runner uses by default -- which is exactly the case that fails "
+            "when the identifier is a serving alias rather than a repository"
+        ),
+    )
+    tokenizer.add_argument(
+        "--network",
+        choices=["none", "metadata", "download"],
+        default="none",
+        help=(
+            "what this check may reach: 'none' uses the local cache only; 'metadata' may list the "
+            "repository and read its model card; 'download' may fetch tokenizer files. Model "
+            "weights are never downloaded at any level."
+        ),
+    )
+    tokenizer.add_argument("--timeout", type=float, default=180.0, help="seconds before the check is stopped")
 
     prepare = subcommands.add_parser(
         "prepare", help="review or install a reviewed managed CPU download recipe (does not benchmark)"
@@ -2353,6 +3201,314 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+REPACKAGE_RESULT_FIELDS = {
+    "model", "model_revision", "model_source", "quantization", "framework",
+    "framework_version", "server_description", "execution_device", "runtime_args",
+    "submitter", "run_kind", "repeat_of_run_id", "profile",
+}
+EVIDENCE_FILENAMES = ("guidellm-benchmarks.json.gz", "guidellm.stdout.log",
+                      "environment.json", "reproduce.md")
+
+
+def run_scan_evidence(args: argparse.Namespace) -> int:
+    """Say what is still in a bundle's distributable files. Change nothing.
+
+    Separate from redaction on purpose. Reading is safe and can be run on a
+    bundle somebody else produced, on a directory that is already public, or
+    on the output of the redaction itself -- which is the only way a redaction
+    gets checked by something other than its own assumptions.
+    """
+    directory = Path(args.run_dir).expanduser()
+    missing = [name for name in EVIDENCE_FILENAMES if not (directory / name).is_file()]
+    if missing:
+        print(f"{directory} is missing {', '.join(missing)}.", file=sys.stderr)
+        return 2
+    findings = scan_evidence_privacy(directory)
+    total = sum(len(items) for items in findings.values())
+    for name in EVIDENCE_FILENAMES:
+        items = findings.get(name, [])
+        label = " (decompressed)" if name == COMPRESSED_EVIDENCE else ""
+        print(f"{name}{label}: " + (f"{len(items)} to answer for" if items else "clean"))
+        for item in items:
+            print(f"    {item}")
+    if total:
+        print(f"\n{total} thing(s) in this bundle name the contributor's machine or carry a "
+              f"credential. Write a redacted copy with:\n"
+              f"    omobench redact --run-dir {directory} --output-dir <somewhere else>",
+              file=sys.stderr)
+        return 1
+    print("\nNothing found that names the contributor's machine or carries a credential. "
+          "This is a scan for the patterns OmoBench redacts, not a guarantee about prompts "
+          "or model output.")
+    return 0
+
+
+def run_redact_evidence(args: argparse.Namespace) -> int:
+    """Write a redacted copy of a finished run, and check the copy.
+
+    The original is read and never written. What comes out is verified by
+    scanning it again rather than by trusting that the substitutions ran, and
+    a copy that still has something in it is reported as a failure even
+    though the files were written -- a redaction nobody checked is not a
+    redaction.
+    """
+    source = Path(args.run_dir).expanduser().resolve()
+    destination = Path(args.output_dir).expanduser().resolve()
+    if destination == source:
+        print("Redaction writes a copy; it never overwrites the evidence it read.",
+              file=sys.stderr)
+        return 2
+    missing = [name for name in EVIDENCE_FILENAMES if not (source / name).is_file()]
+    if missing:
+        print(f"{source} is missing {', '.join(missing)}. These files are the run itself.",
+              file=sys.stderr)
+        return 2
+    if destination.exists() and any(destination.iterdir()) and not args.force:
+        print(f"Refusing to write into {destination}: it is not empty. Use --force.",
+              file=sys.stderr)
+        return 2
+
+    report = redact_run_evidence(source, destination, endpoint=args.endpoint)
+    remaining = 0
+    for name in EVIDENCE_FILENAMES:
+        entry = report[name]
+        label = " (decompressed)" if name == COMPRESSED_EVIDENCE else ""
+        print(f"{name}{label}: " + ("redacted" if entry["changed"] else "nothing to redact"))
+        print(f"    was  {entry['source_sha256']}")
+        print(f"    now  {entry['distributable_sha256']}")
+        for item in entry["remaining"]:
+            print(f"    STILL PRESENT: {item}")
+            remaining += 1
+
+    print(f"\nThe evidence in {source} was read and not modified.")
+    if remaining:
+        print(f"\n{remaining} thing(s) survived redaction in {destination}. Do not submit it.",
+              file=sys.stderr)
+        return 1
+    print("Nothing the redaction scans for is left in the copy. Package from it with "
+          "omobench package --run-dir, and review the files before submitting either way: "
+          "no scan knows what a prompt or a model's own output may contain.")
+    return 0
+
+
+def repackage_local_run(args: argparse.Namespace) -> int:
+    """Package a run that already happened, under the schema that can describe it.
+
+    A completed bridged run used to be unpublishable for a reason that had
+    nothing to do with the run: the panel refused to package it, because schema
+    1.0 had nowhere to say that the server was on Windows and the runner was in
+    WSL. The measurements were fine. Re-running a benchmark to work around a
+    packaging limitation would throw away hours and prove nothing, so this
+    reads the saved evidence instead.
+
+    The original directory is never written to. Its evidence files are copied
+    byte for byte into a new bundle, hashed on both sides, and the new result
+    records that its metadata was declared after the run rather than detected
+    while it happened.
+    """
+    root = find_repository_root()
+    if root is None:
+        print("Could not find an OmoBench checkout.", file=sys.stderr)
+        return 2
+
+    source = Path(args.run_dir).expanduser()
+    if not source.is_absolute():
+        source = Path.cwd() / source
+    source = source.resolve()
+    try:
+        source.relative_to(root.resolve())
+    except ValueError:
+        print("--run-dir must stay inside the OmoBench checkout.", file=sys.stderr)
+        return 2
+
+    missing = [name for name in EVIDENCE_FILENAMES if not (source / name).is_file()]
+    if missing:
+        print(
+            f"{source} cannot be repackaged: it is missing {', '.join(missing)}.\n"
+            "These files are the run itself -- its raw measurements, the runner's log, the "
+            "environment it ran in, and how to reproduce it. Nothing can reconstruct them after "
+            "the fact, so this run cannot become a public result.",
+            file=sys.stderr)
+        return 2
+
+    # Repackaging copies evidence byte for byte and records the source hashes,
+    # which is what lets a reader see that a derived bundle carries the same
+    # measurements rather than new ones. That guarantee is worth keeping, so
+    # this refuses rather than quietly rewriting the files underneath it --
+    # redaction is a separate, visible step with its own output to check.
+    leaking = {name: items for name, items in scan_evidence_privacy(source).items() if items}
+    if leaking:
+        print(
+            f"{source} still carries material that should not be published:\n"
+            + "\n".join(f"  {name}: " + "; ".join(items) for name, items in leaking.items())
+            + "\n\nRepackaging copies evidence unchanged and records its hashes, so it will not "
+              "rewrite these for you. Write a redacted copy first, then repackage that:\n"
+              f"    omobench redact --run-dir {source} --output-dir <somewhere else>",
+            file=sys.stderr)
+        return 2
+
+    try:
+        declaration = result_provenance.read_declaration(Path(args.provenance).expanduser())
+    except result_provenance.ProvenanceError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    fields = declaration.get("result")
+    if not isinstance(fields, dict):
+        print(
+            "Repackaging needs the run's own identity as well as its serving environment. Add a "
+            "\"result\" section to the declaration with the model, its revision, the serving "
+            "framework and version, the execution device and the submitter.",
+            file=sys.stderr)
+        return 2
+    unexpected = set(fields) - REPACKAGE_RESULT_FIELDS
+    if unexpected:
+        print(f"Unsupported result field(s): {', '.join(sorted(unexpected))}.", file=sys.stderr)
+        return 2
+
+    original_result = None
+    if (source / "result.json").is_file():
+        with contextlib.suppress(OSError, ValueError):
+            original_result = json.loads((source / "result.json").read_text(encoding="utf-8"))
+
+    destination = Path(args.output_dir).expanduser() if args.output_dir else source.with_name(
+        source.name + "-repackaged")
+    if not destination.is_absolute():
+        destination = Path.cwd() / destination
+    destination = destination.resolve()
+    try:
+        destination.relative_to(root.resolve())
+    except ValueError:
+        print("--output-dir must stay inside the OmoBench checkout.", file=sys.stderr)
+        return 2
+    if destination == source:
+        print("Repackaging writes a new bundle; it never overwrites the original evidence.",
+              file=sys.stderr)
+        return 2
+    if destination.exists() and not args.force:
+        print(f"Refusing to replace {destination}. Use --force to rebuild it.", file=sys.stderr)
+        return 2
+
+    destination.mkdir(parents=True, exist_ok=True)
+    evidence_hashes = {}
+    for name in EVIDENCE_FILENAMES:
+        shutil.copyfile(source / name, destination / name)
+        evidence_hashes[name] = sha256_file(source / name)
+        if sha256_file(destination / name) != evidence_hashes[name]:
+            print(f"The copy of {name} does not match the original. Nothing was changed in "
+                  f"{source}.", file=sys.stderr)
+            return 2
+
+    run_id = (original_result or {}).get("run_id") or source.name
+    packaging = argparse.Namespace(
+        run_dir=str(destination),
+        run_id=run_id,
+        profile=fields.get("profile") or (original_result or {}).get("benchmark", {}).get("profile_id"),
+        model=fields.get("model"),
+        model_revision=fields.get("model_revision"),
+        model_source=fields.get("model_source"),
+        quantization=fields.get("quantization"),
+        framework=fields.get("framework"),
+        framework_version=fields.get("framework_version"),
+        server_description=fields.get("server_description"),
+        execution_device=fields.get("execution_device"),
+        runtime_arg=list(fields.get("runtime_args") or []),
+        submitter=args.submitter or fields.get("submitter"),
+        run_kind=fields.get("run_kind") or "initial",
+        repeat_of_run_id=fields.get("repeat_of_run_id"),
+        cpu=None, ram_gb=None, gpu_memory_gb=None,
+        provenance=str(Path(args.provenance).expanduser()),
+        force=True,
+        _declared_after_execution=True,
+        _derived_from={"derived_from_run_id": (original_result or {}).get("run_id"),
+                       "evidence_sha256": evidence_hashes},
+    )
+    for name in ("profile", "model", "model_revision", "framework", "framework_version",
+                 "execution_device", "submitter"):
+        if not getattr(packaging, name):
+            print(f"The declaration's result section is missing {name}.", file=sys.stderr)
+            return 2
+    if packaging.profile not in PROFILE_SPECS:
+        print(f"Unknown profile: {packaging.profile}", file=sys.stderr)
+        return 2
+
+    code = package_local_run(packaging)
+    if code == 0:
+        print(f"The original evidence in {source} was not modified.")
+        print("Its serving metadata was declared after the run, and is recorded as such: nothing "
+              "supplied now is presented as having been detected while the benchmark ran.")
+    return code
+
+
+def run_weights_command(args: argparse.Namespace) -> int:
+    """Identify local weight files by hashing the bytes the contributor selects.
+
+    Listing is separate from hashing on purpose. With no --file this only shows
+    what is there; files are read only once a person has named them, and the
+    identity that comes out is of those bytes, never of their names.
+    """
+    directory = Path(args.directory).expanduser()
+    try:
+        candidates = model_identity.weight_files_in(directory)
+    except model_identity.ModelIdentityError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    if not args.file:
+        if not candidates:
+            print(f"No weight files found in {directory}.")
+            return 1
+        print(f"Weight files in {directory}; nothing has been read yet:")
+        for path in candidates:
+            print(f"  {path.name}  ({path.stat().st_size:,} bytes)")
+        print("\nRe-run with --file for each file this model is made of. A sharded model needs "
+              "every shard, because the identity covers the whole set.")
+        return 0
+
+    selected = []
+    for name in args.file:
+        candidate = (directory / name).expanduser()
+        if not candidate.is_file():
+            print(f"{candidate} is not a file in {directory}.", file=sys.stderr)
+            return 2
+        selected.append(candidate)
+    try:
+        manifest = model_identity.weight_manifest(selected, root=directory)
+    except model_identity.ModelIdentityError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    document = json.dumps(manifest, indent=2) + "\n"
+    if args.output:
+        Path(args.output).expanduser().write_text(document, encoding="utf-8")
+        print(f"Wrote the weight manifest to {args.output}")
+    else:
+        print(document, end="")
+    print(f"Revision to record: {model_identity.manifest_revision(manifest)}", file=sys.stderr)
+    return 0
+
+
+def run_tokenizer_command(args: argparse.Namespace) -> int:
+    """Load a tokenizer the way the benchmark will, before the benchmark does."""
+    from . import tokenizer_preflight
+
+    # With no --source the runner would use the served identifier, so that is
+    # what gets checked: the default is the case worth checking, not a gap.
+    source = args.source or args.model
+    if not source:
+        print("Give --source, or --model to check the identifier the runner would fall back to.",
+              file=sys.stderr)
+        return 2
+    report = tokenizer_preflight.preflight(
+        source, network=args.network, timeout=args.timeout)
+    print(report.message)
+    for check in report.checks:
+        print(f"  [{check['state']:>10}] {check['id']}: {check['detail']}")
+    if report.suggestion:
+        print(f"\nSuggested source: {report.suggestion['source']}")
+        print(f"  {report.suggestion['reason']}")
+    if report.detail:
+        print(f"\n{report.detail}", file=sys.stderr)
+    return 0 if report.ok else 1
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -2375,6 +3531,16 @@ def main() -> int:
         return write_local_run(args)
     if args.command == "package":
         return package_local_run(args)
+    if args.command == "repackage":
+        return repackage_local_run(args)
+    if args.command == "redact":
+        return run_redact_evidence(args)
+    if args.command == "scan-evidence":
+        return run_scan_evidence(args)
+    if args.command == "weights":
+        return run_weights_command(args)
+    if args.command == "tokenizer":
+        return run_tokenizer_command(args)
     if args.command == "prepare":
         return run_prepare_command(args)
     if args.command == "launch":

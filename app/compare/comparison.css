@@ -140,3 +140,22 @@
 .comparison-paste label { display: block; margin: 16px 0 8px; }
 .comparison-paste textarea { width: 100%; display: block; background: #0a1220; color: #edf3fc; border: 1px solid #394b65; border-radius: 7px; padding: 12px; font: 12px/1.6 ui-monospace, monospace; resize: vertical; }
 .comparison-paste button { margin-top: 12px; }
+
+/* What is being compared, and why these runs sit beside each other.
+   "Comparable" is a property of two runs and a question, so the question is
+   part of the page rather than an assumption in the code. */
+.question-picker{border:1px solid var(--line,#2a3a53);border-radius:12px;padding:18px 20px;background:#0e1829}
+.question-picker label{display:block;font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:#a5b6cf;margin-bottom:8px}
+.question-picker select{width:100%;background:#0c1423;border:1px solid #354965;color:#edf3fc;border-radius:8px;padding:10px 11px;font-size:13px}
+.question-picker p{margin:12px 0 0;font-size:12px;line-height:1.7;color:#a5b6cf}
+.question-picker .question-note{color:#f3d7a6}
+
+.why-section{margin:26px 0}
+.why-comparison{border:1px solid var(--line,#2a3a53);border-left-width:3px;border-radius:10px;padding:16px 18px;margin:12px 0;background:#0d1728}
+.why-comparison.why-ranking{border-left-color:#7fb27f}
+.why-comparison.why-qualified{border-left-color:#f7bd55}
+.why-comparison.why-unsuitable{border-left-color:#916357}
+.why-comparison ul{list-style:none;margin:10px 0 0;padding:0}
+.why-comparison li{font-size:12px;line-height:1.75;color:#c4d6f0;padding:4px 0}
+.why-comparison .why-missing{color:#a5b6cf}
+.why-comparison .why-difference strong,.why-comparison .why-missing strong{color:#edf3fc}

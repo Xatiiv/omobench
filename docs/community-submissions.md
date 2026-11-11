@@ -8,7 +8,7 @@ packaging, validation, or preview.
 ## Contributor flow
 
 1. Finish a benchmark and open **Share results** (or **Review & submit** in the
-   advanced panel). Package and validate the evidence.
+   panel). Package and validate the evidence.
 2. Leave **OmoBench community registry** selected. Choose **Sign in with GitHub**,
    then enter the displayed one-time code at `https://github.com/login/device`.
    Use only a code requested in your own local panel.

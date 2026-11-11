@@ -52,7 +52,7 @@ class ShippedAssetTests(unittest.TestCase):
         self.assertEqual(routes["/favicon.svg"], "favicon.svg")
 
     def test_both_pages_declare_the_same_shared_assets(self):
-        for name in ("guided.html", "index.html"):
+        for name in ("index.html",):
             markup = (WEB / name).read_text(encoding="utf-8")
             with self.subTest(page=name):
                 self.assertIn('<script src="/dashboard.js"', markup)
@@ -62,9 +62,33 @@ class ShippedAssetTests(unittest.TestCase):
                 self.assertIn('href="/favicon.svg"', markup)
                 self.assertNotIn('href="data:', markup)
 
+    def test_every_package_module_is_required_of_an_installed_payload(self):
+        """Serving the panel is not the only way to 404.
+
+        The route table only names web assets, so a Python module the panel
+        imports could go missing from an installation without any route
+        noticing -- and the panel would then import-error on the request that
+        first needed it. Seven modules had already drifted off this list that
+        way. Listing the package by directory rather than by hand is what
+        keeps it honest.
+        """
+        required = set(required_paths())
+        for module in sorted((WEB.parent).glob("*.py")):
+            with self.subTest(module=module.name):
+                self.assertIn(f"cli/src/omobench/{module.name}", required,
+                              f"{module.name} is imported from the package but not required "
+                              "of an installed payload")
+
+    def test_every_shipped_profile_is_required_of_an_installed_payload(self):
+        """A profile the panel offers but cannot read is a run nobody can package."""
+        required = set(required_paths())
+        for profile in sorted((ROOT / "benchmarks" / "profiles").glob("*.yaml")):
+            with self.subTest(profile=profile.name):
+                self.assertIn(f"benchmarks/profiles/{profile.name}", required)
+
     def test_no_page_references_an_asset_the_panel_does_not_serve(self):
         routes = set(served_assets())
-        for name in ("guided.html", "index.html"):
+        for name in ("index.html",):
             markup = (WEB / name).read_text(encoding="utf-8")
             for reference in re.findall(r'(?:src|href)="(/[^"]*)"', markup):
                 with self.subTest(page=name, reference=reference):
@@ -230,3 +254,51 @@ class LineEndingTests(unittest.TestCase):
                     f"git reports {relative} unmodified, but the bytes on disk differ from "
                     "the committed ones, so this checkout would record a different "
                     "profile_sha256 than any other")
+
+
+class ManagedInstallExtrasTests(unittest.TestCase):
+    """What a managed installation installs has to cover what it will be asked
+    to do.
+
+    The AMD case is the one that exposes this: the panel runs inside WSL, the
+    model server runs on Windows, and every request crosses the bridge. If the
+    bridge's dependencies are not in what the installer installs, that setup
+    cannot connect at all -- and the failure arrives at the first benchmark
+    rather than at install time.
+    """
+
+    PYPROJECT = ROOT / "cli" / "pyproject.toml"
+    MANAGED = ROOT / "windows" / "installer" / "src" / "ManagedEnvironment.cs"
+
+    def extras(self) -> dict[str, set[str]]:
+        text = self.PYPROJECT.read_text(encoding="utf-8")
+        block = text.split("[project.optional-dependencies]", 1)[1].split("[project.scripts]", 1)[0]
+        found: dict[str, set[str]] = {}
+        for name, body in re.findall(r"^(\w+)\s*=\s*\[([^\]]*)\]", block, re.MULTILINE):
+            found[name] = set(re.findall(r'"([^"]+)"', body))
+        return found
+
+    def test_the_installer_installs_the_extras_it_names(self) -> None:
+        installed = re.search(r'"-e", sourceWslPath\.TrimEnd\(\'/\'\) \+ "(/cli\[[^"]+\])"',
+                              self.MANAGED.read_text(encoding="utf-8"))
+        self.assertIsNotNone(installed, "the managed install command names its extras")
+        self.assertEqual(installed.group(1), "/cli[ui,runner]")
+
+    def test_a_managed_install_can_use_the_windows_bridge(self) -> None:
+        extras = self.extras()
+        self.assertIn("bridge", extras)
+        managed = extras["ui"] | extras["runner"]
+        missing = extras["bridge"] - managed
+        self.assertEqual(
+            missing, set(),
+            "A managed installation installs cli[ui,runner]. These bridge requirements "
+            f"would not be there, so a Windows server reached from WSL could not be "
+            f"benchmarked: {sorted(missing)}")
+
+    def test_the_bridge_requirement_is_pinned_to_one_version(self) -> None:
+        """Two pins for the same package that disagree would make the install
+        resolvable only by luck."""
+        extras = self.extras()
+        for name in ("ui", "runner", "bridge"):
+            for requirement in extras[name]:
+                self.assertIn("==", requirement, f"{name} pins {requirement}")

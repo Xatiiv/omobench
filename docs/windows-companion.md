@@ -14,12 +14,12 @@ It changes nothing about benchmarking: the panel, engine, profiles, recipes,
 telemetry, packaging and submission are exactly the ones documented in
 [browser control](browser-control.md) and [the guided launcher](guided-launcher.md).
 Launching only opens the panel, downloading a model and starting a benchmark
-stay explicit actions inside the guided page.
+stay explicit actions inside the panel.
 
 ## What it is, and why it is built this way
 
 A single ~70 KB native Windows executable (WinForms), compiled from the C#
-sources in [`windows/companion/src`](../../windows/companion/src) with the C#
+sources in [`windows/companion/src`](../windows/companion/src) with the C#
 compiler that ships inside Windows itself (the in-box .NET Framework 4.x
 `csc.exe`).
 
@@ -129,7 +129,7 @@ is not deployed yet. Be clear about which of these you are testing:
 A no-terminal route that needs no website at all:
 
 1. Double-click `OmoBenchCompanion.exe`.
-2. Click **Open panel**. The panel starts and your browser opens the guided page.
+2. Click **Open panel**. The panel starts and your browser opens it.
 3. Click **Stop** when you are done.
 
 That exercises exactly the same code the protocol link triggers, the link

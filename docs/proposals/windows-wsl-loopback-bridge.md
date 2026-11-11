@@ -1,8 +1,13 @@
 # Proposal: reaching a Windows-local model server from the WSL runner
 
-Status: **design only.** No code in this change implements a bridge, nothing is
-installed, and the panel's loopback rule is unchanged. This document exists so
-the follow-up can be reviewed before anything is built.
+Status: **original design and verification plan**. See the
+[implementation status](../bridge-frontend-status.md) for the implemented,
+explicit experimental integration and its remaining platform checks. The current
+implementation uses WSL executable interop stdio with an HTTP-aware frontend,
+creates a session per check/run, and never automatically switches a selected
+Windows destination to a same-port WSL listener. Those decisions supersede the
+original lifecycle/mirrored-mode suggestions below. Public submission remains
+blocked, and nothing here claims real Windows–WSL verification.
 
 One thing this document previously asserted has since been *measured*, and the
 measurement contradicted it; §4 records what was actually observed and what was
@@ -88,8 +93,9 @@ latency, and §6 treats that as a measurement problem rather than an assumption.
 
 ### Authentication and transport ownership
 
-- The Linux listener accepts a connection only when it presents a one-time
-  token minted by the companion for that bridge instance. It is passed to the
+- The Linux listener accepts a request only when it presents a per-instance
+  token. The current frontend mints it locally; the final owner-to-runner
+  handoff is an integration gate, not implemented. It must be passed to the
   panel the way the panel's own token already is: never written to the
   checkout, never logged, never placed in a URL the runner records, never
   stored in the companion configuration file.
