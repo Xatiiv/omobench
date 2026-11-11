@@ -845,3 +845,8 @@ test("only the directly comparable examples are offered for ranking", () => {
   assert.deepEqual(ranked.map((entry) => entry.key).sort(),
                    ["example-cpu-b", "example-gpu-a", "example-reference"]);
 });
+
+test("a vision-language model retains its capability on a text-only run", () => {
+  const record = readResultRecord("vl", uncataloguedFixture({ eligibility: { modality: "image-text-to-text" } }));
+  assert.equal(record.eligibility.modality, "image-text-to-text");
+});

@@ -300,8 +300,8 @@
               "description": "True when anybody can obtain the weights, accepting the publisher's terms if there are any. A gated repository qualifies; a private fine-tune, an internal checkpoint and a hosted API with no weights behind it do not."
             },
             "modality": {
-              "const": "text-generation",
-              "description": "The only modality OmoBench's profiles measure. A multimodal model is out of scope here however good it is."
+              "enum": ["text-generation", "image-text-to-text"],
+              "description": "Model capability. Vision-language models require a text-only benchmark confirmed from the raw runner report."
             },
             "publisher": { "type": ["string", "null"], "description": "Who published the weights, where that is not simply the first path segment of the source." },
             "source": { "type": ["string", "null"], "pattern": "^https://|^$", "description": "Where the weights come from. Distinct from model.source, which records the exact artefact this run served." },

@@ -1441,7 +1441,7 @@ class UncataloguedEligibilityTests(RegistryFixture):
     }
 
     def write(self, *, model_id="someone/Model-7B", status="uncatalogued",
-              eligibility="default", version="1.2"):
+              eligibility="default", version="1.2", raw_report=None):
         result = bridged_template()
         result["schema_version"] = version
         result["model"]["id"] = model_id
@@ -1450,8 +1450,11 @@ class UncataloguedEligibilityTests(RegistryFixture):
             eligibility = dict(self.ELIGIBLE)
         if eligibility is not None:
             result["model"]["eligibility"] = eligibility
+        contents = {"environment_snapshot": BRIDGED_SNAPSHOT}
+        if raw_report is not None:
+            contents["raw_runner_output"] = gzip.compress(json.dumps(raw_report).encode())
         write_bundle(self.results_path / "custom" / "2026-11-06-run-fixture-1234",
-                     artifact_contents={"environment_snapshot": BRIDGED_SNAPSHOT},
+                     artifact_contents=contents,
                      template=result)
 
     def test_a_complete_uncatalogued_model_is_accepted(self) -> None:
@@ -1459,6 +1462,26 @@ class UncataloguedEligibilityTests(RegistryFixture):
         exit_code, stdout, stderr = self.run_main()
         self.assertEqual(exit_code, 0, stderr)
         self.assertIn("Validated 1 OmoBench result bundle(s).", stdout)
+
+    def test_vision_language_model_requires_text_only_runner_evidence(self):
+        eligibility = dict(self.ELIGIBLE, modality="image-text-to-text")
+        spec = {"backend": {"request_format": "/v1/chat/completions"},
+                "data": [{"kind": "synthetic_text"}]}
+        request = {"input_metrics": {"text_tokens": 1024, "image_count": None}}
+        report = {"config": {"spec": spec},
+                  "benchmarks": [{"requests": {"successful": [request]}}]}
+        self.write(eligibility=eligibility, raw_report=report)
+        code, _, error = self.run_main()
+        self.assertEqual(code, 0, error)
+        request["input_metrics"]["image_count"] = 1
+        self.write(eligibility=eligibility, raw_report=report)
+        self.assertIn("text-only workload", self.run_main()[2])
+        request["input_metrics"]["image_count"] = None
+        spec["data"].append({"kind": "image"})
+        self.write(eligibility=eligibility, raw_report=report)
+        self.assertIn("text-only workload", self.run_main()[2])
+        self.write(eligibility=eligibility)
+        self.assertIn("text-only workload", self.run_main()[2])
 
     def test_no_proposal_is_required(self) -> None:
         """The point of the change: a proposal is a route, not a toll."""
@@ -1503,7 +1526,7 @@ class UncataloguedEligibilityTests(RegistryFixture):
 
     def test_another_modality_is_refused(self) -> None:
         eligibility = dict(self.ELIGIBLE)
-        eligibility["modality"] = "image-text-to-text"
+        eligibility["modality"] = "image-classification"
         self.write(eligibility=eligibility)
         exit_code, _, stderr = self.run_main()
         self.assertEqual(exit_code, 1)
