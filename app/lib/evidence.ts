@@ -312,7 +312,7 @@ function eligibility(result: ResultRecord): EvidenceSection {
         }),
       row("Modality", declared.modality, {
         provenance: "contributor-declared",
-        note: "The only modality OmoBench's profiles measure.",
+        note: "The model's capability. This benchmark measures a text-only workload.",
       }),
       row("Publisher", declared.publisher, { provenance: "contributor-declared" }),
       row("Where the weights come from", declared.source, { provenance: "contributor-declared" }),

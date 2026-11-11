@@ -560,7 +560,7 @@ class UncataloguedModelTests(PackagingFixture):
         self.assertIn("benchmarked here but not published", errors.getvalue())
 
     def test_another_modality_is_refused_at_packaging(self) -> None:
-        eligibility = dict(self.ELIGIBILITY, modality="image-text-to-text")
+        eligibility = dict(self.ELIGIBILITY, modality="image-classification")
         errors = io.StringIO()
         with redirect_stderr(errors):
             code, _ = self.package_custom(eligibility=eligibility)

@@ -535,7 +535,7 @@ def eligibility_gaps(eligibility: dict[str, Any] | None) -> list[str]:
         gaps.append("licence_url")
     if eligibility.get("weights_publicly_downloadable") is not True:
         gaps.append("weights_publicly_downloadable")
-    if eligibility.get("modality") != "text-generation":
+    if eligibility.get("modality") not in ("text-generation", "image-text-to-text"):
         gaps.append("modality")
     return gaps
 
@@ -583,7 +583,7 @@ def submit_checks(
                  f"{model} is not on the curated list, which is fine on its own. To publish it, "
                  "state what makes it publishable: the licence its publisher states, an https "
                  "URL where that licence can be read, that anybody can download the weights, "
-                 "and that it is a text-generation model. Alternatively propose it for the "
+                 "and whether it is a text or vision-language model. Alternatively propose it for the "
                  f"curated list ({', '.join(catalog)}), or choose the catalogued identity you "
                  "actually ran -- never substitute a different model for the one you ran. You "
                  "can run this benchmark and export its local report either way.",
@@ -613,7 +613,7 @@ def submit_checks(
             blocks="submit" if eligibility and not declared else None,
             recovery="" if declared else
                      "State the licence, an https URL where it can be read, that the weights "
-                     "are publicly downloadable, and that the modality is text generation."
+                     "are publicly downloadable, and that the model supports generating text."
                      if eligibility else
                      "Fill in the custom model's licence, licence URL and weights source, or "
                      "propose it for the curated list instead.",

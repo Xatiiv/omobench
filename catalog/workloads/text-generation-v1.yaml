@@ -206,6 +206,6 @@ excluded:
     reason: >-
       Multimodal. Its model card states "Gemma 3 models are multimodal,
       handling text and image input and generating text output", and its
-      pipeline tag is image-text-to-text. OmoBench's profiles measure text
-      generation, so it is out of scope here however good it is.
+      pipeline tag is image-text-to-text. No managed recipe is provided; eligible
+      text-only runs can be submitted through the custom-model workflow.
     checked: 2026-11-06

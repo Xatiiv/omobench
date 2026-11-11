@@ -42,7 +42,7 @@ See [guided-launcher.md](docs/guided-launcher.md).
   the workload you put on that machine to find out, the way a fixed dataset is
   the load you put on a database. Nothing here ranks models, and model size or
   speed is never presented as a measure of answer quality.
-- Public results are for open-weight, text-generation models that meet the
+- Public results are for open-weight text models and vision-language models on verified text-only workloads that meet the
   documented requirements in [model-eligibility.md](docs/model-eligibility.md):
   licence, obtainable weights, modality, identity, workload, acceptance,
   artifacts and privacy, serving provenance, and execution. **Membership of

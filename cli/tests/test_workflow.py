@@ -250,7 +250,7 @@ class GateSeparationTests(unittest.TestCase):
             ("licence", "   ", "licence"),
             ("licence_url", "http://example.invalid/licence", "licence_url"),
             ("weights_publicly_downloadable", False, "weights_publicly_downloadable"),
-            ("modality", "image-text-to-text", "modality"),
+            ("modality", "image-classification", "modality"),
         ]:
             with self.subTest(field=field):
                 item = find(self.submit(eligibility={**self.ELIGIBLE, field: value}),

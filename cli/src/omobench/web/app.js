@@ -483,7 +483,7 @@ function renderCustomEligibility(report) {
     .filter((id) => id !== "eligibility").map(label);
   notice.textContent =
     "Model eligibility is complete: a licence, a URL where it can be read, publicly "
-    + "downloadable weights and a text-generation modality are all declared. That is this "
+    + "downloadable weights and a model type are all declared. That is this "
     + "model's eligibility, not permission to submit this result. Nothing here is checked: "
     + "a reviewer reads the licence itself, and the run still has to meet the profile's own "
     + "acceptance thresholds for successful requests and error rate. "
@@ -1499,7 +1499,7 @@ function eligibilityDeclaration() {
     licence,
     licence_url: licenceUrl,
     weights_publicly_downloadable: $("custom-downloadable").checked,
-    modality: "text-generation",
+    modality: field("custom-modality") || "text-generation",
   };
   for (const [key, id] of [["publisher", "custom-publisher"], ["source", "custom-source"],
                            ["base_model", "custom-base-model"]]) {

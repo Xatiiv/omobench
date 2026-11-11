@@ -334,7 +334,7 @@ def _eligibility(result: dict[str, Any]) -> dict[str, Any]:
                   if downloadable else
                   "Nobody else can obtain these weights, so nobody else can repeat this run."),
         _row("Modality", declared.get("modality"), provenance="contributor-declared",
-             note="The only modality OmoBench's profiles measure."),
+             note="The model's capability. This benchmark measures a text-only workload."),
         _row("Publisher", declared.get("publisher"), provenance="contributor-declared"),
         _row("Where the weights come from", declared.get("source"),
              provenance="contributor-declared"),

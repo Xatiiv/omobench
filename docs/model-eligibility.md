@@ -49,7 +49,7 @@ none of them is automatic.
 | --- | --- | --- |
 | 1 | **Licence.** A published licence that permits use and publication of benchmark results, named, with a URL a reviewer can open. | `model.eligibility.licence`, `licence_url` |
 | 2 | **Obtainable weights.** Anybody can download them, accepting the publisher's terms if there are any. | `model.eligibility.weights_publicly_downloadable` |
-| 3 | **Text generation.** Not image, audio, video or embedding models. | `model.eligibility.modality` |
+| 3 | **Text generation workload.** Text models and vision-language models running text-only chat qualify. | `model.eligibility.modality` |
 | 4 | **Identity.** An immutable revision, or a content hash of the actual weight files. Never `main`, `master` or `latest`. | `model.revision`, `model.weights` |
 | 5 | **Workload.** A versioned profile, run unmodified, with every required measurement. | `benchmark.profile_id`, `profile_sha256` |
 | 6 | **Acceptance.** The profile's own minimum successful requests and maximum error rate. | `results` against the profile |
@@ -59,7 +59,7 @@ none of them is automatic.
 
 A model that fails one of these is refused **with the reason named**, not with
 "not in the catalog". A private fine-tune fails requirement 2 and nothing else;
-a vision model fails requirement 3. Both are perfectly good things to benchmark
+a run with image inputs fails requirement 3. Both are perfectly good things to benchmark
 locally, and the panel will do it — they are simply not publishable here.
 
 ## What the curated list is now
@@ -80,10 +80,11 @@ in order to submit a result.
 - **Hosted proprietary APIs.** Requirement 2 excludes them: there are no
   weights to obtain. A benchmark of somebody's paid endpoint is not a
   measurement of a model you could run.
-- **Other modalities.** Requirement 3 is unchanged. `google/gemma-3-4b-it` is a
-  worked example: its card states "Gemma 3 models are multimodal, handling text
-  and image input", and its pipeline tag is `image-text-to-text`, so it is out
-  of scope for a text-generation profile however good it is.
+- **Vision-language models.** In Review & share, enter the exact model identity,
+  licence and source and select **Vision-language model · text-only workload**.
+  The registry checks the saved GuideLLM report for synthetic text chat and
+  rejects missing input evidence or reported image, audio or video use.
+  Existing text-only runs can be repackaged. The public run page labels the workload.
 - **Weaker measurement.** Requirements 5 to 9 are exactly what they were. This
   change is about *which models*, not about what counts as evidence.
 

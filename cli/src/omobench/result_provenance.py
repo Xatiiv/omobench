@@ -287,10 +287,10 @@ def _eligibility(declared: Any, *, model_id: str) -> dict[str, Any]:
         raise ProvenanceError(
             "eligibility.licence_url: an https URL where that licence can be read. A licence "
             "nobody can open is not one anybody can check.")
-    if modality != "text-generation":
+    if modality not in ("text-generation", "image-text-to-text"):
         raise ProvenanceError(
             f"eligibility.modality: {modality!r} is out of scope. OmoBench's profiles measure "
-            "text generation; a multimodal or embedding model cannot be published here.")
+            "text generation, including text-only workloads on vision-language models.")
     if declared.get("weights_publicly_downloadable") is not True:
         raise ProvenanceError(
             "eligibility.weights_publicly_downloadable: the weights have to be obtainable by "
