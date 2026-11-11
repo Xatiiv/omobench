@@ -28,9 +28,9 @@ test("offers the verified public Windows installer alongside the local launcher"
   const html = await render("/run");
   assert.match(html, /href="omobench:\/\/open"/);
   assert.match(html, /Download for Windows/);
-  assert.match(html, /href="https:\/\/github\.com\/Xatiiv\/omobench\/releases\/download\/windows-v0\.1\.0\/OmoBenchSetup\.exe"/);
-  assert.match(html, /afa11a567165b3aec76ac44b4385b5d05b6b8e0d5d2974f3ce8c4cbf0222ca27/);
-  assert.match(html, /13a3842478e4/);
+  assert.match(html, /href="https:\/\/github\.com\/Xatiiv\/omobench\/releases\/download\/windows-v0\.1\.1\/OmoBenchSetup\.exe"/);
+  assert.match(html, /175294739241a4298cd5add46acda84f7f478a5f3951ff83da26d6243e7ed662/);
+  assert.match(html, /6822f9368c43/);
   assert.match(html, /This build is unsigned/);
   assert.match(html, /manual Linux installation step/);
   assert.doesNotMatch(html, /Public download coming soon/);
