@@ -747,10 +747,14 @@ class CompletionAndRecoveryTests(PanelFixture):
 
     def test_a_bundle_the_registry_will_refuse_is_not_called_ready(self) -> None:
         job_id = self.completed_job(bridged=False)
-        self.controller.package(job_id, dict(PACKAGE_FORM, framework="vllm",
-                                             framework_version="0.11.0"))
-        # Valid bundle, no submitter entered: ready is not yet true.
-        states = self.completion(job_id, submitter="")
+        form = dict(PACKAGE_FORM, framework="vllm", framework_version="0.11.0",
+                    model="acme/private-model-v9")
+        self.controller.package(job_id, form)
+        # A bundle that packaged, for a model nothing yet says may be
+        # published: the registry still needs something, so not ready. (A
+        # missing submitter no longer illustrates this -- packaging needs one,
+        # so a bundle without it is never built.)
+        states = self.completion(job_id, **form)
         self.assertEqual(states["package"]["state"], "done")
         self.assertEqual(states["ready"]["state"], "blocked")
         self.assertIn("registry still needs something", states["ready"]["detail"])

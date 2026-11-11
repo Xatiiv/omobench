@@ -338,6 +338,7 @@
           <label>Runtime startup arguments<textarea name="runtime_args" rows="3" placeholder="One argument per line, e.g. --ctx-size=2048"></textarea><span class="hint">Record the actual server settings, including GPU offload. Do not include tokens or passwords.</span></label>
           <details><summary>Hardware details, if detection is incomplete</summary><div class="grid two"><label id="gpu-memory-field">GPU memory per card (GB)<input name="gpu_memory_gb" type="number" min="0.01" step="any" placeholder="Only if detected VRAM is unknown"></label><label>CPU description<input name="cpu" placeholder="Leave blank to use detected CPU"></label></div></details>
           <div class="actions"><button id="check-requirements" type="button" class="secondary">Check publication requirements</button><button id="package-button" type="submit">Package &amp; validate</button></div>
+          <div id="package-status" class="notice package-status" role="status" aria-live="polite" hidden></div>
         </form>
         </details>
         <p id="validation-result" class="notice" role="status" hidden></p>

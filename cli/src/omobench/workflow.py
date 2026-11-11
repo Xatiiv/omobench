@@ -650,9 +650,14 @@ def submit_checks(
         state="unknown" if submitter is None else ("ok" if submitter.strip() else "attention"),
         observed=(submitter or "").strip() or None,
         source=SOURCE_YOU,
-        blocks="submit",
+        # The bundle records who submitted it -- the schema requires
+        # submission.submitter and `omobench package` refuses to run without
+        # one -- so this is needed to package, not only to submit. Marking it
+        # submit-only let the pre-check pass and packaging then refuse.
+        blocks="package",
         recovery="" if (submitter or "").strip() else
-                 "Enter the GitHub username or organization to record in the bundle.",
+                 "Enter the GitHub username or organization to record in the bundle. "
+                 "Signing in with GitHub and pressing Detect details fills it in.",
     ))
 
     validation = job.get("validation")

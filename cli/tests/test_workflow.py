@@ -305,7 +305,10 @@ class GateSeparationTests(unittest.TestCase):
         self.assertEqual(find(self.submit(submitter="  "), "submitter")["state"], "attention")
         self.assertEqual(find(self.submit(submitter="xatiiv"), "submitter")["state"], "ok")
         for value in (None, "  "):
-            self.assertIn("submitter", ids(self.submit(submitter=value), "submit"))
+            # The bundle records its submitter -- the schema requires one and
+            # `omobench package` will not run without it -- so it is needed
+            # to package, not only to submit.
+            self.assertIn("submitter", ids(self.submit(submitter=value), "package"))
 
     def test_what_is_absent_is_not_reported_as_what_is_wrong(self) -> None:
         """Before a run, "you will need this" is not a failure."""

@@ -711,9 +711,15 @@ async function detectDetails() {
   }
 
   // The machine and the server, as they are now.
-  const bridged = $("windows-bridge").checked;
+  // Whether this run was served from Windows is in the run's own record. The
+  // Connect form's checkbox describes the next run, and is unticked when a
+  // saved result is reopened, so it cannot be what decides this.
+  const runTransport = String((selectedJob.transport || {}).kind || "");
+  const bridged = runTransport.startsWith("windows") || $("windows-bridge").checked;
+  let probeError = null;
   const probe = bridged
-    ? await api("/api/serving-probe", { windows_bridge: true }).catch(() => null) : null;
+    ? await api("/api/serving-probe", { windows_bridge: true }).catch((error) => { probeError = error.message; return null; })
+    : null;
   const metadata = lastServerCheck && lastServerCheck.server_metadata;
   // A probe and a server check describe the machine when they ran, which is
   // not when the benchmark ran -- even a benchmark that finished minutes ago
@@ -730,8 +736,9 @@ async function detectDetails() {
   renderDetected(filled.filter(Boolean), now);
   renderAccelerators(); renderSettings();
   const missing = [];
-  if (!bridged) missing.push("the serving hardware (tick Windows bridge to read it from the Windows machine)");
-  if (!metadata) missing.push("the server's own model details (run Test connection first)");
+  if (!bridged) missing.push("the serving hardware (this run was not served through the Windows bridge, so describe its machine under All details)");
+  else if (!probe) missing.push(`the serving hardware (${probeError || "the companion did not answer"})`);
+  if (!metadata) missing.push("LM Studio's model details (start LM Studio, then use Check this server under Connect & run)");
   $("detect-status").textContent = missing.length
     ? `Done. Not read: ${missing.join("; ")}.` : "Done.";
   scheduleWorkflowRefresh();
@@ -747,7 +754,10 @@ function curatedRecord(id) {
   return null;
 }
 
-$("detect-details").addEventListener("click", () => action(detectDetails));
+$("detect-details").addEventListener("click", () => action(async () => {
+  try { await detectDetails(); }
+  catch (error) { $("detect-status").textContent = `Not done: ${error.message}`; }
+}));
 
 // --- accelerators as cards ------------------------------------------------------
 
@@ -1376,8 +1386,36 @@ $("tokenizer-download-confirm").addEventListener("click", () => action(async () 
   }));
 }));
 
+// What happened to the last Package press, said next to the button that was
+// pressed -- the page-level notice is many screens above it.
+function packageStatus(message, kind = "pending", items = []) {
+  const box = $("package-status");
+  box.hidden = !message;
+  box.className = `notice package-status ${kind === "error" ? "error" : ""}`;
+  const text = document.createElement("p"); text.textContent = message;
+  const list = document.createElement("ul");
+  items.forEach((item) => {
+    const li = document.createElement("li");
+    const strong = document.createElement("strong"); strong.textContent = item.label;
+    li.append(strong, document.createTextNode(item.detail ? ` — ${item.detail}` : ""));
+    if (item.target) {
+      const go = document.createElement("button");
+      go.type = "button"; go.className = "secondary"; go.textContent = "Fill in";
+      go.addEventListener("click", () => goTo(item.target));
+      li.append(" ", go);
+    }
+    list.append(li);
+  });
+  box.replaceChildren(text, ...(items.length ? [list] : []));
+  // The button that was pressed can be at the bottom edge of the screen;
+  // bring the answer into view without jumping away from it.
+  if (message && box.scrollIntoView) box.scrollIntoView({ block: "nearest" });
+}
+
 $("package-form").addEventListener("submit", (event) => {
   event.preventDefault(); action(async () => {
+   try {
+    packageStatus("Checking what packaging needs…");
     const data = withProvenance(Object.fromEntries(new FormData(event.target)));
     data.runtime_args = data.runtime_args.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
     const currentJob = jobs.find((job) => job.id === selected);
@@ -1386,18 +1424,32 @@ $("package-form").addEventListener("submit", (event) => {
     preview = null; $("submission-preview").hidden = true; $("submit-confirmed").checked = false;
     renderRequirements(await api(`/api/runs/${selected}/requirements`, data));
     // Packaging is gated on what packaging needs, and nothing else. A model
-    // awaiting catalog review, or a submitter nobody has typed yet, belongs to
-    // the registry's gate: the bundle built from this evidence is just as
-    // valid without them, and refusing to build it would throw the run away
-    // over a decision somebody else has to make.
+    // awaiting catalog review belongs to the registry's gate: the bundle built
+    // from this evidence is just as valid without that decision, and refusing
+    // to build it would throw the run away over a decision somebody else has
+    // to make. (A submitter is different: the bundle records one.)
     if (requirements.blocks_packaging.length) {
-      throw new Error("This evidence cannot be packaged yet: "
-        + requirements.blocks_packaging.join("; ")
-        + ". The checklist above says what each one needs. Your measurements are kept either way.");
+      const blocking = new Set(requirements.blocks_packaging);
+      const items = (requirements.checks || []).filter((check) => blocking.has(check.label))
+        .map((check) => ({ label: check.label, detail: check.recovery || check.detail || "",
+                           target: CHECK_FIELDS[check.field] || null }));
+      packageStatus("Not packaged yet. Your measurements are kept; this is what packaging still needs:",
+        "error", items.length ? items : requirements.blocks_packaging.map((label) => ({ label })));
+      return;
     }
-    renderRun(await api(`/api/runs/${selected}/package`, data));
+    packageStatus("Packaging and validating the evidence…");
+    const packaged = await api(`/api/runs/${selected}/package`, data);
+    renderRun(packaged);
     await refreshWorkflow();
     await refreshEvidence(selected);
+    const validation = packaged.validation || {};
+    packageStatus(validation.valid
+      ? "Packaged and validated. The bundle is ready to review below."
+      : `Packaged, but the registry validator did not accept it: ${(validation.errors || []).join(" ") || "see the result below"}`,
+      validation.valid ? "ok" : "error");
+   } catch (error) {
+    packageStatus(`Not packaged: ${error.message}`, "error");
+   }
   });
 });
 const community = new CommunitySubmission(api, () => {
