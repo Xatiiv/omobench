@@ -109,6 +109,17 @@ class SubmissionTests(unittest.TestCase):
         with self.assertRaisesRegex(UIError, "hash mismatch"):
             bundle_archive(self.root, self.run)
 
+    def test_missing_installer_schema_preserves_run_for_retry(self):
+        schema = self.root / "schema" / "model-proposal.schema.json"
+        original = schema.read_bytes()
+        before = {p: (self.run / p).read_bytes() for p in BUNDLE_FILES}
+        schema.unlink()
+        with self.assertRaisesRegex(UIError, r"missing model-proposal\.schema\.json"):
+            validate_bundle(self.root, self.run)
+        schema.write_bytes(original)
+        self.assertEqual(validate_bundle(self.root, self.run), [])
+        self.assertEqual(before, {p: (self.run / p).read_bytes() for p in BUNDLE_FILES})
+
     def test_duplicate_registry_bundle_is_rejected(self):
         shutil.copytree(self.run, self.root / "results" / "existing")
         self.assertIn("duplicate run_id", "\n".join(validate_bundle(self.root, self.run)))

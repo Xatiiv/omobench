@@ -182,6 +182,7 @@ $runtimeAllowList = @(
     'catalog/downloads',
     'catalog/workloads',
     'schema/benchmark-run.schema.json',
+    'schema/model-proposal.schema.json',
     'tools/validate_results.py',
     'results/README.md'
 )

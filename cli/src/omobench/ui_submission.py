@@ -71,6 +71,16 @@ def validate_bundle(root: Path, run: Path) -> list[str]:
         return errors
     except ImportError as error:
         raise UIError("Install the UI validator: python -m pip install -e './cli[ui]'") from error
+    except FileNotFoundError as error:
+        if error.filename and Path(error.filename) in (
+            root / "schema" / "benchmark-run.schema.json",
+            root / "schema" / "model-proposal.schema.json",
+            root / "tools" / "validate_results.py",
+        ):
+            name = Path(error.filename).name
+            raise UIError(f"OmoBench is missing {name}. Update or repair the installation, "
+                          "then package this saved run again.") from error
+        raise UIError("A file needed for this bundle is missing. Check the saved run's files.") from error
     except (OSError, ValueError, AttributeError, KeyError) as error:
         raise UIError("Could not read the bundle, schema, or repository validator.") from error
     except Exception as error:

@@ -85,6 +85,7 @@ namespace OmoBench.Installer
             "catalog/downloads/cpu-v1.json",
             "catalog/workloads/text-generation-v1.yaml",
             "schema/benchmark-run.schema.json",
+            "schema/model-proposal.schema.json",
             "tools/validate_results.py",
         };
         // required-end
