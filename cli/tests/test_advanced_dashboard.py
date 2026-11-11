@@ -169,6 +169,7 @@ class AdvancedDashboardTests(unittest.TestCase):
         self.assertTrue(overrunning["metricsHidden"])  # not presented as a finished run
 
     def test_a_completed_run_stops_estimating_remaining_time(self):
+        self.assertEqual(self.states["completed"]["heading"], "Benchmark completed")
         self.assertEqual(self.states["completed"]["facts"]["eta"], "Completed")
 
     def test_an_unproven_request_total_is_not_presented_as_a_limit(self):

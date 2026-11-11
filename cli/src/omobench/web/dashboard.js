@@ -55,13 +55,13 @@ globalThis.BenchmarkDashboard = class BenchmarkDashboard {
           <p class="eyebrow">OUTPUT THROUGHPUT</p>
           <div class="score-value" id="live-throughput">Pending</div>
           <p class="score-unit">tokens / second</p>
-          <p class="score-note">Cumulative average across the run.<br>Final measured-window results follow.</p>
+          <p class="score-note">Cumulative average across the run.<br>Measured-window results appear below after completion.</p>
           <div class="score-divider"></div>
           <dl class="latency-pair"><div><dt>First token, mean</dt><dd id="live-ttft">Pending</dd></div><div><dt>Request time, mean</dt><dd id="live-request-latency">Pending</dd></div></dl>
         </div>
         <div class="chart-wrap">
           <div class="section-head chart-head"><div><p class="eyebrow">PERFORMANCE OVER TIME</p><h3>Output throughput</h3></div><span class="chart-key"><i></i> tok/s</span></div>
-          <p class="hint" id="chart-label">Cumulative average since the first request · live estimate</p>
+          <p class="hint" id="chart-label">Cumulative average since the first request</p>
           <div id="chart-empty" class="chart-empty"><span class="waiting-mark" aria-hidden="true">▥</span><strong>Waiting for the first measurement</strong><span>Your graph appears as the runner reports real samples.</span></div>
           <svg id="chart-svg" viewBox="0 0 800 240" preserveAspectRatio="none" role="img" aria-label="Output tokens per second over elapsed time" hidden>
             <defs><linearGradient id="throughput-gradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#f7bd55" stop-opacity=".25"/><stop offset="100%" stop-color="#f7bd55" stop-opacity="0"/></linearGradient></defs>
@@ -602,7 +602,10 @@ globalThis.BenchmarkDashboard = class BenchmarkDashboard {
       // (compression, environment.json, reproduce.md) already completed. A run
       // that reached this point did pass through every stage, so the list can
       // say so -- and a remaining-time estimate is now stale, not a fact.
-      this.$("progress-heading").textContent = "Running";
+      this.$("progress-heading").textContent = "Benchmark completed";
+      for (const id of ["live-ttft", "live-request-latency"]) {
+        if (this.$(id).textContent === "Pending") this.$(id).textContent = "Not recorded";
+      }
       this.renderStageList(this.stages.length, false);
       this.$("fact-eta").textContent = "Completed";
       this.renderProgressBar(100, { complete: true });

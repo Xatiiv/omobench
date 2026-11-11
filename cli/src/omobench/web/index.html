@@ -39,12 +39,13 @@
         <div class="section-head"><div><span class="step">02</span><h2 id="workload-title">Choose a workload for this hardware</h2></div><span class="muted small">Curated, or your own</span></div>
         <p class="muted">A workload is a model and the way it is run. These are recommendations whose licences have been checked; any compatible model can be benchmarked, and submitted on the same requirements. Nothing here ranks models, and size and speed say nothing about the quality of a model&#8217;s answers.</p>
         <label>Workload<select id="workload-select"></select></label>
-        <div id="workload-detail" class="profile-detail" hidden>
+        <details id="workload-detail" class="panel-fold" hidden>
+          <summary>Workload details</summary>
           <dl class="kv" id="workload-facts"></dl>
           <p id="workload-fit" class="hint"></p>
           <p id="workload-evidence" class="hint"></p>
           <p id="workload-licence" class="hint"></p>
-        </div>
+        </details>
         <ul class="status-checklist" id="workload-caveats"></ul>
         <section id="managed-setup" class="identity" hidden aria-labelledby="managed-title">
           <h3 id="managed-title">OmoBench can prepare this one for you</h3>
@@ -102,12 +103,13 @@
           <p class="hint">Enter the Windows server's IPv4 loopback address, for example http://127.0.0.1:1234. Requires the updated companion. No LAN listener or firewall change is needed. A bridged run <strong>can</strong> be submitted: because the server and this runner are different environments, you describe the serving machine yourself in step 03 — nothing WSL can see of the Windows host counts as evidence about it. The bridge's own latency is inside every measured number and is never subtracted, and every bridged result is labelled as such wherever it is shown.</p>
           <label>Tokenizer source <span class="muted small">optional</span><input id="tokenizer" name="tokenizer" placeholder="Hugging Face repository or local tokenizer folder" spellcheck="false">
             <span class="hint">Leave blank to use the server model identifier above. Set it when that identifier is a serving alias rather than a Hugging Face repository — an LM Studio alias such as <code>qwen/qwen3-vl-4b:3</code>, for example. The workload's prompts are built and counted with this tokenizer; it never changes which model your server serves, and it is not a claim about which weights are loaded.</span></label>
-          <section id="profile-brief" class="profile-detail" aria-label="What this profile does">
+          <details id="profile-brief" class="panel-fold" aria-label="What this profile does">
+            <summary>Benchmark profile details</summary>
             <p id="profile-detail"></p>
             <dl class="kv" id="profile-facts"></dl>
             <p id="profile-qualifies" class="hint"></p>
             <p id="profile-ceiling" class="hint"></p>
-          </section>
+          </details>
           <section id="identity-block" class="identity">
             <h3>Which model is this?</h3>
             <p class="hint">Two different things, kept apart. Your server answers to whatever identifier it was configured with; the model has its own canonical identity. Nothing maps one to the other without you choosing it. A model not on the curated list can still be benchmarked, saved and submitted — it then carries its own licence and downloadability instead.</p>
@@ -151,9 +153,12 @@
           <div class="actions"><button id="test-connection" type="button" class="secondary">Check this server</button><button id="check-tokenizer" type="button" class="secondary">Check tokenizer</button><button id="load-tokenizer" type="button" class="secondary">Load tokenizer now</button><button id="start-run" type="submit">Run benchmark <span aria-hidden="true">↗</span></button></div>
           <p class="hint"><strong>Check tokenizer</strong> stays offline and only looks at the shape of the identifier and whether its files are already here. <strong>Load tokenizer now</strong> actually loads it in the interpreter the benchmark uses — which is where a run otherwise dies, before it sends a single request. It may contact huggingface.co to read the repository, and will tell you before it fetches anything. Model weights are never downloaded by either.</p>
           <p id="run-caution" class="hint" role="status" hidden></p>
-          <ul class="status-checklist" id="server-check"></ul>
-          <section id="preflight" class="preflight">
-            <h3>Before you start</h3>
+          <p id="connection-result" class="hint" role="status"></p>
+          <details class="panel-fold server-fold"><summary>Server check details</summary>
+            <ul class="status-checklist" id="server-check"></ul>
+          </details>
+          <details id="preflight" class="panel-fold preflight">
+            <summary>Before you start <span id="preflight-status" class="gate-count"></span></summary>
             <p class="hint" id="preflight-local"></p>
             <div class="gate" data-gate="run">
               <h4>Running this benchmark <span class="gate-count" id="gate-count-run"></span></h4>
@@ -175,8 +180,7 @@
               <p class="hint">Facts worth knowing that stop nothing: things this evidence cannot establish, and costs it carries and declares.</p>
               <ul class="status-checklist" id="gate-none"></ul>
             </div>
-          </section>
-          <p id="connection-result" class="hint" role="status"></p>
+          </details>
           <p id="tokenizer-result" class="hint" role="status"></p>
           <div id="tokenizer-preflight" class="notice" hidden>
             <p id="tokenizer-preflight-message"></p>

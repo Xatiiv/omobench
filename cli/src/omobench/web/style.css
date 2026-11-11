@@ -79,3 +79,8 @@ pre{font-size:11px;background:#080f1c}
 .weights-files{list-style:none;padding:0;margin:8px 0}.weights-files li{font-size:12px}
 .visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 @media(max-width:620px){.review-facts{grid-template-columns:1fr}.review-facts dd{margin-bottom:8px}}
+
+.panel-fold{margin:8px 0;padding:0 12px;border:1px solid var(--line);border-radius:7px}
+.panel-fold>summary{padding:8px 0;font-weight:600}
+.panel-fold[open]{padding-bottom:10px}
+.server-fold:has(#server-check:empty){display:none}

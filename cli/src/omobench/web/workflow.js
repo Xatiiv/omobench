@@ -83,6 +83,12 @@ globalThis.WorkflowView = class WorkflowView {
   renderGates(report) {
     const local = this.get("preflight-local");
     if (local) local.textContent = report.local_report;
+    const summary = this.get("preflight-status");
+    if (summary) {
+      const blockers = report.blocking.run;
+      summary.textContent = blockers.length ? `${blockers.length} run checks outstanding` : "No run checks outstanding";
+      summary.classList.toggle("waiting", blockers.length > 0);
+    }
     for (const gate of WorkflowView.GATES) {
       const list = this.get(`gate-${gate}`);
       if (!list) continue;
