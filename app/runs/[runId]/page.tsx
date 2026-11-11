@@ -76,7 +76,7 @@ function LocalRunDetails({ result }: Readonly<{ result: RegistryResult }>) {
         </Link>
         <p className="mt-8 font-mono text-xs uppercase tracking-[0.22em] text-amber-300">Registry run record</p>
         <h1 className="mt-3 max-w-4xl text-4xl font-semibold tracking-[-0.04em] sm:text-5xl">
-          {result.model} on {result.hardware.display}
+          {result.model} on {result.hardware.display}{result.eligibility?.modality === "image-text-to-text" ? " · text-only workload" : ""}
         </h1>
         <p className="mt-5 max-w-3xl text-lg leading-8 text-slate-300">
           This record is included in this website build. Inspect its measurements, declared setup and evidence metadata below. Inclusion in a local preview alone does not establish community review.

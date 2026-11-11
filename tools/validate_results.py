@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import base64
 import binascii
 import json
 import sys
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -256,7 +258,7 @@ def eligibility_errors(
             "obtainable by anybody, accepting the publisher's terms if there are any. A gated "
             "repository qualifies; a private fine-tune, an internal checkpoint, or a hosted API "
             "with no weights behind it does not, and cannot be published here")
-    if eligibility.get("modality") != ELIGIBLE_MODALITY:
+    if eligibility.get("modality") not in (ELIGIBLE_MODALITY, "image-text-to-text"):
         errors.append(
             f"{relative}: model.eligibility.modality: "
             f"'{eligibility.get('modality')}' is not '{ELIGIBLE_MODALITY}'. OmoBench's profiles "
@@ -269,6 +271,37 @@ def eligibility_errors(
         errors.append(f"{relative}: model.eligibility.base_model: names the model itself; a "
                       "fine-tune's base is a different model")
     return errors
+
+
+def confirms_text_only_report(path: Path) -> bool:
+    """Check the runner's recorded generator and reject contradictory media metrics."""
+    try:
+        with gzip.open(path, "rb") as source:
+            raw = source.read(64 * 1024 * 1024 + 1)
+        if len(raw) > 64 * 1024 * 1024:
+            return False
+        report = json.loads(raw)
+        spec = report["config"]["spec"]
+        data = spec["data"]
+        if (not isinstance(data, list) or not data
+                or any(item["kind"] != "synthetic_text" for item in data)
+                or spec["backend"]["request_format"] != "/v1/chat/completions"):
+            return False
+        benchmarks = report["benchmarks"]
+        if not isinstance(benchmarks, list) or not benchmarks:
+            return False
+        for benchmark in benchmarks:
+            requests = benchmark["requests"]
+            for group in ("successful", "errored", "incomplete"):
+                for request in requests.get(group, []) or []:
+                    for field in ("input_metrics", "output_metrics"):
+                        metrics = request.get(field) or {}
+                        if any(value not in (None, 0) for key, value in metrics.items()
+                               if key.startswith(("image_", "audio_", "video_"))):
+                            return False
+        return True
+    except (OSError, EOFError, zlib.error, ValueError, KeyError, TypeError, AttributeError, RecursionError):
+        return False
 
 
 def execution_errors(relative: Path, result: dict[str, Any]) -> list[str]:
@@ -628,6 +661,11 @@ def validate_result(
             errors.append(
                 f"{relative}: hash mismatch for {artifact_name}"
             )
+        if (artifact_name == "raw_runner_output"
+                and (result["model"].get("eligibility") or {}).get("modality") == "image-text-to-text"
+                and not confirms_text_only_report(artifact_path)):
+            errors.append(f"{relative}: the raw GuideLLM report must show a text-only workload "
+                          "for this vision-language model (synthetic text chat, no media).")
         if artifact_name == "environment_snapshot":
             try:
                 with artifact_path.open("rb") as source:

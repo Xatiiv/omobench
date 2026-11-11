@@ -43,7 +43,7 @@ export type ModelEligibility = {
   family: string | null;
   licence: string;
   licenceUrl: string;
-  modality: "text-generation";
+  modality: "text-generation" | "image-text-to-text";
   parameterClass: string | null;
   publisher: string | null;
   source: string | null;
@@ -486,7 +486,7 @@ function readEligibility(
   if (!licenceUrl.startsWith("https://")) {
     throw new Error(`Local result ${sourcePath} has a licence URL a reviewer cannot open.`);
   }
-  if (eligibility.modality !== "text-generation") {
+  if (eligibility.modality !== "text-generation" && eligibility.modality !== "image-text-to-text") {
     throw new Error(`Local result ${sourcePath} declares a modality OmoBench's profiles do not measure.`);
   }
   if (typeof eligibility.weights_publicly_downloadable !== "boolean") {
@@ -497,7 +497,7 @@ function readEligibility(
     family: optionalTextField(eligibility, "family", sourcePath),
     licence: textField(eligibility, "licence", sourcePath),
     licenceUrl,
-    modality: "text-generation",
+    modality: eligibility.modality,
     parameterClass: optionalTextField(eligibility, "parameter_class", sourcePath),
     publisher: optionalTextField(eligibility, "publisher", sourcePath),
     source: optionalTextField(eligibility, "source", sourcePath),
