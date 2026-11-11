@@ -28,14 +28,14 @@
       <h1>Measure your hardware.</h1>
       <p class="intro">OmoBench runs a fixed workload against a model server and records what your machine did with it. The model is the load; the hardware is the subject.</p>
 
-      <section id="hardware-panel" class="panel" aria-labelledby="hardware-title">
+      <section id="hardware-panel" class="panel" aria-labelledby="hardware-title" hidden>
         <div class="section-head"><div><span class="step">01</span><h2 id="hardware-title">Your hardware</h2></div><span id="hardware-placement" class="pill">Checking&#8230;</span></div>
         <dl class="kv" id="hardware-facts"></dl>
         <p id="hardware-source" class="hint"></p>
         <p id="hardware-shared" class="hint"></p>
       </section>
 
-      <section id="workload-panel" class="panel" aria-labelledby="workload-title">
+      <section id="workload-panel" class="panel" aria-labelledby="workload-title" hidden>
         <div class="section-head"><div><span class="step">02</span><h2 id="workload-title">Choose a workload for this hardware</h2></div><span class="muted small">Curated, or your own</span></div>
         <p class="muted">A workload is a model and the way it is run. These are recommendations whose licences have been checked; any compatible model can be benchmarked, and submitted on the same requirements. Nothing here ranks models, and size and speed say nothing about the quality of a model&#8217;s answers.</p>
         <label>Workload<select id="workload-select"></select></label>
@@ -58,26 +58,7 @@
           <p id="managed-error" class="notice error" role="status" hidden></p>
           <div class="actions"><button id="managed-start" type="button" disabled>Download and verify</button></div>
         </section>
-        <section id="custom-workload" class="identity" hidden aria-labelledby="custom-title">
-          <h3 id="custom-title">Your own model</h3>
-          <p class="hint">Benchmark anything you can serve. Submitting it publicly needs the same requirements a curated model meets &#8212; a published licence, weights anybody can obtain, text generation, and an immutable identity. OmoBench never downloads or executes anything from an arbitrary repository.</p>
-          <div class="grid two">
-            <label>Canonical model ID<input id="custom-model-id" spellcheck="false" placeholder="org/Model-7B"><span class="hint">The model&#8217;s own identity, not the alias your server answers to.</span></label>
-            <label>Publisher <span class="muted small">optional</span><input id="custom-publisher" spellcheck="false" placeholder="org"></label>
-            <label>Weights revision<input id="custom-revision" spellcheck="false" placeholder="commit SHA"><span class="hint">Immutable. Not <code>main</code>, <code>master</code> or <code>latest</code>. A content hash of the actual files works too.</span></label>
-            <label>Quantisation<input id="custom-quantisation" spellcheck="false" placeholder="Q4_K_M"></label>
-            <label>Runtime engine<input id="custom-runtime" spellcheck="false" placeholder="llama.cpp"></label>
-            <label>Runtime build<input id="custom-runtime-version" spellcheck="false" placeholder="b10621"></label>
-            <label>Licence<input id="custom-licence" spellcheck="false" placeholder="apache-2.0"><span class="hint">As its publisher states it.</span></label>
-            <label>Licence URL<input id="custom-licence-url" type="url" spellcheck="false" placeholder="https://&#8230;"><span class="hint">Where a reviewer reads it.</span></label>
-            <label>Weights source<input id="custom-source" type="url" spellcheck="false" placeholder="https://huggingface.co/org/Model-7B"></label>
-            <label>Tokenizer source <span class="muted small">optional</span><input id="custom-tokenizer" spellcheck="false" placeholder="Leave blank to use the model ID"></label>
-            <label>Base model <span class="muted small">optional</span><input id="custom-base-model" spellcheck="false" placeholder="For a fine-tune"><span class="hint">A fine-tune is its own model and is never filed under its base.</span></label>
-          </div>
-          <label class="check"><input id="custom-downloadable" type="checkbox"><span>Anybody can download these weights, accepting the publisher&#8217;s terms if there are any.</span></label>
-          <p class="hint">Private weights can be benchmarked and kept locally; they cannot be published here, and the panel says so rather than refusing the run.</p>
-          <p id="custom-eligibility" class="notice" role="status" hidden></p>
-        </section>
+        
       </section>
       <div id="notice" class="notice" role="status" hidden></div>
       <div id="runner-status" class="notice">Checking the runner…</div>
@@ -90,27 +71,154 @@
         <button type="button" class="step-tab" data-stage="submit" data-target="submission-preview">6 · Submit</button>
       </nav>
       <section id="configure" class="panel">
-        <div class="section-head"><div><span class="step">03</span><h2>Connect &amp; run</h2></div><span class="muted small">Uses the OmoBench CLI</span></div>
-        <p class="muted">Start and load your model in a local inference server first, then point this panel at it. Any server that exposes streaming OpenAI-compatible <code>/v1/chat/completions</code> on this machine's loopback address works; the two guided recipes are presets, not the limit of what can be benchmarked.</p>
+        <div class="section-head"><div><span class="step">01</span><h2>Connect your model server</h2></div><span class="muted small">LM Studio, llama.cpp, vLLM, or any OpenAI-compatible server</span></div>
+        <p class="muted">Start your model server and load a model, then connect. OmoBench lists the models it reports; you choose one, and OmoBench supplies a repeatable test.</p>
         <form id="run-form">
           <div class="grid two">
-            <label>Server address<input id="endpoint" name="endpoint" placeholder="http://127.0.0.1:8080" required spellcheck="false"><span class="hint">The loopback address and port your server listens on, as you configured it. An optional <code>/v1</code> suffix is accepted. Nothing is discovered or scanned.</span></label>
-            <label>Server model identifier<input id="model" name="model" list="served-models" placeholder="Identifier your server reports" required spellcheck="false"><datalist id="served-models"></datalist><span class="hint">Exactly the string this server's API accepts, including any suffix. <strong>Check this server</strong> fills this list from the server's own <code>/v1/models</code> when it offers one.</span></label>
-            <label>Benchmark profile<select id="profile" name="profile"></select></label>
-            <label>Server execution device<select id="execution-device" name="execution_device"><option value="cpu">CPU</option><option value="gpu">GPU (any vendor)</option></select><span class="hint">Where <em>your server</em> ran inference. GPU covers any vendor's accelerator; the result records vendor-neutral GPU details from this machine.</span></label>
+            <label>Server address<input id="endpoint" name="endpoint" placeholder="http://127.0.0.1:1234" required spellcheck="false"><span class="hint">The loopback address and port your server listens on. LM Studio's default is <code>http://127.0.0.1:1234</code>.</span></label>
+            <div>
+              <label class="check"><input id="windows-bridge" type="checkbox"><span>The server runs on Windows and this panel runs in WSL. Connect through the Windows bridge.</span></label>
+              <p class="hint">Needs the OmoBench companion. The bridge's own latency is inside every measured number and is never subtracted; bridged results say so.</p>
+            </div>
           </div>
-          <label class="check"><input id="windows-bridge" type="checkbox"><span>My model server runs on Windows, this panel runs in WSL. Use the experimental Windows bridge.</span></label>
-          <p class="hint">Enter the Windows server's IPv4 loopback address, for example http://127.0.0.1:1234. Requires the updated companion. No LAN listener or firewall change is needed. A bridged run <strong>can</strong> be submitted: because the server and this runner are different environments, you describe the serving machine yourself in step 03 — nothing WSL can see of the Windows host counts as evidence about it. The bridge's own latency is inside every measured number and is never subtracted, and every bridged result is labelled as such wherever it is shown.</p>
-          <label>Tokenizer source <span class="muted small">optional</span><input id="tokenizer" name="tokenizer" placeholder="Hugging Face repository or local tokenizer folder" spellcheck="false">
-            <span class="hint">Leave blank to use the server model identifier above. Set it when that identifier is a serving alias rather than a Hugging Face repository — an LM Studio alias such as <code>qwen/qwen3-vl-4b:3</code>, for example. The workload's prompts are built and counted with this tokenizer; it never changes which model your server serves, and it is not a claim about which weights are loaded.</span></label>
-          <details id="profile-brief" class="panel-fold" aria-label="What this profile does">
+          <div class="actions"><button id="connect-server" type="button">Connect</button><span id="connect-status" class="hint" role="status"></span></div>
+          <div id="model-choice" hidden>
+            <p class="field-title">Which model?</p>
+            <div id="model-choice-list" class="choice-list"></div>
+            <button id="model-manual-toggle" type="button" class="quiet">Enter a model ID instead</button>
+          </div>
+          <div id="model-manual" hidden>
+          <label>Server model identifier<input id="model" name="model" list="served-models" placeholder="Identifier your server reports" required spellcheck="false"><datalist id="served-models"></datalist><span class="hint">Exactly the string this server's API accepts, including any suffix. <strong>Check this server</strong> fills this list from the server's own <code>/v1/models</code> when it offers one.</span></label>
+          </div>
+
+          <section id="serving-confirm" class="identity" aria-labelledby="serving-confirm-title">
+            <h3 id="serving-confirm-title"><span class="step">02</span> Confirm the serving hardware</h3>
+            <p class="hint" id="serving-confirm-why">Where your server runs the model. A card being present is not proof it was used, so you confirm it.</p>
+            <div class="actions"><button id="serving-read" type="button" class="secondary">Read the serving hardware</button><span id="serving-read-status" class="hint" role="status"></span></div>
+            <dl class="kv" id="serving-host"></dl>
+            <p class="field-title">Where does the server run the model?</p>
+            <div id="placement-choice" class="choice-list">
+              <label class="check"><input type="radio" name="placement_choice" value="gpu-only"><span>On the graphics card (GPU)</span></label>
+              <label class="check"><input type="radio" name="placement_choice" value="cpu-gpu-offload"><span>Split between the card and the CPU</span></label>
+              <label class="check"><input type="radio" name="placement_choice" value="cpu-only"><span>On the CPU only</span></label>
+            </div>
+            <div id="card-choice" hidden>
+              <p class="field-title">Which card?</p>
+              <div id="card-choice-list" class="choice-list"></div>
+            </div>
+            <label id="split-detail-field" hidden>How the weights were split<input id="split-detail" placeholder="As your server reports it, e.g. 32 of 49 layers on GPU"></label>
+            <p class="hint" id="runner-memory-note"></p>
+            <label hidden>Server execution device<select id="execution-device" name="execution_device"><option value="cpu">CPU</option><option value="gpu">GPU (any vendor)</option></select></label>
+            <label class="check"><input id="device-confirmed" type="checkbox" required><span>I have checked in my server (its logs or hardware panel) that it really runs the model where I said.</span></label>
+          </section>
+
+          <section id="standard-test" class="identity" aria-labelledby="standard-test-title">
+            <h3 id="standard-test-title"><span class="step">03</span> Run a standard test</h3>
+            <p><strong id="profile-name">Standard chat</strong> <span class="hint" id="profile-summary">The same short chat workload everybody runs, so results compare.</span></p>
+            <details class="quiet-details"><summary>More tests</summary>
+              <label>Test<select id="profile" name="profile"></select></label>
+              <details id="profile-brief" class="panel-fold" aria-label="What this profile does">
             <summary>Benchmark profile details</summary>
             <p id="profile-detail"></p>
             <dl class="kv" id="profile-facts"></dl>
             <p id="profile-qualifies" class="hint"></p>
             <p id="profile-ceiling" class="hint"></p>
           </details>
-          <section id="identity-block" class="identity">
+            </details>
+            <details class="quiet-details" id="tokenizer-details"><summary>Tokenizer <span class="hint" id="tokenizer-summary"></span></summary>
+              <label>Tokenizer source <span class="muted small">optional</span><input id="tokenizer" name="tokenizer" placeholder="Hugging Face repository or local tokenizer folder" spellcheck="false">
+            <span class="hint">Leave blank to use the server model identifier above. Set it when that identifier is a serving alias rather than a Hugging Face repository — an LM Studio alias such as <code>qwen/qwen3-vl-4b:3</code>, for example. The workload's prompts are built and counted with this tokenizer; it never changes which model your server serves, and it is not a claim about which weights are loaded.</span></label>
+              <div class="actions"><button id="check-tokenizer" type="button" class="secondary">Check tokenizer</button><button id="load-tokenizer" type="button" class="secondary">Load tokenizer now</button></div>
+            </details>
+            <div class="actions"><button id="start-run" type="submit">Run standard test <span aria-hidden="true">↗</span></button><button id="test-connection" type="button" class="secondary">Check this server</button></div>
+            <p id="run-caution" class="hint" role="status" hidden></p>
+            <p id="connection-result" class="hint" role="status"></p>
+            <details class="panel-fold server-fold"><summary>Server check details</summary>
+              <ul class="status-checklist" id="server-check"></ul>
+            </details>
+            <details id="preflight" class="panel-fold preflight">
+            <summary>Before you start <span id="preflight-status" class="gate-count"></span></summary>
+            <p class="hint" id="preflight-local"></p>
+            <div class="gate" data-gate="run">
+              <h4>Running this benchmark <span class="gate-count" id="gate-count-run"></span></h4>
+              <p class="hint" id="gate-note-run"></p>
+              <ul class="status-checklist" id="gate-run"></ul>
+            </div>
+            <div class="gate" data-gate="package">
+              <h4>Packaging the evidence <span class="gate-count" id="gate-count-package"></span></h4>
+              <p class="hint" id="gate-note-package"></p>
+              <ul class="status-checklist" id="gate-package"></ul>
+            </div>
+            <div class="gate" data-gate="submit">
+              <h4>Submitting to the public registry <span class="gate-count" id="gate-count-submit"></span></h4>
+              <p class="hint" id="gate-note-submit"></p>
+              <ul class="status-checklist" id="gate-submit"></ul>
+            </div>
+            <div class="gate" data-gate="none" id="gate-none-block" hidden>
+              <h4>Recorded, but in nobody's way</h4>
+              <p class="hint">Facts worth knowing that stop nothing: things this evidence cannot establish, and costs it carries and declares.</p>
+              <ul class="status-checklist" id="gate-none"></ul>
+            </div>
+          </details>
+            <p id="tokenizer-result" class="hint" role="status"></p>
+          <div id="tokenizer-preflight" class="notice" hidden>
+            <p id="tokenizer-preflight-message"></p>
+            <ul id="tokenizer-preflight-checks" class="status-checklist"></ul>
+            <div id="tokenizer-suggestion" hidden>
+              <p id="tokenizer-suggestion-reason" class="hint"></p>
+              <div class="actions"><button id="tokenizer-use-suggestion" type="button" class="secondary">Use this tokenizer source</button></div>
+            </div>
+            <div id="tokenizer-download" hidden>
+              <p id="tokenizer-download-plan" class="hint"></p>
+              <div class="actions"><button id="tokenizer-download-confirm" type="button" class="secondary">Download the tokenizer files</button></div>
+            </div>
+          </div>
+          <details id="server-check-limits" hidden><summary>What these checks do not establish</summary><ul id="server-check-unknowns" class="hint"></ul></details>
+          </section>
+        </form>
+      </section>
+      <section id="run-panel" class="panel" hidden>
+        <div class="section-head"><div><span class="step">04</span><h2 id="run-title">Benchmark</h2></div><span id="run-status" class="pill"></span></div>
+        <p id="run-meta" class="muted"></p>
+        <p id="run-transport" class="notice" hidden></p>
+        <!-- The same dashboard component the guided recipes mount, with the
+             stages OmoBench actually observes against a server you run. -->
+        <div id="dashboard-mount"></div>
+        <div id="metrics" class="grid metrics" hidden></div>
+        <p id="local-note" class="notice" hidden>These are CPU measurements. Package and review them below the same way as a GPU run, or save a local report for your own records. A local report records the workload definition, the model configuration and the execution configuration separately, so a CPU-versus-GPU or machine-versus-machine comparison on the same workload is readable as exactly that.</p>
+        <div class="actions"><button id="download-summary" type="button" class="secondary" hidden>Save local report</button></div>
+        <p id="run-path" class="hint path"></p>
+      </section>
+      <section id="package-panel" class="panel" hidden>
+        <div class="section-head"><div><span class="step">05</span><h2>Review &amp; share</h2></div><span id="package-panel-device" class="pill">Evidence</span></div>
+        <section id="review-summary" class="review-summary" aria-labelledby="review-summary-title">
+          <h3 id="review-summary-title" class="visually-hidden">This run at a glance</h3>
+          <dl class="kv review-facts" id="review-facts"></dl>
+          <p id="review-readiness" class="review-readiness" role="status"></p>
+          <div class="actions">
+            <button id="detect-details" type="button">Detect details</button>
+            <span id="detect-status" class="hint" role="status"></span>
+          </div>
+          <div id="review-detected" class="notice" hidden>
+            <p><strong>Filled in for you</strong> <span class="hint">Each from the source named. Anything you had already typed was kept.</span></p>
+            <ul id="review-detected-list" class="status-checklist"></ul>
+          </div>
+          <div id="review-now" class="notice" hidden>
+            <p><strong>Read from the machine now</strong> <span class="hint">These describe the machine and server as they are now, not as they were recorded while the run was served. Confirm them to record them as your declaration for this run.</span></p>
+            <ul id="review-now-list" class="status-checklist"></ul>
+            <label class="check"><input id="review-now-confirmed" type="checkbox"><span>These still describe how this run was served.</span></label>
+            <div class="actions"><button id="review-now-apply" type="button" class="secondary" disabled>Use these for this run</button></div>
+          </div>
+          <div id="review-needed" hidden>
+            <p><strong>Still needed</strong></p>
+            <ul id="review-needed-list" class="status-checklist"></ul>
+          </div>
+          <details class="quiet-details"><summary>What this screen is for</summary>
+            <p class="hint"><strong>Save local report</strong>, above, needs none of this: it exports what this machine measured, for any model, with no sign-in. This screen prepares a <strong>community submission</strong>, which also needs the model's identity and eligibility, the exact weights you ran, the machine that served them, and a run that met the profile's acceptance thresholds. Packaging uses the existing CLI and registry validator, and nothing here relaxes either.</p>
+          </details>
+        </section>
+        <details id="review-model" class="quiet-details"><summary>Model identity and licence <span class="hint">Needed to share publicly</span></summary>
+        <section id="identity-block" class="identity">
             <h3>Which model is this?</h3>
             <p class="hint">Two different things, kept apart. Your server answers to whatever identifier it was configured with; the model has its own canonical identity. Nothing maps one to the other without you choosing it. A model not on the curated list can still be benchmarked, saved and submitted — it then carries its own licence and downloadability instead.</p>
             <div class="grid two">
@@ -147,122 +255,26 @@
             </div>
           </details>
           </section>
-
-          <label class="check"><input id="device-confirmed" type="checkbox" required><span>I have configured this device in my model server and confirmed inference actually runs there (in the server logs or telemetry).</span></label>
-          <p class="hint">Selecting CPU or GPU records your declaration about the server; it does not configure the server and does not prove which device ran inference. OmoBench's own Python dependencies say nothing about your server's device. Neither device rules a result out: CPU and GPU are equally publishable, and so is a server on Windows measured through the bridge. What a public submission needs is listed under <strong>What a public submission will also need</strong> below, before you start.</p>
-          <div class="actions"><button id="test-connection" type="button" class="secondary">Check this server</button><button id="check-tokenizer" type="button" class="secondary">Check tokenizer</button><button id="load-tokenizer" type="button" class="secondary">Load tokenizer now</button><button id="start-run" type="submit">Run benchmark <span aria-hidden="true">↗</span></button></div>
-          <p class="hint"><strong>Check tokenizer</strong> stays offline and only looks at the shape of the identifier and whether its files are already here. <strong>Load tokenizer now</strong> actually loads it in the interpreter the benchmark uses — which is where a run otherwise dies, before it sends a single request. It may contact huggingface.co to read the repository, and will tell you before it fetches anything. Model weights are never downloaded by either.</p>
-          <p id="run-caution" class="hint" role="status" hidden></p>
-          <p id="connection-result" class="hint" role="status"></p>
-          <details class="panel-fold server-fold"><summary>Server check details</summary>
-            <ul class="status-checklist" id="server-check"></ul>
-          </details>
-          <details id="preflight" class="panel-fold preflight">
-            <summary>Before you start <span id="preflight-status" class="gate-count"></span></summary>
-            <p class="hint" id="preflight-local"></p>
-            <div class="gate" data-gate="run">
-              <h4>Running this benchmark <span class="gate-count" id="gate-count-run"></span></h4>
-              <p class="hint" id="gate-note-run"></p>
-              <ul class="status-checklist" id="gate-run"></ul>
-            </div>
-            <div class="gate" data-gate="package">
-              <h4>Packaging the evidence <span class="gate-count" id="gate-count-package"></span></h4>
-              <p class="hint" id="gate-note-package"></p>
-              <ul class="status-checklist" id="gate-package"></ul>
-            </div>
-            <div class="gate" data-gate="submit">
-              <h4>Submitting to the public registry <span class="gate-count" id="gate-count-submit"></span></h4>
-              <p class="hint" id="gate-note-submit"></p>
-              <ul class="status-checklist" id="gate-submit"></ul>
-            </div>
-            <div class="gate" data-gate="none" id="gate-none-block" hidden>
-              <h4>Recorded, but in nobody's way</h4>
-              <p class="hint">Facts worth knowing that stop nothing: things this evidence cannot establish, and costs it carries and declares.</p>
-              <ul class="status-checklist" id="gate-none"></ul>
-            </div>
-          </details>
-          <p id="tokenizer-result" class="hint" role="status"></p>
-          <div id="tokenizer-preflight" class="notice" hidden>
-            <p id="tokenizer-preflight-message"></p>
-            <ul id="tokenizer-preflight-checks" class="status-checklist"></ul>
-            <div id="tokenizer-suggestion" hidden>
-              <p id="tokenizer-suggestion-reason" class="hint"></p>
-              <div class="actions"><button id="tokenizer-use-suggestion" type="button" class="secondary">Use this tokenizer source</button></div>
-            </div>
-            <div id="tokenizer-download" hidden>
-              <p id="tokenizer-download-plan" class="hint"></p>
-              <div class="actions"><button id="tokenizer-download-confirm" type="button" class="secondary">Download the tokenizer files</button></div>
-            </div>
+        <section id="custom-workload" class="identity" hidden aria-labelledby="custom-title">
+          <h3 id="custom-title">Your own model</h3>
+          <p class="hint">Benchmark anything you can serve. Submitting it publicly needs the same requirements a curated model meets &#8212; a published licence, weights anybody can obtain, text generation, and an immutable identity. OmoBench never downloads or executes anything from an arbitrary repository.</p>
+          <div class="grid two">
+            <label>Canonical model ID<input id="custom-model-id" spellcheck="false" placeholder="org/Model-7B"><span class="hint">The model&#8217;s own identity, not the alias your server answers to.</span></label>
+            <label>Publisher <span class="muted small">optional</span><input id="custom-publisher" spellcheck="false" placeholder="org"></label>
+            <label>Weights revision<input id="custom-revision" spellcheck="false" placeholder="commit SHA"><span class="hint">Immutable. Not <code>main</code>, <code>master</code> or <code>latest</code>. A content hash of the actual files works too.</span></label>
+            <label>Quantisation<input id="custom-quantisation" spellcheck="false" placeholder="Q4_K_M"></label>
+            <label>Runtime engine<input id="custom-runtime" spellcheck="false" placeholder="llama.cpp"></label>
+            <label>Runtime build<input id="custom-runtime-version" spellcheck="false" placeholder="b10621"></label>
+            <label>Licence<input id="custom-licence" spellcheck="false" placeholder="apache-2.0"><span class="hint">As its publisher states it.</span></label>
+            <label>Licence URL<input id="custom-licence-url" type="url" spellcheck="false" placeholder="https://&#8230;"><span class="hint">Where a reviewer reads it.</span></label>
+            <label>Weights source<input id="custom-source" type="url" spellcheck="false" placeholder="https://huggingface.co/org/Model-7B"></label>
+            <label>Tokenizer source <span class="muted small">optional</span><input id="custom-tokenizer" spellcheck="false" placeholder="Leave blank to use the model ID"></label>
+            <label>Base model <span class="muted small">optional</span><input id="custom-base-model" spellcheck="false" placeholder="For a fine-tune"><span class="hint">A fine-tune is its own model and is never filed under its base.</span></label>
           </div>
-          <details id="server-check-limits" hidden><summary>What these checks do not establish</summary><ul id="server-check-unknowns" class="hint"></ul></details>
-        </form>
-      </section>
-      <section id="run-panel" class="panel" hidden>
-        <div class="section-head"><div><span class="step">04</span><h2 id="run-title">Benchmark</h2></div><span id="run-status" class="pill"></span></div>
-        <p id="run-meta" class="muted"></p>
-        <p id="run-transport" class="notice" hidden></p>
-        <!-- The same dashboard component the guided recipes mount, with the
-             stages OmoBench actually observes against a server you run. -->
-        <div id="dashboard-mount"></div>
-        <div id="metrics" class="grid metrics" hidden></div>
-        <p id="local-note" class="notice" hidden>These are CPU measurements. Package and review them below the same way as a GPU run, or save a local report for your own records. A local report records the workload definition, the model configuration and the execution configuration separately, so a CPU-versus-GPU or machine-versus-machine comparison on the same workload is readable as exactly that.</p>
-        <div class="actions"><button id="download-summary" type="button" class="secondary" hidden>Save local report</button></div>
-        <p id="run-path" class="hint path"></p>
-      </section>
-      <section id="package-panel" class="panel" hidden>
-        <div class="section-head"><div><span class="step">05</span><h2>Review &amp; submit</h2></div><span id="package-panel-device" class="pill">Evidence</span></div>
-        <section id="review-summary" class="review-summary" aria-labelledby="review-summary-title">
-          <h3 id="review-summary-title" class="visually-hidden">This run at a glance</h3>
-          <dl class="kv review-facts" id="review-facts"></dl>
-          <p id="review-readiness" class="review-readiness" role="status"></p>
-          <div class="actions">
-            <button id="detect-details" type="button">Detect details</button>
-            <span id="detect-status" class="hint" role="status"></span>
-          </div>
-          <div id="review-detected" class="notice" hidden>
-            <p><strong>Filled in for you</strong> <span class="hint">Each from the source named. Anything you had already typed was kept.</span></p>
-            <ul id="review-detected-list" class="status-checklist"></ul>
-          </div>
-          <div id="review-now" class="notice" hidden>
-            <p><strong>Read from the machine now</strong> <span class="hint">These describe the machine and server as they are now, not as they were recorded while the run was served. Confirm them to record them as your declaration for this run.</span></p>
-            <ul id="review-now-list" class="status-checklist"></ul>
-            <label class="check"><input id="review-now-confirmed" type="checkbox"><span>These still describe how this run was served.</span></label>
-            <div class="actions"><button id="review-now-apply" type="button" class="secondary" disabled>Use these for this run</button></div>
-          </div>
-          <div id="review-needed" hidden>
-            <p><strong>Still needed</strong></p>
-            <ul id="review-needed-list" class="status-checklist"></ul>
-          </div>
-          <details class="quiet-details"><summary>What this screen is for</summary>
-            <p class="hint"><strong>Save local report</strong>, above, needs none of this: it exports what this machine measured, for any model, with no sign-in. This screen prepares a <strong>community submission</strong>, which also needs the model's identity and eligibility, the exact weights you ran, the machine that served them, and a run that met the profile's acceptance thresholds. Packaging uses the existing CLI and registry validator, and nothing here relaxes either.</p>
-          </details>
+          <label class="check"><input id="custom-downloadable" type="checkbox"><span>Anybody can download these weights, accepting the publisher&#8217;s terms if there are any.</span></label>
+          <p class="hint">Private weights can be benchmarked and kept locally; they cannot be published here, and the panel says so rather than refusing the run.</p>
+          <p id="custom-eligibility" class="notice" role="status" hidden></p>
         </section>
-        <details id="review-destination" class="quiet-details"><summary>Destination, GitHub sign-in and permissions</summary>
-<div class="community-submission">
-            <label>Submission destination<select id="submission-mode">
-              <option value="community">OmoBench community registry</option>
-              <option value="origin">Checkout origin, existing GitHub CLI authentication</option>
-            </select></label>
-            <section id="github-auth" class="github-auth" aria-labelledby="github-auth-title">
-              <h3 id="github-auth-title">Share with the community</h3>
-              <p id="github-auth-status" role="status">Checking sign-in availability…</p>
-              <div id="github-device" class="github-device" hidden>
-                <span>Your one-time code</span><code id="github-code" tabindex="0"></code>
-                <a id="github-verify" href="https://github.com/login/device" target="_blank" rel="noopener noreferrer">Enter this code on GitHub ↗</a>
-                <p class="hint">Use only the code requested in this panel. Signing in does not upload your results.</p>
-              </div>
-              <div class="actions">
-                <button id="github-sign-in" type="button" class="secondary" disabled>Sign in with GitHub</button>
-                <button id="github-cancel" type="button" class="secondary" hidden>Cancel sign-in</button>
-                <button id="github-sign-out" type="button" class="secondary" hidden>Sign out</button>
-              </div>
-              <details><summary>Permissions and privacy</summary>
-                <p>GitHub's public_repo permission allows writing to public repositories. It does not request access to private repositories. OmoBench uses it for the public fork and submission you review below.</p>
-                <p>Your GitHub credential stays in this panel process's memory, for at most eight hours. Signing out or stopping the panel forgets it locally. It does not revoke the app on GitHub.</p>
-                <a id="github-revoke" target="_blank" rel="noopener noreferrer" hidden>Review or revoke access on GitHub ↗</a>
-              </details>
-            </section>
-          </div>
         </details>
         <details id="review-all-details" class="quiet-details"><summary>All details <span class="hint">Every field, for corrections</span></summary>
         <ul class="status-checklist" id="publication-checklist"></ul>
@@ -351,6 +363,33 @@
           <summary>What this evidence says <span class="hint">Every recorded fact, and where it came from</span></summary>
           <p class="hint" id="evidence-qualifications"></p>
           <div id="evidence-sections"></div>
+        </details>
+        <details id="review-destination" class="quiet-details" open><summary>Sharing needs GitHub sign-in</summary>
+<div class="community-submission">
+            <label>Submission destination<select id="submission-mode">
+              <option value="community">OmoBench community registry</option>
+              <option value="origin">Checkout origin, existing GitHub CLI authentication</option>
+            </select></label>
+            <section id="github-auth" class="github-auth" aria-labelledby="github-auth-title">
+              <h3 id="github-auth-title">Share with the community</h3>
+              <p id="github-auth-status" role="status">Checking sign-in availability…</p>
+              <div id="github-device" class="github-device" hidden>
+                <span>Your one-time code</span><code id="github-code" tabindex="0"></code>
+                <a id="github-verify" href="https://github.com/login/device" target="_blank" rel="noopener noreferrer">Enter this code on GitHub ↗</a>
+                <p class="hint">Use only the code requested in this panel. Signing in does not upload your results.</p>
+              </div>
+              <div class="actions">
+                <button id="github-sign-in" type="button" class="secondary" disabled>Sign in with GitHub</button>
+                <button id="github-cancel" type="button" class="secondary" hidden>Cancel sign-in</button>
+                <button id="github-sign-out" type="button" class="secondary" hidden>Sign out</button>
+              </div>
+              <details><summary>Permissions and privacy</summary>
+                <p>GitHub's public_repo permission allows writing to public repositories. It does not request access to private repositories. OmoBench uses it for the public fork and submission you review below.</p>
+                <p>Your GitHub credential stays in this panel process's memory, for at most eight hours. Signing out or stopping the panel forgets it locally. It does not revoke the app on GitHub.</p>
+                <a id="github-revoke" target="_blank" rel="noopener noreferrer" hidden>Review or revoke access on GitHub ↗</a>
+              </details>
+            </section>
+          </div>
         </details>
         <button id="prepare-button" class="secondary" type="button" hidden>Review submission files</button>
         <div id="submission-preview" hidden>

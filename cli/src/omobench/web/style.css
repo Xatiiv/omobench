@@ -84,3 +84,6 @@ pre{font-size:11px;background:#080f1c}
 .panel-fold>summary{padding:8px 0;font-weight:600}
 .panel-fold[open]{padding-bottom:10px}
 .server-fold:has(#server-check:empty){display:none}
+/* Connect → hardware → test: one column of choices. */
+.choice-list{display:grid;gap:2px;margin:4px 0 8px}.choice-list .check{margin:6px 0}
+#serving-confirm h3 .step,#standard-test h3 .step{margin-right:8px}

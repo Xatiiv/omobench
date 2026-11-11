@@ -464,6 +464,44 @@ def lmstudio_model_metadata(endpoint: str, model: str, *, timeout: float = 5.0,
     return facts if len(facts) > 1 else None
 
 
+def _serving_at_start(value) -> dict | None:
+    """The serving hardware a person confirmed before a run, bounded.
+
+    Recorded as their declaration: it says what they confirmed and, where a
+    companion probe or the server informed it, that it did. It is never turned
+    into detected evidence, and nothing is added that was not sent.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise UIError("The confirmed serving hardware must be an object.")
+    if len(json.dumps(value)) > 16384:
+        raise UIError("The confirmed serving hardware is too large.")
+    placement = value.get("placement") or {}
+    mode = placement.get("mode")
+    if mode not in {"cpu-only", "gpu-only", "cpu-gpu-offload"}:
+        raise UIError("Say where the server ran the model: CPU, GPU, or split between them.")
+    accelerators = value.get("accelerators") or []
+    if not isinstance(accelerators, list) or len(accelerators) > 16:
+        raise UIError("The confirmed accelerators must be a short list.")
+    for device in accelerators:
+        if not isinstance(device, dict) or not isinstance(device.get("model"), str):
+            raise UIError("Each confirmed accelerator needs at least a model name.")
+        if device.get("role") not in {"inference", "present-not-used", "unknown"}:
+            raise UIError("Each confirmed accelerator says what it did.")
+    if mode != "cpu-only" and not any(d.get("role") == "inference" for d in accelerators):
+        raise UIError("Say which card ran the model.")
+    host = value.get("host") or {}
+    return {
+        "placement": {"mode": mode, **({"detail": str(placement["detail"])[:200]}
+                                       if placement.get("detail") else {})},
+        "accelerators": accelerators,
+        "host": {key: host[key] for key in ("os", "cpu", "ram_gb") if host.get(key) not in (None, "")},
+        "informed_by": [str(source)[:80] for source in (value.get("informed_by") or [])][:4],
+        "confirmed_at": datetime.now(UTC).isoformat(),
+    }
+
+
 class Controller:
     def __init__(self, root: Path):
         self.root = root.resolve()
@@ -652,8 +690,38 @@ class Controller:
             with self.lock:
                 self.busy = False
 
+    def served_model_list(self, data: dict) -> dict:
+        """The models the server says it serves, quickly, for Connect.
+
+        Only /v1/models, plus LM Studio's own description of each model where
+        that server offers one. No runner import, no streaming request: those
+        belong to "Check this server", which says what they establish. The
+        address is held to the same loopback-only rule as every other check.
+        """
+        endpoint = endpoint_origin(text_field(data, "endpoint"))
+        with self.lock:
+            if self.busy or self.closing:
+                raise UIError("Wait for the active operation before connecting.", 409)
+            self.busy = True
+        try:
+            with self._bridge_request({**data, "endpoint": endpoint}) as (checked, headers):
+                extra = {"_headers": headers} if headers else {}
+                listing = served_models(checked["endpoint"], **extra)
+                models = listing.get("models") or []
+                metadata = {}
+                for model in models[:8]:
+                    facts = lmstudio_model_metadata(checked["endpoint"], model, **extra)
+                    if facts:
+                        metadata[model] = facts
+                return {"models": models, "reachable": bool(listing.get("reachable", True)),
+                        "detail": listing.get("detail"), "server_metadata": metadata}
+        finally:
+            with self.lock:
+                self.busy = False
+
     def start(self, data: dict) -> dict:
         config = run_config(data)
+        serving_at_start = _serving_at_start(data.get("serving_at_start"))
         transport = None
         if config["windows_bridge"]:
             from .bridge import provenance
@@ -676,6 +744,11 @@ class Controller:
                    "summary": None, "error": None, "validation": None, "submission": None}
             if transport:
                 job["transport"] = transport
+            if serving_at_start:
+                # What the person confirmed about the serving machine before
+                # this run started, recorded with it. Review can reuse it as
+                # the run's own record, unlike a probe read afterwards.
+                job["serving_at_start"] = serving_at_start
             self.jobs[job_id] = job
             self._save(job)
             telemetry_dir = directory.relative_to(self.root).as_posix() + "/telemetry"
@@ -1938,6 +2011,8 @@ class UIHandler(BaseHTTPRequestHandler):
                 return self._json(controller.proposal_status(data))
             if self.path == "/api/weight-identity":
                 return self._json(controller.weight_identity(data))
+            if self.path == "/api/served-models":
+                return self._json(controller.served_model_list(data))
             if self.path == "/api/server-check":
                 return self._json(controller.server_check(data))
             if self.path == "/api/runs":
