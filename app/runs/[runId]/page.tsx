@@ -201,8 +201,8 @@ function DemoRunDetails({ result }: Readonly<{ result: DemoResult }>) {
       }
     >
       <section className="border-b border-white/10 py-14">
-        <Link className="font-mono text-xs text-amber-300 transition hover:text-amber-200 hover:underline" href="/#compare">
-          ← Back to demonstration
+        <Link className="font-mono text-xs text-amber-300 transition hover:text-amber-200 hover:underline" href="/compare">
+          ← Compare setups
         </Link>
         <p className="mt-8 font-mono text-xs uppercase tracking-[0.22em] text-amber-300">Run record preview</p>
         <h1 className="mt-3 max-w-4xl text-4xl font-semibold tracking-[-0.04em] sm:text-5xl">
