@@ -127,7 +127,7 @@ def _tokenizer(declaration: Any, *, served_model_id: str | None) -> dict[str, An
                 "identity": None}
     if not isinstance(declaration, dict):
         raise ProvenanceError("tokenizer must be an object.")
-    unexpected = set(declaration) - {"source", "kind", "loaded", "identity"}
+    unexpected = set(declaration) - {"source", "kind", "loaded", "identity", "revision"}
     if unexpected:
         raise ProvenanceError(f"Unsupported tokenizer field(s): {', '.join(sorted(unexpected))}.")
     source = declaration.get("source")
@@ -148,9 +148,17 @@ def _tokenizer(declaration: Any, *, served_model_id: str | None) -> dict[str, An
                                        or not isinstance(vocabulary, int) or vocabulary < 0):
             raise ProvenanceError("tokenizer.identity.vocabulary_size must be a whole number.")
         identity = {"class": identity.get("class"), "vocabulary_size": vocabulary}
-    return {"source": source.strip(), "kind": kind, "loaded": loaded,
-            # Never derived from anything above: nothing here can establish it.
-            "matches_served_weights": "not-verifiable-here", "identity": identity}
+    recorded = {"source": source.strip(), "kind": kind, "loaded": loaded,
+                # Never derived from anything above: nothing here can establish it.
+                "matches_served_weights": "not-verifiable-here", "identity": identity}
+    # Which bytes loaded, when the panel read it from what it loaded. Kept out
+    # entirely otherwise, rather than written as null, so it marks a 1.2 fact.
+    revision = declaration.get("revision")
+    if revision is not None:
+        if not isinstance(revision, str) or not revision.strip() or len(revision) > 200:
+            raise ProvenanceError("tokenizer.revision must be a commit or local-sha256:... identity.")
+        recorded["revision"] = revision.strip()
+    return recorded
 
 
 def build(
@@ -257,7 +265,13 @@ def build(
     # model records exactly what it recorded before, under the version it
     # recorded it under, so nothing already published changes meaning and
     # nothing acquires a field nobody collected.
-    schema_version = "1.2" if eligibility is not None else SCHEMA_VERSION
+    host = ((environment or {}).get("serving") or {}).get("host") or {}
+    newer_facts = ("revision" in model_fields["tokenizer"]
+                   or any(name in host for name in ("cpu_cores", "cpu_threads", "ram_installed_gb")))
+    # The same rule extends to facts 1.2 added later: a tokenizer revision and
+    # the serving CPU's cores, threads and installed memory are 1.2 facts, so a
+    # result carrying one is 1.2, and one carrying none is unchanged.
+    schema_version = "1.2" if eligibility is not None or newer_facts else SCHEMA_VERSION
     return {"schema_version": schema_version, "environment": environment,
             "hardware": hardware, "model_fields": model_fields, "proposal": proposal}
 

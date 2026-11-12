@@ -26,7 +26,9 @@ export type ServingEnvironment = {
   accelerators: ServingAccelerator[];
   application: { name: string; provenance: Provenance; version: string } | null;
   engine: { name: string; provenance: Provenance; version: string | null };
-  host: { cpu: Fact; os: Fact; ramGb: NumericFact };
+  // cpuCores, cpuThreads and ramInstalledGb are 1.2 facts. Null when the
+  // result does not record them, which is "not recorded", never zero.
+  host: { cpu: Fact; cpuCores: NumericFact | null; cpuThreads: NumericFact | null; os: Fact; ramGb: NumericFact; ramInstalledGb: NumericFact | null };
   placement: { detail: string | null; mode: PlacementMode };
   placementProvenance: Provenance;
   relationship: ServingRelationship;
@@ -90,6 +92,8 @@ export type TokenizerIdentity = {
   className: string | null;
   kind: "huggingface" | "local-directory" | "served-model-default";
   loaded: "loaded-before-run" | "not-checked";
+  // Which bytes loaded: a cached snapshot commit or local-sha256:<hex>. 1.2.
+  revision: string | null;
   source: string;
   vocabularySize: number | null;
 };
@@ -386,6 +390,9 @@ function readServing(environment: JsonObject, sourcePath: string): ServingEnviro
       cpu: readFact(host.cpu, "serving cpu", sourcePath),
       os: readFact(host.os, "serving os", sourcePath),
       ramGb: readNumericFact(host.ram_gb, "serving ram_gb", sourcePath),
+      cpuCores: host.cpu_cores === undefined ? null : readNumericFact(host.cpu_cores, "serving cpu_cores", sourcePath),
+      cpuThreads: host.cpu_threads === undefined ? null : readNumericFact(host.cpu_threads, "serving cpu_threads", sourcePath),
+      ramInstalledGb: host.ram_installed_gb === undefined ? null : readNumericFact(host.ram_installed_gb, "serving ram_installed_gb", sourcePath),
     },
     placement: {
       detail: optionalTextField(placement, "detail", sourcePath),
@@ -462,6 +469,7 @@ function readTokenizer(model: JsonObject, sourcePath: string): TokenizerIdentity
     className: isObject(identity) ? optionalTextField(identity, "class", sourcePath) : null,
     kind: enumField(tokenizer.kind, ["huggingface", "local-directory", "served-model-default"] as const, "tokenizer kind", sourcePath),
     loaded: enumField(tokenizer.loaded, ["loaded-before-run", "not-checked"] as const, "tokenizer loaded", sourcePath),
+    revision: optionalTextField(tokenizer, "revision", sourcePath),
     source: textField(tokenizer, "source", sourcePath),
     vocabularySize: typeof vocabulary === "number" && Number.isInteger(vocabulary) && vocabulary >= 0 ? vocabulary : null,
   };

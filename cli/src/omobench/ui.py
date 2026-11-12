@@ -522,6 +522,10 @@ class Controller:
         # What the companion last read on the serving machine. Session-only: a
         # detection is a reading of a machine at a time, not a saved fact.
         self.last_serving_probe: dict | None = None
+        # Tokenizers this panel loaded and used, keyed by (served model,
+        # source). A run records the entry for its own pair, so a check for a
+        # different model can never vouch for it.
+        self.verified_tokenizers: dict[tuple[str, str], dict] = {}
         # The last server and tokenizer checks, so the workflow can say what was
         # established rather than asking the contributor to remember. Both are
         # session-only and both record which address or source they describe, so
@@ -690,6 +694,170 @@ class Controller:
             with self.lock:
                 self.busy = False
 
+    # -- where the model files are ----------------------------------------------
+
+    @property
+    def _settings_path(self) -> Path:
+        return self.storage / "settings.json"
+
+    def settings(self) -> dict:
+        try:
+            stored = json.loads(self._settings_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            stored = {}
+        root = stored.get("model_root") if isinstance(stored, dict) else None
+        readable = None
+        if root:
+            from . import local_models
+            try:
+                readable = local_models.to_local_path(root).is_dir()
+            except ValueError:
+                readable = False
+        return {"model_root": root, "model_root_readable": readable}
+
+    def update_settings(self, data: dict) -> dict:
+        """Remember the folder the model files are in. A Windows path is kept as
+        typed and read through WSL's mount of the same drive."""
+        from . import local_models
+        root = text_field(data, "model_root", optional=True)
+        if root:
+            try:
+                local = local_models.to_local_path(root)
+            except ValueError as error:
+                raise UIError(str(error)) from error
+            if not local.is_dir():
+                raise UIError(f"{root} is not a folder this panel can read ({local}).")
+        self._settings_path.parent.mkdir(parents=True, exist_ok=True)
+        self._settings_path.write_text(json.dumps({"model_root": root or None}, indent=2) + "\n",
+                                       encoding="utf-8")
+        return self.settings()
+
+    def _model_root(self) -> Path | None:
+        from . import local_models
+        root = self.settings().get("model_root")
+        if not root:
+            return None
+        try:
+            local = local_models.to_local_path(root)
+        except ValueError:
+            return None
+        return local if local.is_dir() else None
+
+    def _choices(self):
+        from .model_resolution import ChoiceStore
+        return ChoiceStore(self.storage / "tokenizer-choices.json")
+
+    def model_resolve(self, data: dict) -> dict:
+        """The tokenizer and model files a served identifier refers to."""
+        from . import model_resolution
+        served = text_field(data, "served_model_id")
+        metadata = data.get("server_metadata")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise UIError("server_metadata must be an object.")
+        return model_resolution.resolve(
+            served, server_metadata=metadata, model_root=self._model_root(),
+            choices=self._choices(), catalog=self.catalog_models())
+
+    def identify_weights(self, job_id: str, data: dict) -> dict:
+        """Fingerprint the exact model file(s) a run used, outside the run.
+
+        Three answers. The files recorded when the run started, unchanged since:
+        fingerprinted and called verified. Files a person chose: fingerprinted
+        only once they confirm, and called chosen rather than verified. Neither:
+        the candidates in the model folder, for the person to choose from.
+        """
+        from . import local_models
+        from .model_identity import ModelIdentityError, manifest_revision, weight_manifest
+
+        with self.lock:
+            job = dict(self._get(job_id))
+        root = self._model_root()
+        at_start = job.get("model_files_at_start") or None
+        chosen = data.get("files")
+        if chosen is None and at_start:
+            unchanged, why = local_models.identity_unchanged(at_start.get("files") or [])
+            if not unchanged:
+                return {"state": "changed", "message": (
+                    f"{why} The file this run used cannot be fingerprinted as it was then, so "
+                    "nothing is attached. Choose the file again only if you know it is the same "
+                    "model.")}
+            paths = [Path(entry["path"]) for entry in at_start["files"]]
+            basis = "recorded-at-run-start"
+        elif chosen is not None:
+            if root is None:
+                raise UIError("Set the folder your model files are in first.")
+            if not isinstance(chosen, list) or not chosen or len(chosen) > 128 or any(
+                    not isinstance(name, str) or not name for name in chosen):
+                raise UIError("Choose the model file(s) by their place in the model folder.")
+            if data.get("confirm") is not True:
+                raise UIError("Confirm that this is the file the run used.")
+            paths = []
+            for name in chosen:
+                path = (root / name).resolve()
+                if not path.is_relative_to(root.resolve()) or not path.is_file():
+                    raise UIError(f"{name} is not a file in the model folder.")
+                paths.append(path)
+            basis = "chosen-by-you"
+        else:
+            if root is None:
+                return {"state": "no-root", "message": "Set the folder your model files are in, "
+                                                       "then OmoBench can find the file this run used."}
+            quantization = (job.get("server_metadata") or {}).get("quantization")
+            found = local_models.find_model_files(root, job.get("model") or "", quantization=quantization)
+            return {**found, "match": found.get("state"), "state": "choose",
+                    "root": self.settings()["model_root"]}
+
+        cache = local_models.FingerprintCache(self.storage / "weights-fingerprints.json")
+        cached = cache.get(paths)
+        if cached:
+            manifest, revision, reused = cached["manifest"], cached["revision"], True
+        else:
+            try:
+                manifest = weight_manifest(paths, root=paths[0].parent)
+            except ModelIdentityError as error:
+                raise UIError(str(error)) from error
+            revision = manifest_revision(manifest)
+            cache.put(paths, manifest, revision)
+            reused = False
+        return {"state": "identified", "verified": basis == "recorded-at-run-start", "basis": basis,
+                "manifest": manifest, "revision": revision, "reused_fingerprint": reused,
+                "files": [path.name for path in paths],
+                "bytes": sum(path.stat().st_size for path in paths)}
+
+    def _model_files_at_start(self, files) -> dict | None:
+        """The model files' identity -- path, size, modification time -- when
+        the run starts. No byte is read: hashing waits until packaging."""
+        if not files:
+            return None
+        from . import local_models
+        root = self._model_root()
+        if root is None or not isinstance(files, list) or len(files) > 128:
+            return None
+        paths = []
+        for name in files:
+            if not isinstance(name, str):
+                return None
+            path = (root / name).resolve()
+            if not path.is_relative_to(root.resolve()) or not path.is_file():
+                return None
+            paths.append(path)
+        return {"root": self.settings()["model_root"], "files": local_models.file_identity(paths),
+                "recorded_at": datetime.now(UTC).isoformat()}
+
+    def _probe_now(self) -> dict | None:
+        """The companion's hardware probe, read now. None when unavailable."""
+        from .bridge import helper_path
+        from .serving_metadata import HARDWARE_PROBE_KIND
+        try:
+            completed = subprocess.run([helper_path(), "--hardware-probe-v1"],
+                                       capture_output=True, text=True, timeout=60)
+            document = json.loads(completed.stdout) if completed.returncode == 0 else None
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return None
+        if not isinstance(document, dict) or document.get("kind") != HARDWARE_PROBE_KIND:
+            return None
+        return document
+
     def served_model_list(self, data: dict) -> dict:
         """The models the server says it serves, quickly, for Connect.
 
@@ -722,6 +890,14 @@ class Controller:
     def start(self, data: dict) -> dict:
         config = run_config(data)
         serving_at_start = _serving_at_start(data.get("serving_at_start"))
+        # Captured now, before the timed run, so the run carries what served it.
+        model_files_at_start = self._model_files_at_start(data.get("model_files"))
+        hardware_at_start = None
+        if config["windows_bridge"]:
+            probe = self._probe_now()
+            if probe:
+                hardware_at_start = {**probe, "captured_at": datetime.now(UTC).isoformat()}
+        server_metadata = data.get("server_metadata") if isinstance(data.get("server_metadata"), dict) else None
         transport = None
         if config["windows_bridge"]:
             from .bridge import provenance
@@ -749,6 +925,18 @@ class Controller:
                 # this run started, recorded with it. Review can reuse it as
                 # the run's own record, unlike a probe read afterwards.
                 job["serving_at_start"] = serving_at_start
+            if hardware_at_start:
+                job["hardware_at_start"] = hardware_at_start
+            if model_files_at_start:
+                job["model_files_at_start"] = model_files_at_start
+            if server_metadata:
+                job["server_metadata"] = {key: server_metadata.get(key) for key in (
+                    "quantization", "arch", "compatibility_type", "engine", "publisher")
+                    if server_metadata.get(key)}
+            check = self.verified_tokenizers.get(
+                (config["model"], config.get("tokenizer") or config["model"]))
+            if check:
+                job["tokenizer_check"] = check
             self.jobs[job_id] = job
             self._save(job)
             telemetry_dir = directory.relative_to(self.root).as_posix() + "/telemetry"
@@ -1448,6 +1636,22 @@ class Controller:
             with self.lock:
                 self.busy = False
         document = report.as_dict()
+        model = text_field(data, "model", optional=True) or source
+        if document.get("ok"):
+            entry = {"source": document["source"], "revision": document.get("revision"),
+                     "identity": document.get("identity"), "encoded_tokens": document.get("encoded_tokens"),
+                     "network": network, "kind": ("local-directory" if Path(document["source"]).is_dir()
+                                                   else "huggingface"),
+                     "verified_at": datetime.now(UTC).isoformat()}
+            with self.lock:
+                self.verified_tokenizers[(model, document["source"])] = entry
+            key = text_field(data, "identity_key", optional=True)
+            if key:
+                # Remembered only once it has loaded and encoded, so a choice
+                # that never worked is never offered again as one that did.
+                self._choices().put(key, document["source"], revision=document.get("revision"),
+                                    basis=text_field(data, "basis", optional=True) or "verified")
+        document["verified_for"] = model if document.get("ok") else None
         with self.lock:
             self.last_tokenizer_report = document
         return document
@@ -1627,7 +1831,19 @@ class Controller:
         served = text_field(data, "served_model_id", optional=True)
         if served:
             declaration["served_model_id"] = served
-        if data.get("probe"):
+        if data.get("probe") == "run":
+            # The probe the companion took when this run started: read on the
+            # serving machine, at the time it served, so it is detected evidence
+            # of this run in a way a probe read today is not.
+            captured = job.get("hardware_at_start")
+            if not captured:
+                raise UIError("This run did not capture its serving hardware when it started. "
+                              "Describe the serving machine yourself instead.")
+            declaration.setdefault("serving", {})["probe"] = {
+                key: captured[key] for key in ("kind", "os", "cpu", "cpu_cores", "cpu_threads",
+                                               "ram_gb", "ram_installed_gb", "accelerators")
+                if key in captured}
+        elif data.get("probe"):
             # The page asks for the probe by name; it never supplies one. What
             # is recorded as detected is what this panel read for itself, not a
             # document that made a round trip through a browser.
@@ -1656,7 +1872,15 @@ class Controller:
         else:
             declaration.setdefault("serving", {})
             declaration["serving"].setdefault("relationship", "same-host")
-        if job.get("tokenizer") and "tokenizer" not in declaration:
+        check = job.get("tokenizer_check")
+        if check and not isinstance(data.get("tokenizer"), dict):
+            # Loaded and used to encode a sample in the runner's interpreter
+            # before this run: recorded as that, with the revision that loaded.
+            declaration["tokenizer"] = {
+                "source": check["source"], "kind": check.get("kind") or "huggingface",
+                "loaded": "loaded-before-run", "identity": check.get("identity"),
+                **({"revision": check["revision"]} if check.get("revision") else {})}
+        elif job.get("tokenizer") and "tokenizer" not in declaration:
             declaration["tokenizer"] = {
                 "source": job["tokenizer"], "kind": "huggingface", "loaded": "not-checked"}
         return declaration
@@ -1936,6 +2160,8 @@ class UIHandler(BaseHTTPRequestHandler):
                 return self._json(controller.github_auth.snapshot())
             if self.path == "/api/setup":
                 return self._json(controller.setup())
+            if self.path == "/api/settings":
+                return self._json(controller.settings())
             if self.path == "/api/runs":
                 return self._json(controller.listing())
             match = re.fullmatch(r"/api/runs/(job-[a-f0-9]{16}|saved-job-[a-f0-9]{16})/evidence", self.path)
@@ -2013,6 +2239,13 @@ class UIHandler(BaseHTTPRequestHandler):
                 return self._json(controller.weight_identity(data))
             if self.path == "/api/served-models":
                 return self._json(controller.served_model_list(data))
+            if self.path == "/api/settings":
+                return self._json(controller.update_settings(data))
+            if self.path == "/api/model-resolve":
+                return self._json(controller.model_resolve(data))
+            match = re.fullmatch(r"/api/runs/(job-[a-f0-9]{16})/weights", self.path)
+            if match:
+                return self._json(controller.identify_weights(match[1], data))
             if self.path == "/api/server-check":
                 return self._json(controller.server_check(data))
             if self.path == "/api/runs":

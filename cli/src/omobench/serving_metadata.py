@@ -336,7 +336,7 @@ def build_environment(
     host = declaration.get("host") or {}
     if not isinstance(host, dict):
         raise ServingMetadataError("host must be an object.")
-    unexpected = set(host) - {"os", "cpu", "ram_gb"}
+    unexpected = set(host) - {"os", "cpu", "ram_gb", "cpu_cores", "cpu_threads", "ram_installed_gb"}
     if unexpected:
         raise ServingMetadataError(f"Unsupported host field(s): {', '.join(sorted(unexpected))}.")
 
@@ -366,6 +366,15 @@ def build_environment(
         "placement": _placement(declaration),
         "runtime": _runtime(declaration),
     }
+    # Cores, threads and installed memory are recorded when something said
+    # them -- a probe read at run start, or the person -- and are otherwise
+    # left out rather than written as unknown, so a result that never
+    # collected them does not change shape.
+    for name, label in (("cpu_cores", "Serving CPU cores"), ("cpu_threads", "Serving CPU threads"),
+                        ("ram_installed_gb", "Installed serving RAM")):
+        if host.get(name) is not None or (probe or {}).get(name) is not None:
+            serving["host"][name] = _declared_fact(host.get(name), (probe or {}).get(name),
+                                                   label, number=True)
     return {
         "metadata_version": METADATA_VERSION,
         "relationship": relationship,

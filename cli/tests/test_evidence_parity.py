@@ -96,6 +96,26 @@ class EvidenceParityTests(unittest.TestCase):
         document["model"]["revision"] = "sha256-manifest:" + "d" * 64
         self.assert_same(document)
 
+    def test_cores_installed_memory_and_tokenizer_revision_read_the_same_in_both(self) -> None:
+        """The 1.2 facts a run-start probe and a verified tokenizer add."""
+        host = {**BRIDGED["environment"]["serving"]["host"],
+                "cpu_cores": {"value": 8, "provenance": "detected"},
+                "cpu_threads": {"value": 16, "provenance": "detected"},
+                "ram_installed_gb": {"value": 32.0, "provenance": "detected"}}
+        environment = {**BRIDGED["environment"],
+                       "serving": {**BRIDGED["environment"]["serving"], "host": host}}
+        tokenizer = {**(BRIDGED["model"].get("tokenizer") or {
+            "source": "Qwen/Qwen3-4B", "kind": "huggingface", "loaded": "loaded-before-run",
+            "matches_served_weights": "not-verifiable-here", "identity": None}),
+            "revision": "0123456789abcdef0123456789abcdef01234567"}
+        document = {**BRIDGED, "schema_version": "1.2", "environment": environment,
+                    "model": {**BRIDGED["model"], "tokenizer": tokenizer}}
+        self.assert_same(document)
+        rows = {row["label"]: row["value"] for section in evidence.summarize(document)["sections"]
+                for row in section["rows"]}
+        self.assertEqual(rows["Serving CPU cores"], "8 physical cores · 16 threads")
+        self.assertEqual(rows["Installed memory"], "32 GB")
+
     def test_the_vocabulary_itself_is_the_same_in_both(self) -> None:
         """The labels, not just the rows built from them."""
         source = EVIDENCE.read_text(encoding="utf-8")

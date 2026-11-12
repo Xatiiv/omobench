@@ -87,6 +87,25 @@
             <div id="model-choice-list" class="choice-list"></div>
             <button id="model-manual-toggle" type="button" class="quiet">Enter a model ID instead</button>
           </div>
+          <div id="model-identity" class="notice" hidden aria-live="polite">
+            <p id="model-file-status" class="hint"></p>
+            <div id="model-file-choose" hidden>
+              <p class="field-title">Which file does your server have loaded?</p>
+              <div id="model-file-list" class="choice-list"></div>
+            </div>
+            <p id="tokenizer-status" role="status"></p>
+            <div id="tokenizer-choose" hidden>
+              <p class="field-title">Which repository is this model from?</p>
+              <p id="tokenizer-choose-why" class="hint"></p>
+              <div id="tokenizer-candidates" class="choice-list"></div>
+              <div class="actions"><button id="tokenizer-confirm" type="button" class="secondary">Use this tokenizer</button></div>
+            </div>
+            <div class="actions"><button id="tokenizer-fetch" type="button" class="secondary" hidden>Download the tokenizer files</button><span id="tokenizer-fetch-plan" class="hint"></span></div>
+          </div>
+          <details class="quiet-details" id="model-root-details"><summary>Model folder <span class="hint" id="model-root-summary"></span></summary>
+            <label>Folder your server loads model files from<input id="model-root" placeholder="D:\OmoBench\lmstudio-models" spellcheck="false"><span class="hint">A Windows path such as <code>D:\OmoBench\lmstudio-models</code> or a Linux path. OmoBench reads model file headers here to find the tokenizer, and fingerprints the file a run used after the run, never during it. Nothing is changed or uploaded.</span></label>
+            <div class="actions"><button id="model-root-save" type="button" class="secondary">Save folder</button><span id="model-root-status" class="hint" role="status"></span></div>
+          </details>
           <div id="model-manual" hidden>
           <label>Server model identifier<input id="model" name="model" list="served-models" placeholder="Identifier your server reports" required spellcheck="false"><datalist id="served-models"></datalist><span class="hint">Exactly the string this server's API accepts, including any suffix. <strong>Check this server</strong> fills this list from the server's own <code>/v1/models</code> when it offers one.</span></label>
           </div>
@@ -103,7 +122,8 @@
               <label class="check"><input type="radio" name="placement_choice" value="cpu-only"><span>On the CPU only</span></label>
             </div>
             <div id="card-choice" hidden>
-              <p class="field-title">Which card?</p>
+              <p class="field-title">Which cards run the model?</p>
+              <p class="hint">Tick every card your server uses for this model. A card that is installed but not used is recorded as present, not as running it.</p>
               <div id="card-choice-list" class="choice-list"></div>
             </div>
             <label id="split-detail-field" hidden>How the weights were split<input id="split-detail" placeholder="As your server reports it, e.g. 32 of 49 layers on GPU"></label>
@@ -125,10 +145,10 @@
             <p id="profile-ceiling" class="hint"></p>
           </details>
             </details>
-            <details class="quiet-details" id="tokenizer-details"><summary>Tokenizer <span class="hint" id="tokenizer-summary"></span></summary>
-              <label>Tokenizer source <span class="muted small">optional</span><input id="tokenizer" name="tokenizer" placeholder="Hugging Face repository or local tokenizer folder" spellcheck="false">
-            <span class="hint">Leave blank to use the server model identifier above. Set it when that identifier is a serving alias rather than a Hugging Face repository — an LM Studio alias such as <code>qwen/qwen3-vl-4b:3</code>, for example. The workload's prompts are built and counted with this tokenizer; it never changes which model your server serves, and it is not a claim about which weights are loaded.</span></label>
-              <div class="actions"><button id="check-tokenizer" type="button" class="secondary">Check tokenizer</button><button id="load-tokenizer" type="button" class="secondary">Load tokenizer now</button></div>
+            <details class="quiet-details" id="tokenizer-details"><summary>Advanced: tokenizer <span class="hint" id="tokenizer-summary"></span></summary>
+              <label>Tokenizer source <span class="muted small">override</span><input id="tokenizer" name="tokenizer" placeholder="Hugging Face repository or local tokenizer folder" spellcheck="false">
+            <span class="hint">Filled in automatically after Connect. Change it only to override what was found; it is checked again before Run. Set it when that identifier is a serving alias rather than a Hugging Face repository — an LM Studio alias such as <code>qwen/qwen3-vl-4b:3</code>, for example. The workload's prompts are built and counted with this tokenizer; it never changes which model your server serves, and it is not a claim about which weights are loaded.</span></label>
+              <div class="actions"><button id="check-tokenizer" type="button" class="secondary">Check tokenizer</button><button id="load-tokenizer" type="button" class="secondary">Check and load this tokenizer</button></div>
             </details>
             <div class="actions"><button id="start-run" type="submit">Run standard test <span aria-hidden="true">↗</span></button><button id="test-connection" type="button" class="secondary">Check this server</button></div>
             <p id="run-caution" class="hint" role="status" hidden></p>
@@ -350,7 +370,16 @@
           <label id="description-field" hidden>Server description<input name="server_description" id="server-description" placeholder="Name and details of the generic server"></label>
           <label>Runtime startup arguments<textarea name="runtime_args" rows="3" placeholder="One argument per line, e.g. --ctx-size=2048"></textarea><span class="hint">Record the actual server settings, including GPU offload. Do not include tokens or passwords.</span></label>
           <details><summary>Hardware details, if detection is incomplete</summary><div class="grid two"><label id="gpu-memory-field">GPU memory per card (GB)<input name="gpu_memory_gb" type="number" min="0.01" step="any" placeholder="Only if detected VRAM is unknown"></label><label>CPU description<input name="cpu" placeholder="Leave blank to use detected CPU"></label></div></details>
-          <div class="actions"><button id="check-requirements" type="button" class="secondary">Check publication requirements</button><button id="package-button" type="submit">Package &amp; validate</button></div>
+          <div class="actions"><button id="check-requirements" type="button" class="secondary">Check publication requirements</button><button id="identify-weights" type="button" class="secondary">Identify model file</button><button id="package-button" type="submit">Package &amp; validate</button></div>
+          <div id="weights-status" class="notice" role="status" aria-live="polite" hidden>
+            <p id="weights-message"></p>
+            <div id="weights-choose" hidden>
+              <div id="weights-groups" class="choice-list"></div>
+              <label class="check"><input id="weights-confirmed" type="checkbox"><span>This is the file this run used. It was found today, so it is recorded as chosen by you, not as verified.</span></label>
+              <div class="actions"><button id="weights-choose-button" type="button" class="secondary">Choose model file</button></div>
+            </div>
+            <details id="weights-details" hidden><summary>Details</summary><dl class="kv" id="weights-facts"></dl></details>
+          </div>
           <div id="package-status" class="notice package-status" role="status" aria-live="polite" hidden></div>
         </form>
         </details>

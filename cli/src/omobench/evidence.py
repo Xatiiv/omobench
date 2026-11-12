@@ -151,9 +151,11 @@ def _environments(result: dict[str, Any], environment: dict[str, Any] | None) ->
                  provenance="contributor-declared"),
             _fact_row("Serving operating system", host.get("os")),
             _fact_row("Serving processor", host.get("cpu")),
+            *_core_rows(host),
             _row("Serving memory",
                  f"{_amount(ram['value'])} GB" if ram.get("value") is not None else None,
                  provenance=ram.get("provenance")),
+            *_installed_memory_rows(host),
             _row("Benchmark runner",
                  f"{runner.get('os')} ({runner.get('kind')})" if runner.get("os") else None,
                  provenance="detected",
@@ -347,6 +349,31 @@ def _eligibility(result: dict[str, Any]) -> dict[str, Any]:
     ]}
 
 
+def _core_rows(host: dict[str, Any]) -> list[dict[str, Any]]:
+    """Cores and threads, a 1.2 fact. No row at all on a result that never
+    recorded them, so older evidence reads exactly as it always did."""
+    cores, threads = host.get("cpu_cores"), host.get("cpu_threads")
+    if cores is None and threads is None:
+        return []
+    parts = []
+    for fact, unit in ((cores, "physical cores"), (threads, "threads")):
+        value = (fact or {}).get("value")
+        parts.append(f"{_amount(value)} {unit}" if value is not None else f"{unit} not recorded")
+    return [_row("Serving CPU cores", " · ".join(parts),
+                 provenance=(cores or threads or {}).get("provenance"))]
+
+
+def _installed_memory_rows(host: dict[str, Any]) -> list[dict[str, Any]]:
+    installed = host.get("ram_installed_gb")
+    if installed is None:
+        return []
+    value = installed.get("value")
+    return [_row("Installed memory", f"{_amount(value)} GB" if value is not None else None,
+                 provenance=installed.get("provenance"),
+                 note="The modules fitted. Serving memory above is what the operating system "
+                      "could use.")]
+
+
 def _tokenizer(result: dict[str, Any]) -> dict[str, Any]:
     tokenizer = (result.get("model") or {}).get("tokenizer")
     if tokenizer is None:
@@ -365,6 +392,9 @@ def _tokenizer(result: dict[str, Any]) -> dict[str, Any]:
              "Yes, in the runner's own interpreter"
              if tokenizer.get("loaded") == "loaded-before-run" else "Not checked by OmoBench",
              provenance="detected" if tokenizer.get("loaded") == "loaded-before-run" else None),
+        *([_row("Tokenizer revision", tokenizer["revision"], provenance="detected",
+                note="Which bytes loaded: the cached snapshot's commit, or a hash of a local "
+                     "tokenizer file.")] if tokenizer.get("revision") else []),
         _row("Tokenizer implementation", identity.get("class"), provenance="detected"),
         _row("Vocabulary size", identity.get("vocabulary_size"), provenance="detected"),
         _row("Matches the served weights", "Not verifiable from this evidence",
