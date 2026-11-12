@@ -1,0 +1,203 @@
+{
+  "schema_version": "1.2",
+  "run_id": "run-cc80dd597abb",
+  "started_at": "2026-11-12T13:16:02.659641+00:00",
+  "configuration_fingerprint": "sha256:bab5b469bb3246e8b983192178047927f8d6466f3201ffbf8b66faacf538a403",
+  "execution_device": "gpu",
+  "environment": {
+    "metadata_version": "serving-environment-v1",
+    "relationship": "windows-host-wsl-runner",
+    "runner": {
+      "os": "Linux-6.18.58.1-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+      "kind": "wsl2",
+      "python_version": "3.14.4",
+      "cpu": "AMD Ryzen 7 5800X3D 8-Core Processor",
+      "ram_gb": 15.58
+    },
+    "serving": {
+      "host": {
+        "os": {
+          "value": "Microsoft Windows 11 Pro Insider Preview 10.0.26220",
+          "provenance": "contributor-declared"
+        },
+        "cpu": {
+          "value": "AMD Ryzen 7 5800X3D 8-Core Processor",
+          "provenance": "contributor-declared"
+        },
+        "ram_gb": {
+          "value": 31.92,
+          "provenance": "contributor-declared"
+        }
+      },
+      "accelerators": [
+        {
+          "vendor": "amd",
+          "model": "AMD Radeon RX 9070",
+          "memory_gb": 16.0,
+          "count": 1,
+          "role": "inference",
+          "provenance": "contributor-declared"
+        }
+      ],
+      "placement": {
+        "mode": "gpu-only",
+        "detail": null,
+        "provenance": "contributor-declared"
+      },
+      "runtime": {
+        "application": {
+          "name": "LM Studio",
+          "version": "0.4.23",
+          "provenance": "contributor-declared"
+        },
+        "engine": {
+          "name": "llama.cpp",
+          "version": "LM Studio 0.4.28 (build 2)",
+          "provenance": "contributor-declared"
+        },
+        "settings": [
+          {
+            "name": "context_length",
+            "value": "8192",
+            "provenance": "contributor-declared"
+          }
+        ]
+      }
+    },
+    "transport": {
+      "kind": "windows-wsl-stdio-bridge",
+      "protocol": "HTTP/1.1, one request per connection",
+      "bridge_version": "windows-stdio-http1-v1",
+      "overhead": "included-not-measured"
+    }
+  },
+  "execution": {
+    "contract": "bounded-execution-v1",
+    "limits": {
+      "inactivity_timeout_seconds": 300,
+      "request_deadline_seconds": 900,
+      "measurement_ceiling_seconds": 900,
+      "shutdown_grace_seconds": 60.0
+    },
+    "supervisor": {
+      "fired": false,
+      "reason": null,
+      "escalated": false,
+      "at_seconds": null,
+      "anchor": "measurement-start",
+      "detail": ""
+    },
+    "interruption": {
+      "state": "none",
+      "observed_seconds": 0,
+      "longest_seconds": 0.0,
+      "events": [],
+      "method": "CLOCK_BOOTTIME and the wall clock against CLOCK_MONOTONIC, sampled every 1s while measuring"
+    },
+    "sleep_prevention": {
+      "requested": true,
+      "held": true,
+      "mechanism": "windows-power-request-v1",
+      "request": "execution-required",
+      "detail": "Windows granted an execution-required power request. The machine will not idle into sleep while this is held. Closing the lid, a critical battery, an administrator policy or sleeping it deliberately still can."
+    }
+  },
+  "model": {
+    "id": "qwen2.5-coder-14b-instruct",
+    "revision": "D:\\OmoBench\\lmstudio-models\\Qwen\\Qwen2.5-Coder-14B-Instruct-GGUF",
+    "quantization": "Q4_K_M",
+    "catalog_status": "uncatalogued",
+    "eligibility": {
+      "licence": "apache-2.0",
+      "licence_url": "https://huggingface.co/Qwen/Qwen2.5-Coder-14B-Instruct-GGUF/blob/main/LICENSE",
+      "weights_publicly_downloadable": true,
+      "modality": "text-generation",
+      "source": "https://huggingface.co/Qwen/Qwen2.5-Coder-14B-Instruct-GGUF"
+    },
+    "served_model_id": "qwen2.5-coder-14b-instruct",
+    "tokenizer": {
+      "source": "Qwen/Qwen2.5-Coder-14B-Instruct",
+      "kind": "huggingface",
+      "loaded": "not-checked",
+      "matches_served_weights": "not-verifiable-here",
+      "identity": null
+    }
+  },
+  "runtime": {
+    "framework": "lmstudio",
+    "version": "LM Studio 0.4.28 (build 2)",
+    "arguments": [],
+    "endpoint_type": "openai-compatible"
+  },
+  "hardware": {
+    "os": "Microsoft Windows 11 Pro Insider Preview 10.0.26220",
+    "cpu": "AMD Ryzen 7 5800X3D 8-Core Processor",
+    "ram_gb": 31.92,
+    "gpus": [
+      {
+        "vendor": "amd",
+        "model": "AMD Radeon RX 9070",
+        "memory_gb": 16.0,
+        "count": 1
+      }
+    ],
+    "driver_version": null,
+    "detection": {
+      "hardware": "user-confirmed",
+      "model": "manual",
+      "runtime": "manual"
+    }
+  },
+  "benchmark": {
+    "profile_id": "chat-small-v2",
+    "profile_sha256": "sha256:efba7d0eff0bc8c639f94af35de03e6d6f5869ea54ec6749f58808d6fd02e4ca",
+    "runner": "guidellm",
+    "runner_version": "0.7.3"
+  },
+  "results": {
+    "requests": {
+      "attempted": 50,
+      "succeeded": 50,
+      "failed": 0
+    },
+    "latency_ms": {
+      "ttft": {
+        "p50": 611.9668483734131,
+        "p95": 625.8063316345215
+      },
+      "inter_token": {
+        "p50": 16.39912400064589,
+        "p95": 16.499633658422184
+      }
+    },
+    "output_tokens_per_second": 42.65463474952239,
+    "total_tokens_per_second": 567.980136401535,
+    "requests_per_second": 0.49574943166636326,
+    "error_rate_percent": 0.0,
+    "memory_peak_gb": null
+  },
+  "artifacts": {
+    "raw_runner_output": {
+      "path": "guidellm-benchmarks.json.gz",
+      "sha256": "sha256:be3d79457d701984ac942acc57366bf8f27533775f256d1a5483023fbe48e9d8"
+    },
+    "runner_stdout_log": {
+      "path": "guidellm.stdout.log",
+      "sha256": "sha256:cc5b1ff530c46afb0c97c3a4151dda487b722a9fe8dcd78384d6a333f57b25c5"
+    },
+    "environment_snapshot": {
+      "path": "environment.json",
+      "sha256": "sha256:cb4b1d684e7b6f2a3260e673d46ee541c499c897abb92a487724b4d1be9acfc4"
+    },
+    "reproduce_markdown": {
+      "path": "reproduce.md",
+      "sha256": "sha256:8a7ae7087059e9e54d1f2d5a2b1710ef825757bcc9d44c5facbe8d9f3c4f707d"
+    }
+  },
+  "submission": {
+    "submitter": "Xatiiv",
+    "run_kind": "initial",
+    "repeat_of_run_id": null,
+    "source_commit": null
+  }
+}
