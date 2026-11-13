@@ -98,10 +98,40 @@ else:
         path = getattr(tokenizer, attribute, None)
         if isinstance(path, str):
             files[attribute] = os.path.basename(path)
+    # Loading is not using. The workload is built by encoding text, so that is
+    # what is tried, on a sentence of the same kind.
+    try:
+        encoded = tokenizer.encode("OmoBench tokenizer check: please count the words in this sentence.")
+    except Exception as error:
+        finish(outcome="encode-failed", error="%s: %s" % (type(error).__name__, error))
+    if not encoded:
+        finish(outcome="encode-failed", error="The tokenizer returned no tokens for a sample sentence.")
+    # Which bytes loaded: the cached snapshot's commit for a repository, or a
+    # hash of the tokenizer file for a local folder. Read from what is on disk,
+    # so it is the revision that was used, not whatever the repository says now.
+    revision = None
+    if os.path.isdir(source):
+        import hashlib
+        for name in ("tokenizer.json", "tokenizer_config.json", "tokenizer.model", "vocab.json"):
+            candidate = os.path.join(source, name)
+            if os.path.isfile(candidate):
+                with open(candidate, "rb") as handle:
+                    revision = "local-sha256:" + hashlib.sha256(handle.read()).hexdigest()
+                break
+    else:
+        try:
+            from huggingface_hub import try_to_load_from_cache
+            for name in ("tokenizer_config.json", "tokenizer.json", "vocab.json", "tokenizer.model"):
+                cached = try_to_load_from_cache(source, name)
+                if isinstance(cached, str) and "/snapshots/" in cached.replace(os.sep, "/"):
+                    revision = cached.replace(os.sep, "/").split("/snapshots/")[1].split("/")[0]
+                    break
+        except Exception:
+            revision = None
     finish(outcome="loaded", identity={
         "class": type(tokenizer).__name__,
         "vocabulary_size": int(getattr(tokenizer, "vocab_size", 0)) or None,
-    }, resolved_files=files)
+    }, resolved_files=files, encoded_tokens=len(encoded), revision=revision)
 
 if level == "none":
     finish(outcome="not-loaded")
@@ -151,6 +181,12 @@ class TokenizerPreflight:
     destination: str | None = None
     detail: str = ""
     seconds: float = 0.0
+    # The commit of the cached snapshot that loaded, or local-sha256:... for a
+    # folder. None when it could not be read, which is not the same as "main".
+    revision: str | None = None
+    # Tokens the sample sentence encoded to: proof the tokenizer was used, not
+    # just constructed.
+    encoded_tokens: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -159,6 +195,7 @@ class TokenizerPreflight:
             "suggestion": self.suggestion, "repository_files": self.repository_files,
             "downloaded": self.downloaded, "destination": self.destination,
             "detail": self.detail, "seconds": round(self.seconds, 2),
+            "revision": self.revision, "encoded_tokens": self.encoded_tokens,
         }
 
 
@@ -331,6 +368,15 @@ def preflight(
     syntax = ("ok", f"Accepted as a local tokenizer folder: {resolved}." if local
               else f"Accepted as a Hugging Face repository id: {resolved}.")
 
+    if document.get("outcome") == "encode-failed":
+        return TokenizerPreflight(
+            ok=False, kind="encode-failed", source=resolved, network=network, seconds=seconds,
+            detail=document.get("error", ""),
+            message=(f"{resolved} loaded but could not encode a sample sentence, so the runner "
+                     "could not build the workload with it."),
+            checks=_checks(syntax, ("ok", "Present where the loader looks for them."),
+                           ("failed", "Loaded, but encoding a sample sentence failed.")))
+
     if document.get("outcome") == "loaded":
         identity = document.get("identity") or {}
         downloaded = [] if network != NETWORK_DOWNLOAD else sorted(
@@ -338,6 +384,7 @@ def preflight(
         return TokenizerPreflight(
             ok=True, kind="loaded", source=resolved, network=network, seconds=seconds,
             identity={"class": identity.get("class"), "vocabulary_size": identity.get("vocabulary_size")},
+            revision=document.get("revision"), encoded_tokens=document.get("encoded_tokens"),
             downloaded=downloaded, destination=destination if downloaded else None,
             message=(f"Loaded: {identity.get('class') or 'a tokenizer'}"
                      + (f", vocabulary {identity['vocabulary_size']}" if identity.get("vocabulary_size") else "")
@@ -350,7 +397,9 @@ def preflight(
                                   f"Present, after fetching what was missing into {destination}. "
                                   "No model weights were requested or downloaded."),
                            ("ok", "Loaded in the runner's own interpreter, with repository code "
-                                  "execution refused.")))
+                                  "execution refused, and used to encode a sample sentence"
+                                  + (f" ({document['encoded_tokens']} tokens)."
+                                     if document.get("encoded_tokens") else "."))))
 
     error = document.get("load_error", "")
     files = [name for name in (document.get("repository_files") or document.get("files") or [])

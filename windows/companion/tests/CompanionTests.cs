@@ -2319,9 +2319,11 @@ namespace OmoBench.Companion.Tests
             Dictionary<string, object> document = HardwareProbe.Collect();
             Check("the document names its own kind",
                 Equals(document["kind"], HardwareProbe.Kind));
-            Check("it reports exactly the four facts it reads",
-                document.Count == 5 && document.ContainsKey("os") && document.ContainsKey("cpu")
-                    && document.ContainsKey("ram_gb") && document.ContainsKey("accelerators"));
+            Check("it reports exactly the facts it reads",
+                document.Count == 8 && document.ContainsKey("os") && document.ContainsKey("cpu")
+                && document.ContainsKey("cpu_cores") && document.ContainsKey("cpu_threads")
+                && document.ContainsKey("ram_gb") && document.ContainsKey("ram_installed_gb")
+                && document.ContainsKey("accelerators"));
 
             object memory = document["ram_gb"];
             Check("installed memory is a positive number of gigabytes, or unknown",
@@ -2329,15 +2331,19 @@ namespace OmoBench.Companion.Tests
 
             List<Dictionary<string, object>> accelerators =
                 (List<Dictionary<string, object>>)document["accelerators"];
-            bool memoryAlwaysNull = true;
+            bool memoryUnknownOrPositive = true;
             bool vendorsKnown = true;
             bool rolesAbsent = true;
             foreach (Dictionary<string, object> device in accelerators)
             {
-                // AdapterRAM is capped and wrong under modern drivers: it
-                // reports 4 GB for a 16 GB card. Reporting it would quietly
-                // publish the wrong VRAM for the exact hardware this exists for.
-                if (device["memory_gb"] != null) { memoryAlwaysNull = false; }
+                // Dedicated memory comes from the driver's qwMemorySize, never
+                // AdapterRAM (capped at 4 GB for a 16 GB card). Unknown stays
+                // null; it is never zero.
+                object memoryValue = device["memory_gb"];
+                if (memoryValue != null && Convert.ToDouble(memoryValue, CultureInfo.InvariantCulture) <= 0)
+                {
+                    memoryUnknownOrPositive = false;
+                }
                 string vendor = (string)device["vendor"];
                 if (vendor != "nvidia" && vendor != "amd" && vendor != "intel" && vendor != "other")
                 {
@@ -2346,7 +2352,22 @@ namespace OmoBench.Companion.Tests
                 // Finding a card is not evidence that inference used it.
                 if (device.ContainsKey("role")) { rolesAbsent = false; }
             }
-            Check("video memory is never taken from AdapterRAM", memoryAlwaysNull);
+            Check("video memory is a positive number of gigabytes, or unknown", memoryUnknownOrPositive);
+
+            // qwMemorySize, as the registry hands it over.
+            Check("a REG_QWORD of 16 GiB reads as 16 GB",
+                HardwareProbe.DedicatedGigabytes(17179869184L) == 16.0);
+            Check("a REG_BINARY of 16 GiB reads as 16 GB",
+                HardwareProbe.DedicatedGigabytes(BitConverter.GetBytes(17179869184UL)) == 16.0);
+            Check("an 8 GiB card reads as 8 GB, not as a share of anything",
+                HardwareProbe.DedicatedGigabytes(8589934592L) == 8.0);
+            Check("zero is unknown, not zero memory", HardwareProbe.DedicatedGigabytes(0L) == null);
+            Check("an absent value is unknown", HardwareProbe.DedicatedGigabytes(null) == null);
+            Check("a value of the wrong kind is unknown", HardwareProbe.DedicatedGigabytes("16 GB") == null);
+            Check("the probe reports cores and threads, or says it cannot",
+                document.ContainsKey("cpu_cores") && document.ContainsKey("cpu_threads"));
+            Check("installed memory is reported apart from usable memory",
+                document.ContainsKey("ram_installed_gb"));
             Check("every vendor is one the result schema has", vendorsKnown);
             Check("no device is given a role by detection alone", rolesAbsent);
 

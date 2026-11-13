@@ -7,9 +7,12 @@ import { registryResults } from "@/app/data/registry-results";
 import { comparisonExamples } from "@/app/data/comparison-examples";
 import { readResultRecord } from "@/app/lib/result-record";
 import { assess, barPercent, comparisonQuestions, contextLabel, eligibleLeaderboard, formatMetric, incompatibilities, metricDifference, metrics, placementLabel, quantizationLabel, rankRuns, runtimeLabel, servingLabel, suitabilityLabel, tokenizerLabel, transportLabel, type ComparisonAssessment, type ComparisonEntry, type ComparisonQuestion, type MetricKey } from "@/app/lib/comparison";
+import { ANY, EXECUTION_MODE_LABEL, NO_FILTERS, filterOptions, formatGb, gpuSummary, hardwareFacets, matchesFilters, runtimeWithVersion, vramSummary, type HardwareFilters } from "@/app/lib/hardware-filters";
 import "./comparison.css";
 
 const published: ComparisonEntry[] = registryResults.map(result => ({ key: `registry:${result.id}`, origin: "registry", result }));
+const hardwareOptions = filterOptions(registryResults);
+type HardwareKey = "cpu" | "gpu" | "vram" | "ram" | "mode";
 const maxImportBytes = 1024 * 1024;
 function subscribeToLocation(onChange: () => void) {
   window.addEventListener("popstate", onChange);
@@ -40,6 +43,17 @@ function SetupIcon({ gpu = false }: { gpu?: boolean }) {
   return <svg viewBox="0 0 32 32" aria-hidden="true" fill="none"><rect x="7" y="7" width="18" height="18" rx="3" /><path d="M12 2v5m8-5v5M12 25v5m8-5v5M2 12h5m-5 8h5m18-8h5m-5 8h5" />{gpu ? <circle cx="16" cy="16" r="5" /> : <rect x="12" y="12" width="8" height="8" rx="1" />}</svg>;
 }
 
+function HardwareFacts({ entry }: { entry: ComparisonEntry }) {
+  const facets = hardwareFacets(entry.result);
+  const cores = facets.cpuCores !== null ? `${facets.cpuCores} cores${facets.cpuThreads !== null ? ` · ${facets.cpuThreads} threads` : ""}` : "Cores not recorded";
+  return <dl className="setup-facts hardware-facts">
+    <div><dt>CPU</dt><dd>{facets.cpu ?? "Not recorded"}<small>{cores}</small></dd></div>
+    <div><dt>Inference GPU</dt><dd>{gpuSummary(facets)}<small>{EXECUTION_MODE_LABEL[facets.executionMode]}</small></dd></div>
+    <div><dt>System RAM</dt><dd>{formatGb(facets.ramGb)}<small>{facets.ramGb === null ? "" : facets.ramIsInstalled ? "installed" : "usable, as reported"}</small></dd></div>
+    <div><dt>VRAM</dt><dd>{vramSummary(facets)}</dd></div>
+  </dl>;
+}
+
 function SetupCard({ entry, index, reference }: { entry: ComparisonEntry; index: number; reference: boolean }) {
   const r = entry.result;
   return <article className={`setup-card tone-${index}${reference ? " is-reference" : ""}`}>
@@ -47,7 +61,7 @@ function SetupCard({ entry, index, reference }: { entry: ComparisonEntry; index:
     <h3>{r.hardware.display}</h3>
     <div className="setup-card-meta"><span className="device-label">{r.executionDevice.toUpperCase()}</span><span>{r.framework} {r.frameworkVersion}</span>{r.transport.kind === "windows-wsl-stdio-bridge" && <span className="device-label">BRIDGED</span>}{r.catalogStatus === "proposed" && <span className="device-label">PROPOSED MODEL</span>}</div>
     <div className="setup-card-score"><strong>{formatMetric(r.outputTokensPerSecond)}</strong><span>output tok/s</span></div>
-    <dl className="setup-facts"><div><dt>Measured requests</dt><dd>{r.requests.succeeded} / {r.requests.attempted} successful</dd></div><div><dt>Error rate</dt><dd>{formatMetric(r.errorRatePercent)}%</dd></div><div><dt>System memory</dt><dd>{formatMetric(r.hardware.ramGb)} GB</dd></div></dl>
+    <HardwareFacts entry={entry} /><dl className="setup-facts"><div><dt>Measured requests</dt><dd>{r.requests.succeeded} / {r.requests.attempted} successful</dd></div><div><dt>Error rate</dt><dd>{formatMetric(r.errorRatePercent)}%</dd></div></dl>
     <details><summary>Setup details</summary><dl className="setup-details"><div><dt>Serving CPU</dt><dd>{r.hardware.cpu}</dd></div><div><dt>Serving OS</dt><dd>{r.hardware.os}</dd></div>{r.hardware.gpus.map((g, i) => <div key={i}><dt>Accelerator</dt><dd>{g.count} × {g.model}, {g.memoryGb} GB each</dd></div>)}<div><dt>Quantization</dt><dd>{quantizationLabel(r)}</dd></div><div><dt>Context length</dt><dd>{contextLabel(r)}</dd></div><div><dt>Serving runtime</dt><dd>{runtimeLabel(r)}</dd></div><div><dt>Weight placement</dt><dd>{placementLabel(r)}</dd></div><div><dt>Serving arrangement</dt><dd>{servingLabel(r)}</dd></div><div><dt>Transport</dt><dd>{transportLabel(r)}</dd></div><div><dt>Tokenizer</dt><dd>{tokenizerLabel(r)}</dd></div><div><dt>Served identifier</dt><dd>{r.servedModelId ?? "Not recorded"}</dd></div><div><dt>Runtime arguments</dt><dd>{r.runtimeArguments.join(" ") || "None recorded"}</dd></div><div><dt>Run ID</dt><dd>{r.id}</dd></div></dl></details>
     <footer><span>{entry.origin === "local" ? "Private file · not reviewed" : entry.origin === "example" ? "Fictional example" : r.submitter}</span>{entry.origin === "registry" && <Link href={`/runs/${encodeURIComponent(r.id)}#evidence`}>Evidence ↗</Link>}</footer>
   </article>;
@@ -80,10 +94,9 @@ export default function ComparePage() {
   const [peerKeys, setPeerKeys] = useState<string[] | null>(null);
   const [latency, setLatency] = useState<"p50" | "p95">("p50");
   const [sortMetric, setSortMetric] = useState<MetricKey>("outputTokensPerSecond");
-  const [device, setDevice] = useState("all");
+  const [hardware, setHardware] = useState<HardwareFilters>(NO_FILTERS);
   const [question, setQuestion] = useState<ComparisonQuestion>("exact");
   const [transport, setTransport] = useState("all");
-  const [placement, setPlacement] = useState("all");
   const [query, setQuery] = useState("");
   const [message, setMessage] = useState("");
   const [reading, setReading] = useState(false);
@@ -93,11 +106,16 @@ export default function ComparePage() {
 
   const search = useSyncExternalStore(subscribeToLocation, getLocationSearch, getServerSearch);
   const requested = new URLSearchParams(search).get("run");
+  // Runs handed over from a filtered registry view, compared against the first.
+  const requestedPeers = (new URLSearchParams(search).get("peers") ?? "").split(",").filter(Boolean).map(id => `registry:${id}`);
   useEffect(() => () => { importGeneration.current += 1; }, []);
 
   const entries = mode === "example" ? comparisonExamples : local ? [local, ...published] : published;
   const reference = entries.find(entry => entry.key === referenceKey) ?? (mode === "registry" ? published.find(entry => entry.result.id === requested) : undefined) ?? entries[0];
-  const selectedPeerKeys = peerKeys ?? initialPeers(entries, reference, question);
+  const handedOver = mode === "registry" && !referenceKey && reference?.result.id === requested && requestedPeers.length
+    ? requestedPeers.filter(key => entries.some(entry => entry.key === key && entry.key !== reference?.key
+      && assess(reference.result, entry.result, question).suitability !== "unsuitable")).slice(0, 3) : null;
+  const selectedPeerKeys = peerKeys ?? handedOver ?? initialPeers(entries, reference, question);
   // Usable for the question being asked, which is not the same as rankable.
   const peers = reference ? entries.filter(entry => entry.key !== reference.key
     && assess(reference.result, entry.result, question).suitability !== "unsuitable") : [];
@@ -105,18 +123,18 @@ export default function ComparePage() {
   const unmatched = reference ? entries.filter(entry => entry.key !== reference.key
     && assess(reference.result, entry.result, question).suitability === "unsuitable") : [];
   const leaderboard = reference ? rankRuns(eligibleLeaderboard(entries, reference.result, mode)
-    .filter(entry => device === "all" || entry.result.executionDevice === device)
-    .filter(entry => transport === "all" || entry.result.transport.kind === transport)
-    .filter(entry => placement === "all" || (entry.result.serving?.placement.mode ?? "unknown") === placement), sortMetric) : [];
+    .filter(entry => matchesFilters(entry.result, hardware))
+    .filter(entry => transport === "all" || entry.result.transport.kind === transport), sortMetric) : [];
+  const setHardwareFilter = (key: HardwareKey) => (value: string) => setHardware(current => ({ ...current, [key]: value }));
   const choices = peers.filter(entry => `${entry.result.hardware.display} ${entry.result.framework} ${entry.result.submitter}`.toLowerCase().includes(query.toLowerCase()));
 
   function chooseReference(key: string) {
     const next = entries.find(entry => entry.key === key);
-    setReferenceKey(key); setPeerKeys(initialPeers(entries, next, question)); setQuery(""); setDevice("all"); setTransport("all"); setPlacement("all");
+    setReferenceKey(key); setPeerKeys(initialPeers(entries, next, question)); setQuery(""); setHardware(NO_FILTERS); setTransport("all");
   }
 
   function changeMode(next: "registry" | "example") {
-    importGeneration.current += 1; setReading(false); setMode(next); setMessage(""); setQuery(""); setDevice("all"); setTransport("all"); setPlacement("all");
+    importGeneration.current += 1; setReading(false); setMode(next); setMessage(""); setQuery(""); setHardware(NO_FILTERS); setTransport("all");
     const nextEntries = next === "example" ? comparisonExamples : local ? [local, ...published] : published;
     setReferenceKey(nextEntries[0]?.key ?? ""); setPeerKeys(initialPeers(nextEntries, nextEntries[0]));
   }
@@ -126,7 +144,7 @@ export default function ComparePage() {
     const result = readResultRecord("selected result.json", JSON.parse(text));
     if (generation !== importGeneration.current) return;
     const entry: ComparisonEntry = { key: `local:${result.id}`, origin: "local", result };
-    setLocal(entry); setMode("registry"); setReferenceKey(entry.key); setPeerKeys(initialPeers([entry, ...published], entry)); setDevice("all"); setTransport("all"); setPlacement("all"); setQuery(""); setPastedJson("");
+    setLocal(entry); setMode("registry"); setReferenceKey(entry.key); setPeerKeys(initialPeers([entry, ...published], entry)); setHardware(NO_FILTERS); setTransport("all"); setQuery(""); setPastedJson("");
   }
 
   function importError(error: unknown) {
@@ -206,8 +224,8 @@ export default function ComparePage() {
         </section>}
         <div className="comparison-charts"><MetricChart entries={selected} metric="outputTokensPerSecond" featured /><div className="latency-heading"><div><p className="comparison-kicker">HOW RESPONSIVE DOES IT FEEL?</p><h2>A closer look at latency.</h2></div><div className="mode-switch" role="group" aria-label="Latency statistic"><button aria-pressed={latency === "p50"} onClick={() => setLatency("p50")}>Median · p50</button><button aria-pressed={latency === "p95"} onClick={() => setLatency("p95")}>Tail · p95</button></div><p>p50 is the median. p95 describes the slower end of observed latencies.</p></div><MetricChart entries={selected} metric={latency === "p50" ? "ttftP50" : "ttftP95"} /><MetricChart entries={selected} metric={latency === "p50" ? "itlP50" : "itlP95"} /></div>
 
-        <section className="comparison-leaderboard"><div className="comparison-section-heading"><div><p className="comparison-kicker">{mode === "example" ? "FICTIONAL EXAMPLES ONLY" : "SAME DECLARED WORKLOAD"}</p><h2>{mode === "example" ? "Example ordering" : "Community run leaderboard"}</h2></div><span>{leaderboard.length} {mode === "example" ? "examples" : "matching runs"}</span></div><p className="comparison-muted">{mode === "example" ? "This ordering uses simulated measurements and is not a hardware ranking." : "Ranks apply only to the matching runs and device filter below. Repeat runs count separately, this is not a ranking of unique machines or people. Private files are excluded."}</p><div className="leaderboard-controls"><label>Order by<select value={sortMetric} onChange={event => setSortMetric(event.target.value as MetricKey)}>{Object.entries(metrics).map(([key, metric]) => <option key={key} value={key}>{metric.title}, {metric.higher ? "higher" : "lower"} first</option>)}</select></label><label>Execution device<select value={device} onChange={event => setDevice(event.target.value)}><option value="all">All devices</option><option value="cpu">CPU</option><option value="gpu">GPU</option></select></label><label>Transport<select value={transport} onChange={event => setTransport(event.target.value)}><option value="all">Any transport</option><option value="direct">Direct to the server</option><option value="windows-wsl-stdio-bridge">Through the Windows–WSL bridge</option></select></label><label>Weight placement<select value={placement} onChange={event => setPlacement(event.target.value)}><option value="all">Any placement</option><option value="gpu-only">GPU only</option><option value="cpu-only">CPU only</option><option value="cpu-gpu-offload">Split CPU/GPU</option><option value="unknown">Not recorded</option></select></label></div>
-          {leaderboard.length ? <div className="leaderboard-scroll" tabIndex={0} role="region" aria-label="Ranked benchmark runs"><table><caption>{metrics[sortMetric].title} · {metrics[sortMetric].higher ? "Higher" : "Lower"} is better · {mode === "example" ? "Illustrative data" : reference.result.profile}</caption><thead><tr><th scope="col">Rank</th><th scope="col">Setup / submitter</th><th scope="col">{metrics[sortMetric].title}</th><th scope="col">Successful / attempted</th><th scope="col">Error rate</th><th scope="col">Record</th></tr></thead><tbody>{leaderboard.map(({ entry, rank }) => <tr className={entry.key === reference.key ? "reference-row" : ""} key={entry.key}><td className="rank-cell">{rank.toString().padStart(2, "0")}</td><th scope="row"><strong>{entry.result.hardware.display}</strong><small>{entry.result.framework} · {entry.result.submitter}</small>{entry.key === reference.key && <span className="table-reference">Reference</span>}</th><td className="rank-value">{formatMetric(entry.result[sortMetric])} <small>{metrics[sortMetric].unit}</small></td><td>{entry.result.requests.succeeded} / {entry.result.requests.attempted}</td><td>{formatMetric(entry.result.errorRatePercent)}%</td><td>{entry.origin === "registry" ? <Link href={`/runs/${encodeURIComponent(entry.result.id)}#evidence`}>Evidence ↗</Link> : <span>Illustrative</span>}</td></tr>)}</tbody></table></div> : <div className="leaderboard-empty">No community runs match this reference and device filter yet. Your private result is not added to this leaderboard.</div>}
+        <section className="comparison-leaderboard"><div className="comparison-section-heading"><div><p className="comparison-kicker">{mode === "example" ? "FICTIONAL EXAMPLES ONLY" : "SAME DECLARED WORKLOAD"}</p><h2>{mode === "example" ? "Example ordering" : "Community run leaderboard"}</h2></div><span>{leaderboard.length} {mode === "example" ? "examples" : "matching runs"}</span></div><p className="comparison-muted">{mode === "example" ? "This ordering uses simulated measurements and is not a hardware ranking." : "Ranks apply only to the matching runs and hardware filters below. Repeat runs count separately, this is not a ranking of unique machines or people. Private files are excluded."}</p><div className="leaderboard-controls"><label>Order by<select value={sortMetric} onChange={event => setSortMetric(event.target.value as MetricKey)}>{Object.entries(metrics).map(([key, metric]) => <option key={key} value={key}>{metric.title}, {metric.higher ? "higher" : "lower"} first</option>)}</select></label>{([["cpu", "CPU"], ["gpu", "Inference GPU"], ["vram", "VRAM per inference GPU"], ["ram", "System RAM"], ["mode", "Execution"]] as Array<[HardwareKey, string]>).map(([key, label]) => <label key={key}>{label}<select value={hardware[key]} onChange={event => setHardwareFilter(key)(event.target.value)}><option value={ANY}>Any</option>{hardwareOptions[key].map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>)}<label>Transport<select value={transport} onChange={event => setTransport(event.target.value)}><option value="all">Any transport</option><option value="direct">Direct to the server</option><option value="windows-wsl-stdio-bridge">Through the Windows–WSL bridge</option></select></label></div>
+          {leaderboard.length ? <div className="leaderboard-scroll" tabIndex={0} role="region" aria-label="Ranked benchmark runs"><table><caption>{metrics[sortMetric].title} · {metrics[sortMetric].higher ? "Higher" : "Lower"} is better · {mode === "example" ? "Illustrative data" : reference.result.profile}</caption><thead><tr><th scope="col">Rank</th><th scope="col">Setup / submitter</th><th scope="col">{metrics[sortMetric].title}</th><th scope="col">Successful / attempted</th><th scope="col">Error rate</th><th scope="col">Record</th></tr></thead><tbody>{leaderboard.map(({ entry, rank }) => <tr className={entry.key === reference.key ? "reference-row" : ""} key={entry.key}><td className="rank-cell">{rank.toString().padStart(2, "0")}</td><th scope="row"><strong>{hardwareFacets(entry.result).cpu ?? "CPU not recorded"} · {gpuSummary(hardwareFacets(entry.result))}</strong><small>RAM {formatGb(hardwareFacets(entry.result).ramGb)} · VRAM {vramSummary(hardwareFacets(entry.result))} · {entry.result.model} · {entry.result.quantization ?? "quantization not recorded"} · {runtimeWithVersion(entry.result)} · {entry.result.submitter}</small>{entry.key === reference.key && <span className="table-reference">Reference</span>}</th><td className="rank-value">{formatMetric(entry.result[sortMetric])} <small>{metrics[sortMetric].unit}</small></td><td>{entry.result.requests.succeeded} / {entry.result.requests.attempted}</td><td>{formatMetric(entry.result.errorRatePercent)}%</td><td>{entry.origin === "registry" ? <Link href={`/runs/${encodeURIComponent(entry.result.id)}#evidence`}>Evidence ↗</Link> : <span>Illustrative</span>}</td></tr>)}</tbody></table></div> : <div className="leaderboard-empty">No community runs match this reference and these hardware filters yet. Your private result is not added to this leaderboard.</div>}
         </section>
       </>}
       <section className="comparison-next"><div><p className="comparison-kicker">MAKE THE NEXT COMPARISON POSSIBLE</p><h2>Add evidence. Help everyone choose.</h2><p>Run a fixed profile, review your bundle and submit it through the local panel. Community results appear after review, merge and a website build.</p></div><Link className="product-button" href="/run">Run your benchmark ↗</Link></section>

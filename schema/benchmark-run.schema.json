@@ -78,6 +78,9 @@
               "properties": {
                 "os": { "$ref": "#/$defs/fact_string" },
                 "cpu": { "$ref": "#/$defs/fact_string" },
+                "cpu_cores": { "$ref": "#/$defs/fact_number", "description": "Schema 1.2 only. Physical CPU cores on the serving machine, summed over sockets." },
+                "cpu_threads": { "$ref": "#/$defs/fact_number", "description": "Schema 1.2 only. Logical CPU threads on the serving machine." },
+                "ram_installed_gb": { "$ref": "#/$defs/fact_number", "description": "Schema 1.2 only. Installed memory, the sum of the modules, in GB. ram_gb is what the operating system can use and is usually a little less." },
                 "ram_gb": { "$ref": "#/$defs/fact_number" }
               }
             },
@@ -369,6 +372,11 @@
               "const": "not-verifiable-here",
               "description": "Kept explicit so that a successful load is never read as a match. A tokenizer that loads is not thereby the tokenizer the served weights were trained with, and nothing available to OmoBench can establish that it is."
             },
+            "revision": {
+              "type": ["string", "null"],
+              "minLength": 1,
+              "description": "Schema 1.2 only. Which bytes of the tokenizer were loaded: the commit of the cached Hugging Face snapshot, or local-sha256:<hex> of a local folder's tokenizer file. Read from what loaded, never from what the repository says today. Null when it could not be read."
+            },
             "identity": {
               "type": ["object", "null"],
               "additionalProperties": false,
@@ -543,8 +551,24 @@
           "model": {
             "allOf": [
               { "not": { "required": ["eligibility"] } },
-              { "properties": { "catalog_status": { "enum": ["catalogued", "proposed"] } } }
+              { "properties": { "catalog_status": { "enum": ["catalogued", "proposed"] } } },
+              { "properties": { "tokenizer": { "not": { "required": ["revision"] } } } }
             ]
+          },
+          "environment": {
+            "properties": {
+              "serving": {
+                "properties": {
+                  "host": {
+                    "not": { "anyOf": [
+                      { "required": ["cpu_cores"] },
+                      { "required": ["cpu_threads"] },
+                      { "required": ["ram_installed_gb"] }
+                    ] }
+                  }
+                }
+              }
+            }
           }
         }
       }

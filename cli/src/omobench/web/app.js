@@ -63,11 +63,13 @@ async function api(path, data, binary = false) {
 
 function updateButtons() {
   const busy = pending || jobs.some((job) => activeStates.has(job.status));
-  $("start-run").disabled = busy || !setup?.can_execute;
-  // Advisory, never a gate. Only an actual runner constraint stops a run, and
-  // an unloaded tokenizer or an uncatalogued model is not one -- the
-  // measurements would be just as real. What this does is make sure nobody
-  // spends an hour discovering it.
+  // The tokenizer is the one gate beyond the runner itself: the workload is
+  // built and counted with it, so Run waits until the runner's own interpreter
+  // has loaded it and encoded a sample prompt for the model chosen now.
+  $("start-run").disabled = busy || !setup?.can_execute || !tokenizerReady();
+  // The rest is advisory, never a gate. An uncatalogued model does not stop a
+  // run -- the measurements would be just as real. What this does is make
+  // sure nobody spends an hour discovering it.
   const outstanding = workflow ? workflow.blocking.run.length : 0;
   $("run-caution").hidden = !outstanding;
   if (outstanding) {
@@ -518,27 +520,193 @@ function chooseModel(id, how) {
   $("model").dispatchEvent(new Event("input", { bubbles: true }));
   lastServerCheck = { server_metadata: servedMetadata[id] || null, model: id };
   $("connect-status").textContent = how;
-  suggestTokenizer(id);
+  resolveModel(id);
 }
 
-// Behind the scenes: a served alias that names one curated model gives the
-// tokenizer the workload should be counted with. Offered in the field, where
-// it can be changed, and never used as the model's identity.
-async function suggestTokenizer(alias) {
-  if (!alias || $("tokenizer").value.trim() || /^[\w.-]+\/[\w.-]+$/.test(alias)) {
-    $("tokenizer-summary").textContent = $("tokenizer").value.trim() ? $("tokenizer").value.trim() : "uses the model ID";
+// The served identifier stays what every request sends. The tokenizer is
+// found separately -- a verified choice for this same model, the model file's
+// own metadata, then a name match offered once for confirmation -- and is
+// loaded and used to encode a sample in the runner before Run is enabled.
+var modelResolution = null;    // what /api/model-resolve said for the current model
+var tokenizerVerified = null;  // { model, source, revision } once it loaded and encoded
+var tokenizerByPerson = false; // typed under Advanced: an override, never replaced
+
+function tokenizerSource() { return $("tokenizer").value.trim() || $("model").value.trim(); }
+function tokenizerReady() {
+  return !!tokenizerVerified && tokenizerVerified.model === $("model").value.trim()
+    && tokenizerVerified.source === tokenizerSource();
+}
+function tokenizerStatus(text, kind = "") {
+  $("model-identity").hidden = false;
+  $("tokenizer-status").textContent = text;
+  $("tokenizer-status").className = kind;
+  $("tokenizer-summary").textContent = tokenizerReady() ? `${tokenizerVerified.source} · ready` : "not checked yet";
+  updateButtons();
+}
+function invalidateTokenizer() {
+  // A check belongs to one model and one source; any change makes it stale.
+  if (tokenizerVerified && !tokenizerReady()) tokenizerVerified = null;
+  updateButtons();
+}
+
+function radioList(container, name, items, render) {
+  container.replaceChildren(...items.map((item, index) => {
+    const label = document.createElement("label"); label.className = "check";
+    const radio = document.createElement("input"); radio.type = "radio"; radio.name = name; radio.value = String(index);
+    const text = document.createElement("span"); text.textContent = render(item);
+    label.append(radio, text); return label;
+  }));
+  if (items.length === 1) container.querySelector("input").checked = true;
+}
+
+function chosenModelFiles() {
+  const files = modelResolution && modelResolution.served_model_id === $("model").value.trim()
+    ? modelResolution.files : null;
+  if (!files || !files.groups || !files.groups.length) return null;
+  if (files.groups.length === 1) return files.groups[0].complete ? files.groups[0].files : null;
+  const picked = document.querySelector('input[name="model_file_choice"]:checked');
+  const group = picked ? files.groups[Number(picked.value)] : null;
+  return group && group.complete ? group.files : null;
+}
+
+function renderModelFiles(files) {
+  const choose = $("model-file-choose");
+  choose.hidden = true;
+  const status = $("model-file-status");
+  if (!files || files.state === "no-root") {
+    status.textContent = "Model folder not set. Set it under Model folder so OmoBench can read the model file and record which file the run used.";
     return;
   }
-  const report = await api("/api/model-suggestions", { served_model_id: alias }).catch(() => null);
-  const candidate = report && report.candidates && report.candidates.length === 1 ? report.candidates[0] : null;
-  if (candidate && !$("tokenizer").value.trim()) {
-    $("tokenizer").value = candidate.id;
-    $("tokenizer").dataset.filledBy = "the model name";
-    $("tokenizer-summary").textContent = `${candidate.id} — suggested from the model name; change it if your server runs something else`;
-  } else {
-    $("tokenizer-summary").textContent = "needed: this model ID is not a Hugging Face repository";
+  if (files.state === "unreadable-root") { status.textContent = `The model folder could not be read: ${files.detail || ""}`; return; }
+  if (files.state === "none") { status.textContent = `No model file for this model was found in ${files.root}.`; return; }
+  const describe = (group) => `${group.files.length > 1 ? `${group.files.length} files, ` : ""}${group.files[0]}`
+    + `${group.quantization ? ` · ${group.quantization}` : ""}${group.complete ? "" : ` · incomplete: ${group.missing} missing`}`;
+  if (files.state === "found") {
+    status.textContent = `Model file: ${describe(files.groups[0])}. Its identity is recorded when the run starts; it is fingerprinted after the run.`;
+    return;
   }
+  status.textContent = "Several files match this model. Choose the one your server has loaded, so the run records the right one.";
+  choose.hidden = false;
+  radioList($("model-file-list"), "model_file_choice", files.groups, describe);
 }
+
+async function resolveModel(id) {
+  id = (id || "").trim();
+  modelResolution = null; invalidateTokenizer();
+  $("tokenizer-choose").hidden = true; $("tokenizer-fetch").hidden = true; $("tokenizer-fetch-plan").textContent = "";
+  if (!id) { $("model-identity").hidden = true; return; }
+  if (!tokenizerByPerson) $("tokenizer").value = "";
+  tokenizerStatus("Finding the tokenizer for this model…");
+  let report;
+  try {
+    report = await api("/api/model-resolve", { served_model_id: id, server_metadata: servedMetadata[id] || null });
+  } catch (error) { tokenizerStatus(`Could not look the model up: ${error.message}`, "error"); return; }
+  if ($("model").value.trim() !== id) return;  // the choice changed meanwhile
+  modelResolution = report;
+  renderModelFiles(report.files);
+  if (tokenizerByPerson) { await verifyTokenizer($("tokenizer").value.trim(), "entered-by-you"); return; }
+  const tokenizer = report.tokenizer || {};
+  if (!tokenizer.needs_confirmation && tokenizer.source) {
+    $("tokenizer").value = tokenizer.source;
+    await verifyTokenizer(tokenizer.source, tokenizer.state, tokenizer.reason);
+    return;
+  }
+  const candidates = tokenizer.candidates || [];
+  if (candidates.length) {
+    $("tokenizer-choose").hidden = false;
+    $("tokenizer-choose-why").textContent = tokenizer.reason || "";
+    radioList($("tokenizer-candidates"), "tokenizer_choice", candidates,
+      (c) => `${c.source} · ${c.basis === "catalog-name" ? "curated catalog, by name" : c.basis === "huggingface-name" ? "Hugging Face, by name" : c.basis}`);
+    tokenizerStatus("One question before the run: confirm where this model comes from.");
+    return;
+  }
+  tokenizerStatus(tokenizer.reason || "No tokenizer was found for this model. Enter one under Advanced: tokenizer.", "error");
+  $("tokenizer-details").open = true;
+}
+
+// Loads the tokenizer in the runner's own interpreter and encodes a sample.
+// Offline first: a cached tokenizer needs no network. Downloading is a
+// separate, explicit act.
+async function verifyTokenizer(source, basis, why = "") {
+  const model = $("model").value.trim();
+  if (!source || !model) return;
+  tokenizerStatus(`Checking ${source}: loading it in the runner and encoding a sample prompt…`);
+  let report;
+  try {
+    report = await api("/api/tokenizer-preflight", {
+      tokenizer: source, model, network: "none",
+      identity_key: modelResolution && modelResolution.identity_key, basis,
+    });
+  } catch (error) { tokenizerStatus(`The tokenizer check could not run: ${error.message}`, "error"); return; }
+  if ($("model").value.trim() !== model || tokenizerSource() !== source) return;
+  if (report.ok) {
+    tokenizerVerified = { model, source, revision: report.revision || null };
+    const revision = report.revision ? ` · revision ${report.revision.replace(/^local-sha256:/, "local ").slice(0, 14)}` : "";
+    tokenizerStatus(`Tokenizer ready: ${source}${revision}. Loaded from the local cache and encoded a sample prompt `
+      + `(${report.encoded_tokens || "some"} tokens). ${why}`.trim(), "ok");
+    $("tokenizer-fetch").hidden = true;
+    return;
+  }
+  const missing = report.kind !== "invalid" && report.kind !== "encode-failed";
+  tokenizerStatus(missing
+    ? `${source} is not on this machine yet. Download its tokenizer files (a few megabytes, never the model weights) to continue.`
+    : `${source} cannot be used: ${report.message}`, "error");
+  $("tokenizer-fetch").hidden = !missing;
+  $("tokenizer-fetch").onclick = () => action(async () => {
+    const plan = await api("/api/tokenizer-download-plan", { tokenizer: source });
+    $("tokenizer-fetch-plan").textContent = `From ${plan.source} into ${plan.destination}.`;
+    tokenizerStatus(`Downloading the tokenizer files for ${source}…`);
+    const fetched = await api("/api/tokenizer-preflight", {
+      tokenizer: source, model, network: "download",
+      identity_key: modelResolution && modelResolution.identity_key, basis,
+    });
+    if (fetched.ok) {
+      tokenizerVerified = { model, source, revision: fetched.revision || null };
+      $("tokenizer-fetch").hidden = true;
+      tokenizerStatus(`Tokenizer ready: ${source}. Downloaded, loaded and encoded a sample prompt; next time it works offline.`, "ok");
+    } else {
+      tokenizerStatus(`${source} could not be downloaded or loaded: ${fetched.message}`, "error");
+    }
+  });
+}
+
+$("tokenizer-confirm").addEventListener("click", () => action(async () => {
+  const picked = document.querySelector('input[name="tokenizer_choice"]:checked');
+  const candidates = (modelResolution && modelResolution.tokenizer && modelResolution.tokenizer.candidates) || [];
+  const candidate = picked ? candidates[Number(picked.value)] : null;
+  if (!candidate) throw new Error("Choose the repository your server's model comes from.");
+  $("tokenizer").value = candidate.source;
+  $("tokenizer-choose").hidden = true;
+  await verifyTokenizer(candidate.source, "confirmed-by-you");
+}));
+
+$("tokenizer").addEventListener("input", () => {
+  tokenizerByPerson = !!$("tokenizer").value.trim();
+  invalidateTokenizer();
+  tokenizerStatus(tokenizerByPerson ? "Override entered. Press Check tokenizer, or it is checked when you leave the field." : "");
+});
+$("tokenizer").addEventListener("change", () => action(async () => {
+  const source = $("tokenizer").value.trim();
+  if (source) await verifyTokenizer(source, "entered-by-you");
+  else { tokenizerByPerson = false; await resolveModel($("model").value); }
+}));
+
+// The model folder: remembered by the panel, Windows paths accepted.
+async function loadSettings() {
+  const settings = await api("/api/settings").catch(() => null);
+  if (!settings) return;
+  $("model-root").value = settings.model_root || "";
+  $("model-root-summary").textContent = settings.model_root
+    ? (settings.model_root_readable ? settings.model_root : `${settings.model_root} · cannot be read`)
+    : "not set";
+}
+$("model-root-save").addEventListener("click", () => action(async () => {
+  const settings = await api("/api/settings", { model_root: $("model-root").value.trim() });
+  $("model-root-status").textContent = settings.model_root ? `Saved. Reading ${settings.model_root}.` : "Cleared.";
+  await loadSettings();
+  if ($("model").value.trim()) await resolveModel($("model").value);
+}));
+loadSettings();
 
 $("connect-server").addEventListener("click", () => action(async () => {
   $("connect-status").textContent = "Connecting…";
@@ -581,7 +749,8 @@ $("model-manual-toggle").addEventListener("click", () => {
   $("model-manual").hidden = false;
   $("model").focus();
 });
-$("model").addEventListener("change", () => suggestTokenizer($("model").value.trim()));
+$("model").addEventListener("change", () => resolveModel($("model").value.trim()));
+$("model").addEventListener("input", invalidateTokenizer);
 
 // What the hardware read found. On Windows behind the bridge the companion
 // reads it there; otherwise this machine is the server.
@@ -591,8 +760,13 @@ $("serving-read").addEventListener("click", () => action(async () => {
   let host = {}, devices = [], source;
   if (bridged) {
     const probe = await api("/api/serving-probe", { windows_bridge: true });
-    host = { os: probe.os, cpu: probe.cpu, ram_gb: probe.ram_gb };
-    devices = (probe.accelerators || []).map((d) => ({ vendor: d.vendor, model: d.model, count: d.count || 1 }));
+    host = { os: probe.os, cpu: probe.cpu, ram_gb: probe.ram_gb,
+             cpu_cores: probe.cpu_cores ?? null, cpu_threads: probe.cpu_threads ?? null,
+             ram_installed_gb: probe.ram_installed_gb ?? null };
+    // Dedicated memory only, as the driver reports it. Null stays null: shared
+    // graphics memory is never counted as VRAM.
+    devices = (probe.accelerators || []).map((d) => ({ vendor: d.vendor, model: d.model, count: d.count || 1,
+                                                        memory_gb: d.memory_gb ?? null }));
     source = "read on the Windows machine by the companion";
   } else {
     const env = (setup && setup.environment) || {};
@@ -608,9 +782,13 @@ $("serving-read").addEventListener("click", () => action(async () => {
 function renderServingRead() {
   const read = servingRead;
   if (!read) return;
-  const rows = [["Serving OS", read.host.os], ["Processor", read.host.cpu],
-    ["Memory", read.host.ram_gb ? `${read.host.ram_gb} GB` : null],
-    ["Graphics", read.devices.map((d) => d.model).join("; ") || "None found"]];
+  const cores = read.host.cpu_cores ? `${read.host.cpu_cores} cores${read.host.cpu_threads ? `, ${read.host.cpu_threads} threads` : ""}` : null;
+  const memory = read.host.ram_installed_gb
+    ? `${read.host.ram_installed_gb} GB installed${read.host.ram_gb ? ` (${read.host.ram_gb} GB usable)` : ""}`
+    : read.host.ram_gb ? `${read.host.ram_gb} GB` : null;
+  const rows = [["Serving OS", read.host.os], ["Processor", read.host.cpu], ["Cores", cores], ["Memory", memory],
+    ["Graphics", read.devices.map((d) => `${d.count > 1 ? `${d.count} × ` : ""}${d.model} · `
+      + `${d.memory_gb ? `${d.memory_gb} GB dedicated` : "VRAM not reported"}`).join("; ") || "None found"]];
   $("serving-host").replaceChildren(...rows.filter(([, v]) => v).flatMap(([label, value]) => {
     const dt = document.createElement("dt"), dd = document.createElement("dd");
     dt.textContent = label; dd.textContent = value; return [dt, dd];
@@ -625,8 +803,9 @@ function renderServingRead() {
   const list = $("card-choice-list");
   list.replaceChildren(...read.devices.map((device, index) => {
     const label = document.createElement("label"); label.className = "check";
-    const radio = document.createElement("input"); radio.type = "radio"; radio.name = "card_choice"; radio.value = String(index);
-    const text = document.createElement("span"); text.textContent = device.model;
+    const radio = document.createElement("input"); radio.type = "checkbox"; radio.name = "card_choice"; radio.value = String(index);
+    const text = document.createElement("span");
+    text.textContent = `${device.model}${device.memory_gb ? ` · ${device.memory_gb} GB` : ""}`;
     label.append(radio, text);
     return label;
   }));
@@ -657,10 +836,11 @@ function confirmedServing() {
   const mode = placement();
   if (!mode) return null;
   const devices = (servingRead && servingRead.devices) || [];
-  const card = document.querySelector('input[name="card_choice"]:checked');
+  // Every card ticked took part in inference; the others were present only.
+  const used = new Set(Array.from(document.querySelectorAll('input[name="card_choice"]:checked'), (box) => Number(box.value)));
   if (mode !== "cpu-only") {
     if (!devices.length) return { error: "Read the serving hardware, or choose CPU only." };
-    if (!card) return { error: "Say which card runs the model." };
+    if (!used.size) return { error: "Tick the card or cards that run the model." };
   }
   if (mode === "cpu-gpu-offload" && !$("split-detail").value.trim()) {
     return { error: "Say how the weights were split, as your server reports it." };
@@ -670,9 +850,9 @@ function confirmedServing() {
     accelerators: devices.map((device, index) => ({
       vendor: device.vendor, model: device.model, count: device.count || 1,
       ...(device.memory_gb ? { memory_gb: device.memory_gb } : {}),
-      role: mode !== "cpu-only" && card && Number(card.value) === index ? "inference" : "present-not-used",
+      role: mode !== "cpu-only" && used.has(index) ? "inference" : "present-not-used",
     })),
-    host: servingRead ? servingRead.host : {},
+    host: servingRead ? Object.fromEntries(Object.entries(servingRead.host).filter(([, value]) => value !== null && value !== undefined)) : {},
     informed_by: servingRead ? [servingRead.source] : [],
   };
 }
@@ -1355,6 +1535,12 @@ $("run-form").addEventListener("submit", (event) => {
     if (!serving) throw new Error("Say where your server runs the model, under Confirm the serving hardware.");
     if (serving.error) throw new Error(serving.error);
     data.serving_at_start = serving;
+    if (!tokenizerReady()) throw new Error("Wait for the tokenizer check to finish, or fix it under Advanced: tokenizer.");
+    data.tokenizer = tokenizerVerified.source === data.model ? "" : tokenizerVerified.source;
+    const files = chosenModelFiles();
+    if (files) data.model_files = files;
+    if (servedMetadata[data.model]) data.server_metadata = servedMetadata[data.model];
+    delete data.model_file_choice; delete data.tokenizer_choice;
     const job = await api("/api/runs", data); jobs = await api("/api/runs");
     await selectRun(job.id); $("run-panel").scrollIntoView({behavior: "smooth"});
   });
@@ -1527,8 +1713,15 @@ function withProvenance(data) {
     enriched.eligibility = eligibility;
     enriched.catalog_status = "uncatalogued";
   }
+  // The probe the companion took as this run started is evidence of this
+  // run; one read afterwards is only a reading of the machine now.
+  const reviewed = jobs.find((job) => job.id === selected);
+  if (reviewed && reviewed.hardware_at_start) enriched.probe = "run";
   // A request for the probe the panel read itself, not a document from here.
-  if (servingProbeRead) enriched.probe = true;
+  else if (servingProbeRead) enriched.probe = true;
+  if (!weights && identifiedWeights && identifiedWeights.job === selected) {
+    enriched.weights = { kind: "local-files", manifest: identifiedWeights.manifest };
+  }
   delete enriched.serving_os; delete enriched.serving_cpu; delete enriched.serving_ram_gb;
   delete enriched.serving_placement; delete enriched.serving_placement_detail;
   delete enriched.serving_accelerators; delete enriched.serving_application;
@@ -1606,13 +1799,9 @@ function renderPreflight(report) {
   $("tokenizer-download").hidden = report.ok || report.kind === "invalid";
 }
 
+// The same check Connect runs, for an override typed under Advanced.
 $("load-tokenizer").addEventListener("click", () => action(async () => {
-  $("tokenizer-preflight").hidden = false;
-  $("tokenizer-preflight-message").textContent = "Loading the tokenizer in the runner's interpreter. Closing the panel stops it.";
-  $("tokenizer-preflight-checks").replaceChildren();
-  renderPreflight(await api("/api/tokenizer-preflight", {
-    tokenizer: $("tokenizer").value, model: $("model").value, network: "metadata",
-  }));
+  await verifyTokenizer(tokenizerSource(), $("tokenizer").value.trim() ? "entered-by-you" : "served-id");
   await refreshWorkflow();
 }));
 
@@ -1624,6 +1813,67 @@ $("tokenizer-download-confirm").addEventListener("click", () => action(async () 
   renderPreflight(await api("/api/tokenizer-preflight", {
     tokenizer: source, model: $("model").value, network: "download",
   }));
+}));
+
+// --- Which model file this run used ------------------------------------
+// Fingerprinted after the run, never during it. "Model file verified" is
+// said only for the file recorded when the run started and unchanged since;
+// a file chosen now is recorded as chosen, after a confirmation.
+let identifiedWeights = null;  // { job, manifest, revision, verified }
+
+function renderWeights(report) {
+  const box = $("weights-status");
+  box.hidden = false;
+  box.classList.toggle("error", report.state === "changed");
+  $("weights-choose").hidden = true; $("weights-details").hidden = true;
+  if (report.state === "identified") {
+    identifiedWeights = { job: selected, manifest: report.manifest, revision: report.revision, verified: report.verified };
+    $("weights-message").textContent = report.verified
+      ? `Model file verified: ${report.files.join(", ")} is the file recorded when this run started, unchanged since.`
+      : `Model file recorded as chosen by you: ${report.files.join(", ")}. It was found today, so it is not called verified.`;
+    $("weights-details").hidden = false;
+    const facts = [["Revision", report.revision], ["Files", report.files.join("\n")],
+      ["Size", `${(report.bytes / 1e9).toFixed(2)} GB`], ["How", report.reused_fingerprint ? "Fingerprint reused: the file is unchanged since it was last hashed" : "Hashed now"]];
+    $("weights-facts").replaceChildren(...facts.flatMap(([label, value]) => {
+      const dt = document.createElement("dt"), dd = document.createElement("dd");
+      dt.textContent = label; dd.textContent = value; return [dt, dd];
+    }));
+    const revision = document.querySelector('#package-form [name="model_revision"]');
+    if (revision && !revision.value.trim()) revision.value = report.revision;
+    return;
+  }
+  identifiedWeights = null;
+  if (report.state === "no-root" || report.state === "changed") {
+    $("weights-message").textContent = report.message;
+  }
+  if (report.state === "choose") {
+    const groups = report.groups || [];
+    $("weights-message").textContent = groups.length
+      ? "This run did not record its model file. Choose the one it used from your model folder."
+      : `No model file for ${report.match === "none" ? "this model" : "it"} was found in ${report.root}.`;
+    if (groups.length) {
+      $("weights-choose").hidden = false;
+      radioList($("weights-groups"), "weights_group", groups, (g) =>
+        `${g.files.length > 1 ? `${g.files.length} files, ` : ""}${g.files[0]}${g.quantization ? ` · ${g.quantization}` : ""}${g.complete ? "" : " · incomplete"}`);
+      $("weights-choose-button").onclick = () => action(async () => {
+        const picked = document.querySelector('input[name="weights_group"]:checked');
+        // Said beside the button, not in the page notice far above it.
+        if (!picked) { $("weights-message").textContent = "Choose the model file this run used."; return; }
+        if (!$("weights-confirmed").checked) {
+          $("weights-message").textContent = "Tick the confirmation first: this file was found today, so only you can say it is the one this run used.";
+          return;
+        }
+        $("weights-message").textContent = "Fingerprinting the chosen file. Large files take a while; the run is not affected.";
+        renderWeights(await api(`/api/runs/${selected}/weights`, { files: groups[Number(picked.value)].files, confirm: true }));
+      });
+    }
+  }
+}
+
+$("identify-weights").addEventListener("click", () => action(async () => {
+  $("weights-status").hidden = false;
+  $("weights-message").textContent = "Looking for the file this run used…";
+  renderWeights(await api(`/api/runs/${selected}/weights`, {}));
 }));
 
 // What happened to the last Package press, said next to the button that was
