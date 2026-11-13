@@ -407,6 +407,7 @@ export function eligibleLeaderboard(entries: ComparisonEntry[], reference: Resul
   return entries.filter(entry => entry.origin === mode && incompatibilities(reference, entry.result).length === 0);
 }
 
-export function comparisonHref(id: string): string {
-  return `/compare?run=${encodeURIComponent(id)}`;
+export function comparisonHref(id: string, peers: string[] = []): string {
+  const query = peers.length ? `&peers=${peers.map(encodeURIComponent).join(",")}` : "";
+  return `/compare?run=${encodeURIComponent(id)}${query}`;
 }

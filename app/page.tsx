@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { SiteHeader } from "@/components/product/site-header";
 import { Badge } from "@/components/ui/badge";
@@ -20,7 +20,24 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { comparisonHref } from "@/app/lib/comparison";
-import { registryResults, type RegistryResult } from "@/app/data/registry-results";
+import { registryResults } from "@/app/data/registry-results";
+import {
+  ANY,
+  EXECUTION_MODE_LABEL,
+  NO_FILTERS,
+  NOT_RECORDED,
+  differingSettings,
+  filterOptions,
+  filterResults,
+  formatGb,
+  gpuSummary,
+  hardwareFacets,
+  runtimeWithVersion,
+  vramSummary,
+  type ExecutionMode,
+  type FilterOption,
+  type HardwareFilters,
+} from "@/app/lib/hardware-filters";
 
 const profiles = [
   {
@@ -53,35 +70,25 @@ const profiles = [
   },
 ];
 
-const getRegistryOptions = (select: (result: RegistryResult) => string) =>
-  Array.from(new Set(registryResults.map(select))).sort();
+// Hardware first: the filters a person reaches for when asking "how does this
+// model run on other machines?" or "what runs well on mine?". Choices come
+// from the published results, and "Not recorded" is offered as its own answer.
+const registryOptions = filterOptions(registryResults);
+const FILTER_KEYS = Object.keys(NO_FILTERS) as Array<keyof HardwareFilters>;
 
-const registryModelOptions = getRegistryOptions((result) => result.model);
-const registryHardwareOptions = getRegistryOptions((result) => result.hardware.display);
-const registryFrameworkOptions = getRegistryOptions((result) => result.framework);
-const registryProfileOptions = getRegistryOptions((result) => result.profile);
-const registryExecutionDeviceOptions = getRegistryOptions((result) => result.executionDevice.toUpperCase());
-// Three different statements about a model's identity, so they filter
-// separately rather than collapsing into "accepted". A 1.0 or 1.1 result has
-// no uncatalogued state to offer; the option simply does not appear.
-const CATALOG_STATUS_LABEL: Record<RegistryResult["catalogStatus"], string> = {
-  catalogued: "Catalogued",
-  proposed: "Proposed, awaiting review",
-  uncatalogued: "Not catalogued, published on declared eligibility",
-};
-const registryCatalogOptions = getRegistryOptions((result) => CATALOG_STATUS_LABEL[result.catalogStatus]);
-
-function deviceBadgeClassName(executionDevice: RegistryResult["executionDevice"]): string {
-  return executionDevice === "cpu"
+function deviceBadgeClassName(mode: ExecutionMode): string {
+  return mode === "cpu-only"
     ? "border-sky-300/30 bg-sky-300/10 text-sky-200"
-    : "border-amber-400/30 bg-amber-400/10 text-amber-200";
+    : mode === "cpu-gpu-offload"
+      ? "border-violet-300/30 bg-violet-300/10 text-violet-200"
+      : "border-amber-400/30 bg-amber-400/10 text-amber-200";
 }
 
 type RegistryFilterProps = {
   id: string;
   label: string;
   onValueChange: (value: string) => void;
-  options: string[];
+  options: FilterOption[];
   value: string;
 };
 
@@ -100,8 +107,8 @@ function RegistryFilter({ id, label, onValueChange, options, value }: RegistryFi
             Any
           </SelectItem>
           {options.map((option) => (
-            <SelectItem className="font-mono text-xs focus:bg-amber-400/15 focus:text-amber-100" key={option} value={option}>
-              {option}
+            <SelectItem className="font-mono text-xs focus:bg-amber-400/15 focus:text-amber-100" key={option.value} value={option.value}>
+              {option.label}
             </SelectItem>
           ))}
         </SelectContent>
@@ -114,27 +121,41 @@ function formatMetric(value: number, suffix = ""): string {
   return `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 }).format(value)}${suffix}`;
 }
 
-function LocalRegistry() {
-  const [model, setModel] = useState("all");
-  const [hardware, setHardware] = useState("all");
-  const [framework, setFramework] = useState("all");
-  const [profile, setProfile] = useState("all");
-  const [device, setDevice] = useState("all");
-  const [catalog, setCatalog] = useState("all");
+function filtersFromSearch(search: string): HardwareFilters {
+  const params = new URLSearchParams(search);
+  const filters = { ...NO_FILTERS };
+  for (const key of FILTER_KEYS) {
+    const value = params.get(key);
+    if (value && registryOptions[key].some(option => option.value === value)) filters[key] = value;
+  }
+  return filters;
+}
 
-  const filteredResults = useMemo(
-    () =>
-      registryResults.filter(
-        (result) =>
-          (model === "all" || result.model === model) &&
-          (hardware === "all" || result.hardware.display === hardware) &&
-          (framework === "all" || result.framework === framework) &&
-          (profile === "all" || result.profile === profile) &&
-          (catalog === "all" || CATALOG_STATUS_LABEL[result.catalogStatus] === catalog) &&
-          (device === "all" || result.executionDevice.toUpperCase() === device),
-      ),
-    [catalog, device, framework, hardware, model, profile],
-  );
+function writeFiltersToAddress(filters: HardwareFilters) {
+  const params = new URLSearchParams();
+  for (const name of FILTER_KEYS) if (filters[name] !== ANY) params.set(name, filters[name]);
+  const query = params.toString();
+  window.history.replaceState(null, "", `${window.location.pathname}${query ? `?${query}` : ""}#local-results`);
+}
+
+function subscribeToLocation(onChange: () => void) {
+  window.addEventListener("popstate", onChange);
+  return () => window.removeEventListener("popstate", onChange);
+}
+
+function LocalRegistry() {
+  // Filters live in the address, so a filtered view can be shared or reopened.
+  // What the address says is the starting point; a choice made here wins.
+  const search = useSyncExternalStore(subscribeToLocation, () => window.location.search, () => "");
+  const [chosen, setChosen] = useState<HardwareFilters | null>(null);
+  const filters = chosen ?? filtersFromSearch(search);
+  const update = (next: HardwareFilters) => { setChosen(next); writeFiltersToAddress(next); };
+  const setFilter = (key: keyof HardwareFilters) => (value: string) => update({ ...filters, [key]: value });
+
+  const filteredResults = useMemo(() => filterResults(registryResults, filters), [filters]);
+  const differing = differingSettings(filteredResults);
+  const sameWorkload = filters.model !== ANY && filters.profile !== ANY && filteredResults.length > 1;
+  const active = FILTER_KEYS.some(key => filters[key] !== ANY);
 
   const hasResults = registryResults.length > 0;
 
@@ -146,7 +167,7 @@ function LocalRegistry() {
             <p className="font-mono text-xs uppercase tracking-[0.2em] text-amber-300">Benchmark registry</p>
             <h2 className="mt-2 text-2xl font-semibold tracking-tight">Performance with the evidence to back it up.</h2>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-400">
-              Explore submitted runs by model, hardware and workload. Open a result to inspect its configuration, measurements and source artifacts.
+              Start from the hardware: choose a processor, graphics card or memory size to see how models run on it, or choose a model to see it across machines. Open a result to inspect its configuration, measurements and source artifacts.
             </p>
           </div>
           <Badge className={hasResults ? "border-amber-400/30 bg-amber-400/10 text-amber-200" : "border-amber-300/30 bg-amber-300/10 text-amber-200"} variant="outline">
@@ -164,61 +185,95 @@ function LocalRegistry() {
           </div>
         ) : (
           <>
-            <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
-              <RegistryFilter id="registry-hardware-filter" label="Hardware" onValueChange={setHardware} options={registryHardwareOptions} value={hardware} />
-              <RegistryFilter id="registry-device-filter" label="Execution device" onValueChange={setDevice} options={registryExecutionDeviceOptions} value={device} />
-              <RegistryFilter id="registry-model-filter" label="Workload model" onValueChange={setModel} options={registryModelOptions} value={model} />
-              <RegistryFilter id="registry-catalog-filter" label="Catalog status" onValueChange={setCatalog} options={registryCatalogOptions} value={catalog} />
-              <RegistryFilter id="registry-framework-filter" label="Framework" onValueChange={setFramework} options={registryFrameworkOptions} value={framework} />
-              <RegistryFilter id="registry-profile-filter" label="Profile" onValueChange={setProfile} options={registryProfileOptions} value={profile} />
+            <p className="mt-5 font-mono text-[11px] uppercase tracking-[0.18em] text-slate-400">Serving hardware</p>
+            <div aria-label="Serving hardware filters" className="mt-2 grid gap-3 sm:grid-cols-2 lg:grid-cols-5" role="group">
+              <RegistryFilter id="registry-cpu-filter" label="CPU" onValueChange={setFilter("cpu")} options={registryOptions.cpu} value={filters.cpu} />
+              <RegistryFilter id="registry-gpu-filter" label="Inference GPU" onValueChange={setFilter("gpu")} options={registryOptions.gpu} value={filters.gpu} />
+              <RegistryFilter id="registry-vram-filter" label="VRAM per inference GPU" onValueChange={setFilter("vram")} options={registryOptions.vram} value={filters.vram} />
+              <RegistryFilter id="registry-ram-filter" label="System RAM" onValueChange={setFilter("ram")} options={registryOptions.ram} value={filters.ram} />
+              <RegistryFilter id="registry-mode-filter" label="Execution" onValueChange={setFilter("mode")} options={registryOptions.mode} value={filters.mode} />
             </div>
-            <p aria-live="polite" className="mt-4 text-sm text-slate-400">
-              Showing <span className="font-mono text-slate-200">{filteredResults.length}</span> of {registryResults.length} registry results.
-            </p>
+            <p className="mt-4 font-mono text-[11px] uppercase tracking-[0.18em] text-slate-400">Model and workload</p>
+            <div aria-label="Model and workload filters" className="mt-2 grid gap-3 sm:grid-cols-2 lg:grid-cols-4" role="group">
+              <RegistryFilter id="registry-model-filter" label="Model" onValueChange={setFilter("model")} options={registryOptions.model} value={filters.model} />
+              <RegistryFilter id="registry-quantization-filter" label="Quantization" onValueChange={setFilter("quantization")} options={registryOptions.quantization} value={filters.quantization} />
+              <RegistryFilter id="registry-runtime-filter" label="Runtime" onValueChange={setFilter("runtime")} options={registryOptions.runtime} value={filters.runtime} />
+              <RegistryFilter id="registry-profile-filter" label="Profile" onValueChange={setFilter("profile")} options={registryOptions.profile} value={filters.profile} />
+            </div>
+            <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-slate-400">
+              <p aria-live="polite">
+                Showing <span className="font-mono text-slate-200">{filteredResults.length}</span> of {registryResults.length} registry results.
+              </p>
+              {active && <button className="font-mono text-xs text-amber-300 hover:underline" onClick={() => update(NO_FILTERS)} type="button">Clear filters</button>}
+              {sameWorkload && <Link className="font-mono text-xs text-sky-300 hover:underline" href={comparisonHref(filteredResults[0].id, filteredResults.slice(1, 4).map(result => result.id))}>Compare these runs side by side ↗</Link>}
+            </div>
+            {differing.length > 0 && (
+              <p className="mt-2 text-xs leading-5 text-amber-200/80" role="note">
+                These runs differ in {differing.join(", ")}. Rows side by side are not the same measurement unless model, profile and settings match; the comparison page says exactly what differs.
+              </p>
+            )}
             <div className="mt-4">
               <Table>
                 <TableHeader>
                   <TableRow className="border-white/10 hover:bg-transparent">
-                    <TableHead className="text-slate-400">Device</TableHead>
-                    <TableHead className="text-slate-400">Hardware</TableHead>
-                    <TableHead className="text-slate-400">Framework</TableHead>
+                    <TableHead className="text-slate-400">CPU</TableHead>
+                    <TableHead className="text-slate-400">Inference GPU</TableHead>
+                    <TableHead className="text-slate-400">RAM</TableHead>
+                    <TableHead className="text-slate-400">VRAM</TableHead>
+                    <TableHead className="text-slate-400">Model</TableHead>
                     <TableHead className="text-slate-400">Quantization</TableHead>
-                    <TableHead className="text-slate-400">TTFT p50</TableHead>
+                    <TableHead className="text-slate-400">Runtime</TableHead>
+                    <TableHead className="text-slate-400">Profile</TableHead>
                     <TableHead className="text-slate-400">Output tok/s</TableHead>
+                    <TableHead className="text-slate-400">TTFT p50</TableHead>
                     <TableHead className="text-right text-slate-400">Record</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {filteredResults.length === 0 ? (
                     <TableRow className="border-white/10 hover:bg-transparent">
-                      <TableCell className="py-8 text-center text-sm text-slate-400" colSpan={7}>
+                      <TableCell className="py-8 text-center text-sm text-slate-400" colSpan={11}>
                         No registry results match this combination.
                       </TableCell>
                     </TableRow>
                   ) : (
-                    filteredResults.map((result) => (
-                      <TableRow className="border-white/10 hover:bg-white/[0.035]" key={result.id}>
-                        <TableCell>
-                          <Badge className={deviceBadgeClassName(result.executionDevice)} variant="outline">
-                            {result.executionDevice.toUpperCase()}
-                          </Badge>
-                        </TableCell>
-                        <TableCell>
-                          <p className="font-medium text-slate-100">{result.hardware.display}</p>
-                          <p className="mt-1 font-mono text-xs text-slate-500">{result.model}</p>
-                        </TableCell>
-                        <TableCell className="font-mono text-xs text-slate-300">{result.framework}</TableCell>
-                        <TableCell className="font-mono text-xs text-slate-300">{result.quantization ?? "Unspecified"}</TableCell>
-                        <TableCell className="font-mono text-slate-100">{formatMetric(result.ttftP50, " ms")}</TableCell>
-                        <TableCell className="font-mono text-amber-300">{formatMetric(result.outputTokensPerSecond)}</TableCell>
-                        <TableCell className="text-right">
-                          <a className="font-mono text-xs text-amber-300 transition hover:text-amber-200 hover:underline" href={`/runs/${result.id}`}>
-                            View details
-                          </a>
-                          <Link className="mt-2 block font-mono text-xs text-sky-300 hover:underline" href={comparisonHref(result.id)}>Compare ↗</Link>
-                        </TableCell>
-                      </TableRow>
-                    ))
+                    filteredResults.map((result) => {
+                      const facets = hardwareFacets(result);
+                      return (
+                        <TableRow className="border-white/10 hover:bg-white/[0.035]" key={result.id}>
+                          <TableCell>
+                            <p className="font-medium text-slate-100">{facets.cpu ?? NOT_RECORDED}</p>
+                            <p className="mt-1 font-mono text-[11px] text-slate-500">
+                              {facets.cpuCores !== null ? `${facets.cpuCores} cores` : "Cores not recorded"}
+                              {facets.cpuThreads !== null ? ` · ${facets.cpuThreads} threads` : ""}
+                            </p>
+                          </TableCell>
+                          <TableCell>
+                            <p className="text-slate-100">{gpuSummary(facets)}</p>
+                            <Badge className={`mt-1 ${deviceBadgeClassName(facets.executionMode)}`} variant="outline">
+                              {EXECUTION_MODE_LABEL[facets.executionMode]}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="font-mono text-xs text-slate-300">
+                            {formatGb(facets.ramGb)}
+                            {facets.ramGb !== null && <span className="block text-[11px] text-slate-500">{facets.ramIsInstalled ? "installed" : "usable, as reported"}</span>}
+                          </TableCell>
+                          <TableCell className="font-mono text-xs text-slate-300">{vramSummary(facets)}</TableCell>
+                          <TableCell className="font-mono text-xs text-slate-200">{result.model}</TableCell>
+                          <TableCell className="font-mono text-xs text-slate-300">{facets.quantization}</TableCell>
+                          <TableCell className="font-mono text-xs text-slate-300">{runtimeWithVersion(result)}</TableCell>
+                          <TableCell className="font-mono text-xs text-slate-300">{result.profile}</TableCell>
+                          <TableCell className="font-mono text-amber-300">{formatMetric(result.outputTokensPerSecond)}</TableCell>
+                          <TableCell className="font-mono text-slate-100">{formatMetric(result.ttftP50, " ms")}</TableCell>
+                          <TableCell className="text-right">
+                            <a className="font-mono text-xs text-amber-300 transition hover:text-amber-200 hover:underline" href={`/runs/${result.id}`}>
+                              View details
+                            </a>
+                            <Link className="mt-2 block font-mono text-xs text-sky-300 hover:underline" href={comparisonHref(result.id)}>Compare ↗</Link>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })
                   )}
                 </TableBody>
               </Table>

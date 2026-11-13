@@ -832,3 +832,60 @@ class CompletionAndRecoveryTests(PanelFixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunStartEvidenceTests(PanelFixture):
+    """What the panel read when the run started becomes the run's evidence.
+
+    Labelled fixture: an AMD machine as the companion would report it, and a
+    tokenizer check as the panel records it. No real run, no real hardware.
+    """
+
+    AT_START = {
+        "kind": "omobench-serving-hardware-probe-v1",
+        "os": "Microsoft Windows 11 Pro 10.0.26200", "cpu": "AMD Ryzen 7 5800X3D",
+        "cpu_cores": 8, "cpu_threads": 16, "ram_gb": 31.92, "ram_installed_gb": 32.0,
+        "accelerators": [{"vendor": "amd", "model": "AMD Radeon RX 9070", "memory_gb": 15.92,
+                          "count": 1, "driver_version": "32.0.15.9671"}],
+        "captured_at": "2026-11-12T10:00:00+00:00",
+    }
+
+    def started(self, **job_fields) -> str:
+        job_id = self.completed_job(bridged=True)
+        with self.controller.lock:
+            self.controller.jobs[job_id].update(job_fields)
+        return job_id
+
+    def result(self, job_id: str) -> dict:
+        return json.loads(
+            (self.controller.run_directory(job_id) / "result.json").read_text(encoding="utf-8"))
+
+    def test_hardware_read_at_run_start_is_detected_and_makes_a_1_2_result(self) -> None:
+        job_id = self.started(hardware_at_start=self.AT_START)
+        detail = self.controller.package(job_id, {**PACKAGE_FORM, "serving": SERVING, "probe": "run"})
+        self.assertTrue(detail["validation"]["valid"], detail["validation"]["errors"])
+        result = self.result(job_id)
+        self.assertEqual(result["schema_version"], "1.2")
+        host = result["environment"]["serving"]["host"]
+        self.assertEqual(host["cpu"], {"value": "AMD Ryzen 7 5800X3D", "provenance": "detected"})
+        self.assertEqual(host["cpu_cores"]["value"], 8)
+        self.assertEqual(host["cpu_threads"]["value"], 16)
+        self.assertEqual(host["ram_installed_gb"]["value"], 32.0)
+
+    def test_without_a_run_start_reading_probe_run_is_refused(self) -> None:
+        job_id = self.started()
+        with self.assertRaises(UIError):
+            self.controller.package(job_id, {**PACKAGE_FORM, "serving": SERVING, "probe": "run"})
+
+    def test_the_tokenizer_that_loaded_is_recorded_with_its_revision(self) -> None:
+        job_id = self.started(tokenizer_check={
+            "source": "Qwen/Qwen2.5-Coder-14B-Instruct", "kind": "huggingface",
+            "identity": None, "revision": "0123456789abcdef0123456789abcdef01234567"})
+        detail = self.controller.package(job_id, {**PACKAGE_FORM, "serving": SERVING})
+        self.assertTrue(detail["validation"]["valid"], detail["validation"]["errors"])
+        result = self.result(job_id)
+        tokenizer = result["model"]["tokenizer"]
+        self.assertEqual(tokenizer["loaded"], "loaded-before-run")
+        self.assertEqual(tokenizer["revision"], "0123456789abcdef0123456789abcdef01234567")
+        self.assertEqual(result["schema_version"], "1.2")
+        self.assertEqual(tokenizer["matches_served_weights"], "not-verifiable-here")

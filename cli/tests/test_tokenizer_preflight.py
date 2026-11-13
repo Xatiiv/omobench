@@ -516,6 +516,9 @@ class ProbeSourceTests(PreflightFixture):
                 vocab_size = 151936
                 vocab_file = "/fixture/vocab.json"
 
+                def encode(self, text):
+                    return list(range(len(text.split())))
+
             class AutoTokenizer:
                 @staticmethod
                 def from_pretrained(source, **kwargs):
@@ -525,6 +528,27 @@ class ProbeSourceTests(PreflightFixture):
         self.assertTrue(report.ok, report.message + report.detail)
         self.assertEqual(report.identity, {"class": "Qwen2TokenizerFast",
                                            "vocabulary_size": 151936})
+        # Loaded is not used: the sample sentence was encoded too.
+        self.assertGreater(report.encoded_tokens, 0)
+
+    def test_a_tokenizer_that_loads_but_cannot_encode_is_not_ready(self) -> None:
+        """The workload is built by encoding text, so that is what is tried."""
+        report = preflight("Qwen/Qwen3-4B", network=NETWORK_NONE, timeout=120,
+                           interpreter=self.interpreter_with({"transformers": """
+            class Broken:
+                vocab_size = 10
+
+                def encode(self, text):
+                    raise ValueError("no vocabulary")
+
+            class AutoTokenizer:
+                @staticmethod
+                def from_pretrained(source, **kwargs):
+                    return Broken()
+        """}))
+        self.assertFalse(report.ok)
+        self.assertEqual(report.kind, "encode-failed")
+        self.assertIn("could not encode a sample sentence", report.message)
 
     def test_the_probe_refuses_repository_code_in_the_call_it_really_makes(self) -> None:
         """Asserted inside the stand-in, on the arguments it is handed."""

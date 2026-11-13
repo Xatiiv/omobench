@@ -54,6 +54,8 @@ namespace OmoBench.Installer
             "cli/src/omobench/telemetry.py",
             "cli/src/omobench/tokenizer_preflight.py",
             "cli/src/omobench/model_identity.py",
+            "cli/src/omobench/local_models.py",
+            "cli/src/omobench/model_resolution.py",
             "cli/src/omobench/model_proposal.py",
             "cli/src/omobench/result_provenance.py",
             "cli/src/omobench/serving_metadata.py",

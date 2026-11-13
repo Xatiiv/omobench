@@ -127,8 +127,13 @@ function environments(result: ResultRecord): EvidenceSection {
         { provenance: "contributor-declared" }),
       row("Serving operating system", host.os.value, { provenance: host.os.provenance }),
       row("Serving processor", host.cpu.value, { provenance: host.cpu.provenance }),
+      ...coreRows(host),
       row("Serving memory", host.ramGb.value === null ? null : `${host.ramGb.value} GB`,
         { provenance: host.ramGb.provenance }),
+      ...(host.ramInstalledGb ? [row("Installed memory",
+        host.ramInstalledGb.value === null ? null : `${host.ramInstalledGb.value} GB`,
+        { provenance: host.ramInstalledGb.provenance,
+          note: "The modules fitted. Serving memory above is what the operating system could use." })] : []),
       row("Benchmark runner", runner.os ? `${runner.os} (${runner.kind})` : null, {
         provenance: "detected",
         note: "The machine that ran GuideLLM. On a bridged run this is the WSL2 distribution, "
@@ -351,6 +356,10 @@ function tokenizer(result: ResultRecord): EvidenceSection {
       row("Loaded before the run",
         loaded ? "Yes, in the runner's own interpreter" : "Not checked by OmoBench",
         { provenance: loaded ? "detected" : null }),
+      ...(result.tokenizer.revision ? [row("Tokenizer revision", result.tokenizer.revision, {
+        provenance: "detected",
+        note: "Which bytes loaded: the cached snapshot's commit, or a hash of a local tokenizer file.",
+      })] : []),
       row("Tokenizer implementation", result.tokenizer.className, { provenance: "detected" }),
       row("Vocabulary size", result.tokenizer.vocabularySize, { provenance: "detected" }),
       row("Matches the served weights", "Not verifiable from this evidence", {
@@ -359,6 +368,16 @@ function tokenizer(result: ResultRecord): EvidenceSection {
       }),
     ],
   };
+}
+
+// Cores and threads, a 1.2 fact. No row on a result that never recorded them.
+function coreRows(host: NonNullable<ResultRecord["serving"]>["host"]): EvidenceRow[] {
+  const { cpuCores: cores, cpuThreads: threads } = host;
+  if (!cores && !threads) return [];
+  const part = (fact: typeof cores, unit: string) =>
+    fact && fact.value !== null ? `${fact.value} ${unit}` : `${unit} not recorded`;
+  return [row("Serving CPU cores", `${part(cores, "physical cores")} · ${part(threads, "threads")}`,
+    { provenance: (cores ?? threads)?.provenance })];
 }
 
 function transport(result: ResultRecord): EvidenceSection {

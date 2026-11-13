@@ -159,3 +159,5 @@
 .why-comparison li{font-size:12px;line-height:1.75;color:#c4d6f0;padding:4px 0}
 .why-comparison .why-missing{color:#a5b6cf}
 .why-comparison .why-difference strong,.why-comparison .why-missing strong{color:#edf3fc}
+
+.hardware-facts dd small { display: block; margin-top: 2px; font-size: 0.72rem; opacity: 0.7; }
