@@ -1,8 +1,14 @@
-# Install, update, and run OmoBench
+# Install, update, and run OmoBench from source
+
+This page is for running OmoBench from a source checkout on Linux, macOS or
+WSL2, and for developers. On Windows, the
+[installer](windows-installer.md) is simpler, and the [user guide](user-guide.md)
+covers the whole first run.
 
 The browser panel and direct CLI use the same benchmark runner. Both need an
 existing model server. Set up OmoBench here, then follow the
-[CPU demo](local-demo.md) or [browser guide](browser-control.md).
+[user guide](user-guide.md), the [CPU demo](local-demo.md) or the
+[panel reference](browser-control.md).
 
 ## Choose the environment
 
@@ -12,7 +18,8 @@ existing model server. Set up OmoBench here, then follow the
 | Open the panel for setup/review only | Also possible on native Windows | Python and `./cli[ui]`; execution remains blocked |
 | CLI checks and dry runs | Also possible on native Windows | Git, Python and `./cli` |
 | Develop the comparison website | Windows, Linux, or macOS | Git, Node.js and npm |
-| Upload a PR directly from the panel | Same environment as the panel | Authenticated GitHub CLI (`gh`) and write access to `origin` |
+| Submit from the panel (community route) | Same environment as the panel | A GitHub account; sign-in happens in the panel |
+| Submit through `origin` from the panel | Same environment as the panel | Authenticated GitHub CLI (`gh`) and write access to `origin` |
 
 Use Python 3.12 for this walkthrough; it is the version used by project CI.
 The runner extra installs `guidellm[recommended]==0.7.3`. Its dependency set
@@ -164,22 +171,23 @@ omobench ui
 ```
 
 Open the full URL it prints, including `#token=...`. Keep the terminal running.
-Your Windows browser can access the WSL-hosted panel. The page that opens is a
-**guided benchmark by default**: it downloads, verifies, and runs one reviewed
-small CPU model for you, then helps prepare a submission, see
-[Guided CPU setup](guided-launcher.md). It adds one extra requirement of its
-own, Linux x86_64 with glibc 2.34 or newer, because its pinned runtime build
-depends on it.
+Your Windows browser can access the WSL-hosted panel. The page opens at
+**Connect your model server**: enter your server's address, press
+**Connect**, confirm the serving hardware and press **Run standard test**. The
+[user guide](user-guide.md) explains each step, and the
+[panel reference](browser-control.md) covers every control. No website
+development server or npm installation is required.
 
-Already loaded a model yourself using the [model-server guide](model-server.md)?
-Open **`/advanced`** in the same panel instead to connect to it directly. The
-[browser guide](browser-control.md) explains that panel's controls and
-submission flow. No website development server or npm installation is
-required for either page.
+Starting a model server yourself is described in the
+[model-server guide](model-server.md). The optional, reviewed managed CPU setup
+(`omobench prepare` / `omobench launch`), which downloads and starts one small
+model for you, is a command-line path described in
+[Managed CPU setup](guided-launcher.md); it needs Linux x86_64 with glibc 2.34
+or newer.
 
 ## Run directly from the CLI
 
-Use this as an alternative to clicking **Run benchmark**, not at the same time
+Use this as an alternative to **Run standard test** in the panel, not at the same time
 as a panel-controlled run. This example assumes you started the small model in
 [the model-server guide](model-server.md) on port `8092`.
 
@@ -207,9 +215,8 @@ Here, `--model` is the identifier accepted by the server API. The CLI writes
 evidence under `.omobench-runs/run-<id>/` and prints its path. It does not upload
 anything. Direct CLI runs are not automatically imported into **Recent runs**.
 
-For CPU runs, keep the raw report locally; the panel is the easiest way to get
-formatted measurements and a downloadable local summary for a new run.
-`omobench package` rejects CPU execution. For completed GPU runs, see the
+The panel is the easiest way to get formatted measurements and a local report
+for a new run. To package a completed CLI run, CPU or GPU, see the
 [packaging and submission commands](submission-bundle.md#create-the-local-normalized-summary).
 
 ## What hardware detection means
@@ -244,4 +251,4 @@ omobench doctor
 ```
 
 This does not enable benchmark execution on Windows. Website development uses
-Node and npm separately; see [the README](../README.md#develop-the-comparison-website).
+Node and npm separately; see [the README](../README.md#develop-omobench).

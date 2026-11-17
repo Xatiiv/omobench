@@ -15,7 +15,7 @@ does not produce a percentage or an infinite improvement claim.
 Choose the question first. "Comparable" is a property of two runs **and a
 question**: asking which of two machines is faster requires the hardware to
 differ, and refusing that pair because it differs would answer a question
-nobody asked. The four questions, what each one means to vary, and the three
+nobody asked. The questions, what each one means to vary, and the three
 outcomes are set out in [guided-workflow.md](guided-workflow.md).
 
 **Why this comparison?** explains every run placed beside the reference: the
@@ -57,15 +57,16 @@ component. Matching metadata does not independently prove that a server executed
 the declared configuration. Configuration fingerprints deliberately do not gate
 comparison, because they include the hardware being compared.
 
-The leaderboard ranks **runs** within the matching workload and selected device
-filter. Repeat runs count separately. Ties share a rank; it is not a percentile
+The leaderboard ranks **runs** within the matching workload and the hardware
+filters chosen above it (CPU, inference GPU, VRAM per inference GPU, system RAM,
+execution and transport). Repeat runs count separately. Ties share a rank; it is not a percentile
 or a ranking of unique people or machines. Unmatched runs are listed with reasons.
 
 ## Compare a private result
 
-In the guided panel, complete a run, choose **Prepare submission**, then
-**Package & validate** and **Review submission files**. Use **Download result.json
-for comparison**, or extract `result.json` from **Download complete bundle**.
+In the panel, complete a run, then in **Review & share** choose **Package &
+validate** and **Review submission files**. Extract `result.json` from the ZIP
+that **Download complete bundle** saves. No GitHub sign-in is needed for this.
 
 On the website, choose **Open your result.json**, or expand **Or paste a packaged
 result**. The importer expects a normalized OmoBench v1 record, not the raw

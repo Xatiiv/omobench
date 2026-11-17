@@ -1,5 +1,8 @@
 # Installing OmoBench on Windows
 
+New to OmoBench? The [user guide](user-guide.md) covers installation and the
+whole first run. This page is the installer reference.
+
 This is the download-and-run path: you get an installer, open it, answer a
 couple of questions, and end up at the OmoBench benchmark panel, with no
 repository to clone and no Python paths to find.
@@ -37,8 +40,9 @@ benchmark has to run inside WSL2.
 ## Getting the installer
 
 Download `OmoBenchSetup.exe` from the project's releases page, or build it
-yourself (below). The website's **Download OmoBench for Windows** button links
-to the published release; while no release has been published it says so
+yourself (below). The **Download for Windows** button on
+<https://www.omobench.org/run> links to the published release and shows its
+version, source revision and checksum; while no release has been published it says so
 rather than offering a link that goes nowhere.
 
 **The installer is not code-signed.** Windows SmartScreen will say the
@@ -117,8 +121,9 @@ virtual environment you maintain, your system Python: none of them are written
 to, upgraded, or repointed. Everything the installer creates is in the two
 managed locations above, and deleting those removes it.
 
-It does not download any model or run any benchmark. Those remain explicit
-actions inside the OmoBench panel, exactly as before.
+It does not download any model or run any benchmark. Models come from your own
+model server, such as LM Studio, and running a benchmark is an explicit action
+in the OmoBench panel. Next step: [connect your model server](user-guide.md#b-prepare-lm-studio-and-connect).
 
 ### Where the source comes from
 
@@ -129,7 +134,7 @@ unpacked, the archive is checked against the SHA-256 recorded when the
 installer was built; a truncated or altered payload is refused rather than
 installed.
 
-The archive is an explicit list of what the CLI, guided panel, packaging and
+The archive is an explicit list of what the CLI, panel, packaging and
 validation actually read, the `cli` package, benchmark profiles, the model
 catalogue and download recipes, the result schema and the validator. Git
 history, the website, tests, caches, evidence and model files are not in it.
@@ -300,8 +305,7 @@ review five evidence files, and confirm upload to their public fork and a PR to
 OmoBench. The OAuth client ID is public build configuration. The OmoBench
 Community app is registered and its public ID is included in the source. A build
 without a configured ID reports sign-in unavailable and offers the complete ZIP
-instead. The currently released installer
-does not gain this feature until a new release is built and published.
+instead. The current public release includes the configured ID.
 See [community submissions](community-submissions.md).
 
 ## Managed runner dependency policy

@@ -1,14 +1,19 @@
-# Show a packaged GPU result on the local website
+# Show a packaged result on a local copy of the website
+
+This is a developer task. To look at your own result without running the
+website locally, open its `result.json` on the public Compare page with **Open
+your result.json**; it stays in your browser (see
+[comparing results](comparing-results.md#compare-a-private-result)).
 
 The comparison website reads normalized `result.json` files under `results/`.
-It does not read `.omobench-runs/`, UI job history, or local CPU summaries.
+It does not read `.omobench-runs/`, UI job history, or local reports.
 Opening `omobench ui` and running a benchmark does not automatically add a
 website registry row.
 
 ## Preview a validated bundle
 
-First complete a real GPU run and package/validate it using the
-[browser panel](browser-control.md#gpu-packaging-and-pull-requests) or
+First complete a real CPU, GPU or split run and package/validate it using the
+[browser panel](browser-control.md#packaging-and-pull-requests) or
 [CLI workflow](submission-bundle.md#create-the-local-normalized-summary).
 
 - For a panel ZIP, extract **at the checkout root**; it already includes the
@@ -16,7 +21,7 @@ First complete a real GPU run and package/validate it using the
 - For a CLI bundle, copy the five standard files to a new directory under
   `results/`, following the [manual workflow](submission-bundle.md#manual-pull-request-workflow).
 - Do not replace an existing bundle, copy UI job metadata, or rename a CPU
-  summary to `result.json`.
+  local report to `result.json`.
 
 The destination must contain:
 
@@ -43,8 +48,8 @@ npm ci
 npm run dev
 ```
 
-Open the printed URL. The registry section shows the packaged metrics;
-**View details** shows model/runtime/hardware metadata, profile, configuration
+Open the printed URL. The registry section shows the packaged metrics; opening
+a run's record shows model/runtime/hardware metadata, profile, configuration
 fingerprint, and evidence hashes. Illustrative comparison rows remain separate.
 
 ## From local preview to the hosted registry

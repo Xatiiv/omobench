@@ -1,5 +1,10 @@
 # Installation follow-up status
 
+> **Historical status note.** This records the work that prepared installer
+> 0.1.1. Later releases have since been published; the website's
+> [Run page](https://www.omobench.org/run) always links the current one. For
+> installing OmoBench today, see the [user guide](user-guide.md).
+
 This branch prepares installer version 0.1.1, not a published update. The website must
 continue to link to the existing release until a new asset has been built,
 tested, checked against its metadata and published.

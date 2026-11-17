@@ -7,9 +7,10 @@ packaging, validation, or preview.
 
 ## Contributor flow
 
-1. Finish a benchmark and open **Share results** (or **Review & submit** in the
-   panel). Package and validate the evidence.
-2. Leave **OmoBench community registry** selected. Choose **Sign in with GitHub**,
+1. Finish a benchmark and open **Review & share** in the panel. Run **Identify
+   model file**, then **Package & validate**.
+2. Under **Sharing needs GitHub sign-in**, leave **OmoBench community registry**
+   selected as the **Submission destination**. Choose **Sign in with GitHub**,
    then enter the displayed one-time code at `https://github.com/login/device`.
    Use only a code requested in your own local panel.
 3. **Review submission files** shows the account, public upload repository,
@@ -22,8 +23,9 @@ packaging, validation, or preview.
    there because GitHub does not let you fork your own repository.
 5. Follow CI and maintainer review on GitHub. Uploaded evidence is public before
    merge. Registry inclusion and community comparison follow review, merge and a
-   site build. You can use **Download result.json for comparison** privately in
-   the website's Compare page before submission, without uploading it.
+   site build. Before submitting, you can open the `result.json` from
+   **Download complete bundle** privately on the website's Compare page
+   (**Open your result.json**), without uploading it.
 
 The legacy **Checkout origin** option still uses existing `gh` authentication
 and opens its PR in the displayed origin repository. It needs a Git checkout
@@ -88,8 +90,8 @@ secret is needed or used. Record only its public client ID in
 `OMOBENCH_GITHUB_CLIENT_ID` can override that value for local development or a
 downstream build; it is not a credential and never changes API hosts. Rebuild
 the installer from the tested committed revision so the runtime payload includes
-the configured ID and new modules. Do not claim the released installer supports
-sign-in until that release has actually shipped.
+the configured ID and new modules. The current public installer release is
+built from a revision that includes the configured ID.
 
 Use an account that does not own upstream to verify real sign-in and fork
 submission, with genuine reviewed evidence and explicit consent to publish it.

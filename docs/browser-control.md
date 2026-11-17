@@ -1,32 +1,34 @@
-# Advanced panel: browser control
+# Panel reference
 
-`omobench ui` opens a local control panel around the existing OmoBench CLI.
-Its **default page is a guided benchmark**, see
-[Guided CPU setup](guided-launcher.md), that downloads, verifies, runs, and
-helps submit one reviewed small CPU model for you, with nothing to type but a
-submitter identity. This page describes the **Connect & run** section of
-that same single page: connecting to a model server you already run yourself.
-(`/advanced` and `/guided` are kept as bookmarks and serve the same page.) You use browser forms and buttons; benchmark execution
-still runs through `omobench run --execute`, with the same GuideLLM version,
-profiles, and evidence. Packaging still runs through `omobench package`.
-Submission remains a GitHub PR.
+`omobench ui` opens a local control panel around the existing OmoBench CLI. New
+to OmoBench? Start with the [user guide](user-guide.md); this page is the
+detailed reference for the same panel.
 
-That section connects to an already-running model server on the same
-machine. It does not install models, start the model server, or switch its
-execution device. The hosted website links to these launch instructions; it
-does not remotely execute programs on visitors' computers.
+The panel is one page. It starts at **01 Connect your model server**, then
+**02 Confirm the serving hardware** and **03 Run a standard test**, followed by
+the run's dashboard and **Review & share**. (`/advanced` and `/guided` are kept
+as bookmarks and serve the same page.) You use browser forms and buttons;
+benchmark execution still runs through `omobench run --execute`, with the same
+GuideLLM version, profiles, and evidence. Packaging still runs through
+`omobench package`. Submission remains a GitHub PR.
 
-On Windows, the [companion](windows-companion.md) can start this same panel
-for you from the website's **Open OmoBench** button: one graphical setup, then
-no terminal, no WSL activation, and no connection token to copy. It only opens
-the panel, everything below works exactly as it does when you run
-`omobench ui` yourself.
+The panel connects to a model server you already run. It does not download
+models, start the model server, or switch its execution device. The hosted
+website links to these launch instructions; it does not remotely execute
+programs on visitors' computers. Earlier versions of the panel opened on a
+curated workload picker with a managed CPU download; that is no longer part of
+the panel, and the equivalent CLI commands are described in
+[Managed CPU setup](guided-launcher.md).
+
+On Windows, the [companion](windows-companion.md) starts this same panel from
+the Start menu or the website's **Open OmoBench** button, and provides the
+Windows bridge to a model server running on Windows. Everything below works the
+same whether the companion or `omobench ui` started the panel.
 
 ## What this panel can benchmark
 
-The two managed recipes are presets, not the boundary. The panel will
-benchmark any local model server that meets the requirements below, whatever
-serves it and whatever model it holds.
+The panel will benchmark any local model server that meets the requirements
+below, whatever serves it and whatever model it holds.
 
 **Server API.** Streaming OpenAI-compatible `POST /v1/chat/completions` that
 returns `text/event-stream` chunks. `GET /v1/models` is optional: when a server
@@ -41,7 +43,8 @@ runs on — `http://127.0.0.1:<port>`, `http://localhost:<port>` or
 deliberate boundary, not a missing feature: the result records *this machine's*
 hardware as the hardware that served the run, and a local panel must not be
 usable to reach arbitrary hosts. Nothing is discovered, scanned or guessed; the
-panel contacts only the address you type.
+panel contacts only the address you type. The one exception to "this machine"
+is the Windows bridge, below.
 
 **Model.** Any text-generation model your server can serve, catalogued or not.
 Local measurement and local export never require catalog membership. Only
@@ -54,26 +57,33 @@ macOS or WSL2. The runner's own dependencies are irrelevant to your server's
 hardware: OmoBench never infers that a GPU is required, or that it must be any
 particular vendor, from the packages its runner installs.
 
-**Server-side hardware.** Any. The CPU/GPU selector records *your declaration*
-about where your server performed inference; GPU covers any vendor's
-accelerator, and the result's GPU metadata is vendor-neutral. OmoBench does not
-detect, configure or verify your server's device.
+**Server-side hardware.** Any. **Where does the server run the model?** records
+*your declaration* about where your server performed inference: on the GPU,
+split between GPU and CPU, or on the CPU only; GPU covers any vendor's
+accelerator, and the result's GPU metadata is vendor-neutral. **Read the serving
+hardware** reads the serving machine's CPU, memory and cards, but OmoBench does
+not configure or verify which device your server used.
 
 ### Where this leaves a Windows-hosted server
 
 A benchmark runner in WSL2 and a model server running on the Windows side are
 two different loopback namespaces. The panel will not dial the Windows host's
 WSL-facing address, because allowing non-loopback targets would turn a local
-panel into a general-purpose client for arbitrary hosts. Running a loopback
-forwarder yourself, so that the server appears on `127.0.0.1:<port>` inside the
-runner's environment, is the supported workaround and the panel treats it as an
-ordinary local server. A first-class, sandboxed Windows/WSL bridge would need
-its own design and its own review, and does not exist today: this is a
-documented limitation, not a setting you can relax.
+panel into a general-purpose client for arbitrary hosts.
+
+Instead, tick **The server runs on Windows and this panel runs in WSL. Connect
+through the Windows bridge.** The companion then carries each request to the
+Windows server's own loopback address. This needs a panel started by the
+companion, and WSL interop enabled; a missing or old companion is an error, never
+a fallback to a different server. The bridge's latency is included in every
+measured number and never subtracted, so bridged results are compared only with
+bridged results. The serving hardware is read on Windows through the companion
+and recorded separately from the WSL runner. See
+[the bridge notes](bridge-frontend-status.md) and [provenance](provenance.md).
 
 ### Checking a server before you run
 
-**Check this server** runs five checks from the environment the runner is
+**Check this server** runs these checks from the environment the runner is
 launched from and reports each separately, because they establish different
 things:
 
@@ -119,9 +129,8 @@ about one check, never about the whole benchmark.
 5. Keep this terminal open. The browser opens automatically when supported.
    Otherwise, copy the **full URL**, including `#token=…`, from the terminal into
    your browser. The default panel port is `8765`; your model server uses a
-   different port, for example `8092`. The page opens on your hardware and a
-   workload selector; the **Connect & run** section below it is the
-   connect-your-own-server workflow this page describes.
+   different port, for example `8092`. The page opens at **Connect your model
+   server**.
 
 No `npm install`, Node.js, or website development server is needed for this panel.
 On native Windows you can install `./cli[ui]` and open the panel for setup and
@@ -130,51 +139,54 @@ extra includes `uvloop`, which does not support native Windows.
 
 ## Run and review
 
-1. **Check the environment.** The sidebar shows detected CPU, RAM, GPUs, and runner.
-   GPU detection alone does not prove GPU inference.
-2. **Enter the connection.** Use an address such as `http://127.0.0.1:8092` or
-   `http://127.0.0.1:8092/v1`. Enter the model identifier accepted by the server.
-   Use the exact API name, including case and slash. For the documented llama.cpp
-   example it is `Qwen/Qwen3-0.6B`, not the shortened `Qwen3-0.6B` display name.
+1. **Check the environment.** The sidebar's **This machine** list shows the
+   runner environment's CPU, memory, GPUs, and runner. In WSL this is the
+   runner, not the serving machine, and GPU detection alone does not prove GPU
+   inference.
+2. **Connect.** Enter the **Server address**, such as `http://127.0.0.1:8092`
+   or LM Studio's `http://127.0.0.1:1234`. Tick **The server runs on Windows and
+   this panel runs in WSL. Connect through the Windows bridge.** when that is
+   the case. Press **Connect**: the panel lists the models the server reports
+   through `/v1/models` (and LM Studio's own description of each, where it
+   offers one). Choose one under **Which model?**, or use **Enter a model ID
+   instead** and type the exact **Server model identifier**, including case and
+   slash. For the documented llama.cpp example it is `Qwen/Qwen3-0.6B`.
    [List your server's identifiers](model-server.md#address-and-model-identifier)
-   if unsure. Click **Test connection**. This sends one tiny streaming request; it is not
+   if unsure. **Check this server** sends one tiny streaming request; it is not
    included in benchmark evidence.
-3. **Set a tokenizer source if your server uses an alias.** The workload's prompts
-   are built and counted with a tokenizer, which the runner takes from the server
-   model identifier unless you say otherwise. That works when the identifier is
-   also a Hugging Face repository id. It does not work for a serving alias such as
-   LM Studio's `qwen/qwen3-vl-4b` or `qwen/qwen3-vl-4b:3`: the run would fail
-   while resolving the tokenizer, before any measurement. Put the compatible
-   repository or a local tokenizer folder in **Tokenizer source**, for example
-   `Qwen/Qwen3-VL-4B-Instruct`. Do not rename your served model.
-
-   **Check tokenizer** answers four separate questions and never merges them:
-   whether the identifier is *accepted* as a repository id or local path,
-   whether its *files are located* in this machine's Hugging Face cache or the
-   folder you named, whether it was *loaded* (it is not — this check stays
-   offline and does not import the tokenizer), and whether it *matches the
-   served weights* (never verified, and not verifiable from here). Syntax and
-   cache presence are not compatibility. Pick the repository the model card
-   names: the tokenizer determines how prompts are built and how output tokens
-   are counted, so choosing a different one changes the measurements rather
-   than merely the plumbing. Nothing is downloaded by the check; the runner
-   fetches tokenizer files — not weights — from `huggingface.co` at benchmark
-   start if they are not already cached. The override is recorded in the run's
-   `reproduce.md` beside the served identifier, and remote code execution stays
-   disabled.
-4. **Choose a fixed profile and declare the device.** The panel displays the
-   profile's token counts, load, and limits. Configure CPU/GPU use in the model
-   server, then confirm it in the panel. Selecting a device does not change server
+3. **Let the panel find the tokenizer.** The workload's prompts are built and
+   counted with a tokenizer. A served identifier is often a serving alias, such
+   as LM Studio's `qwen2.5-coder-14b-instruct`, not a Hugging Face repository.
+   After **Connect**, the panel resolves the tokenizer separately: a choice
+   already verified for the same model, then the GGUF file's own metadata (when
+   the **Model folder** is set), then the served identifier when it already is
+   a repository id, and finally a name match that it offers once for
+   confirmation (**Use this tokenizer**). It then loads the tokenizer in the
+   runner's own interpreter and encodes a sample, offline first. When the
+   files are not cached, **Download the tokenizer files** fetches them (never
+   weights). **Run standard test** stays disabled until the tokenizer for the
+   currently selected model is ready. **Advanced: tokenizer** holds the
+   override: enter a repository or local folder and use **Check tokenizer** or
+   **Check and load this tokenizer**. Do not rename your served model. Remote
+   code execution stays disabled, and the tokenizer is never a claim about
+   which weights are loaded.
+4. **Confirm the serving hardware.** Press **Read the serving hardware**
+   (through the companion when bridged), choose where the server runs the
+   model, tick each card that runs it, describe a split when there is one, and
+   tick the confirmation. Selecting a placement does not change server
    settings. Disable GPU offload in the server before declaring a CPU run.
-5. Click **Run benchmark**. The panel launches the existing CLI as a subprocess.
-   Only one benchmark or packaging/submission operation runs at a time in a panel.
-   Logs update automatically; output can arrive in bursts when the runner buffers it.
+5. **Choose a profile and run.** **Standard chat** (`chat-small-v2`) is the
+   default; other profiles are under **More tests**, with token counts, load
+   and limits under **Benchmark profile details**. Press **Run standard test**.
+   The panel launches the existing CLI as a subprocess. Only one benchmark or
+   packaging/submission operation runs at a time in a panel. Logs update
+   automatically; output can arrive in bursts when the runner buffers it.
 6. Watch the run on the dashboard, then review the results. See
    [the live dashboard](#the-live-dashboard) and
    [saving a local report](#saving-a-local-report-is-not-submitting).
 
 For a CPU demonstration, load a small model with CPU execution explicitly
-enabled in your server, choose **chat-small-v2**, select **CPU**, and run. This is a
+enabled in your server, keep **Standard chat** (`chat-small-v2`), choose **On the CPU only**, and run. This is a
 real inference workload on your CPU, not a general CPU hardware test. Slower CPUs
 may reach the profile's time limit; the UI does not shorten or alter the workload.
 CPU and GPU results are both eligible for packaging and submission through the
@@ -294,7 +306,7 @@ acceptance checks are unchanged.
 
 ## Packaging and pull requests
 
-After a completed CPU or GPU run, **Review & submit** becomes available. A
+After a completed CPU, GPU or split run, **Review & share** becomes available. A
 community submission needs more than a finished benchmark, and **Check
 publication requirements** lists everything that is still missing at once,
 before packaging is attempted, rather than stopping at the first empty field.
@@ -323,11 +335,15 @@ If a model is not in `catalog/models/`, it is not catalogued, and the panel
 never relabels the run as a different, catalogued model. Two routes remain
 open. **Suggest a catalog model** offers entries the served alias may mean and
 applies none of them: one match is a suggestion to confirm, several make the
-mapping ambiguous and you choose. When nothing matches, the panel opens a
-**model proposal**, which travels with the result so a reviewer sees the
-request and the evidence together. A proposal does not add the model to the
-catalog and merging the result would not either; accepting one is a separate,
-reviewed change. Local viewing and export need none of this.
+mapping ambiguous and you choose. A model that is not on the curated list is
+still publishable: when the canonical model ID is not catalogued, **Your own
+model** asks for its licence, licence URL, weights source, weights revision and
+downloadability, recorded as your declaration (see
+[model eligibility](model-eligibility.md)). Optionally, **Propose this model for
+the catalog** adds a model proposal, which travels with the result so a
+reviewer sees the request and the evidence together. A proposal does not add
+the model to the catalog and merging the result would not either; accepting
+one is a separate, reviewed change. Local viewing and export need none of this.
 
 1. Enter the canonical model ID, immutable model revision, framework and exact
    version, quantization, submitter, and the server's actual startup arguments.
@@ -342,12 +358,17 @@ reviewed change. Local viewing and export need none of this.
    performed inference, so there is nothing to fill in. A GPU memory value can
    fill unknown VRAM for one detected vendor/model class; it cannot invent a
    GPU or replace already-detected VRAM. The CLI enforces these rules.
-3. Click **Package & validate**. The panel invokes the CLI packager, then the
+3. Click **Identify model file** to record the identity of the weights the run
+   used: a `sha256-manifest:` fingerprint of the GGUF file (all shards, for a
+   split file), verified against the file recorded at run start, or chosen and
+   confirmed by you for a reopened run. See
+   [model file identity](user-guide.md#g-model-file-identity).
+4. Click **Package & validate**. The panel invokes the CLI packager, then the
    repository's validator for schema, model catalog, revisions, artifact paths/hashes,
    and duplicates against the local registry. Failures remain local and are displayed.
-4. Click **Review submission files**. Inspect the normalized result and PR description.
+5. Click **Review submission files**. Inspect the normalized result and PR description.
    Download the complete ZIP to inspect all five files, including logs and raw output.
-5. Select **OmoBench community registry**, then **Sign in with GitHub**. Enter
+6. Select **OmoBench community registry**, then **Sign in with GitHub**. Enter
    this panel's one-time code at GitHub. A configured build requests `public_repo`,
    which grants public-repository write access, not private-repository access.
    The credential remains in the panel process's memory. Review again after
@@ -358,12 +379,12 @@ reviewed change. Local viewing and export need none of this.
    The **Checkout origin** option preserves the previous `gh auth login` route
    for developers with write access to that remote. It opens the PR in that
    repository, not automatically upstream.
-6. After reviewing the bundle and confirming inference on the declared device
+7. After reviewing the bundle and confirming inference on the declared device
    and absence of secrets, click **Create pull request**. This uploads only the
    five standard evidence files
    into a new `submit/<run-id>` branch and opens a PR against the repository's default
    branch. It does not stage local changes, switch branches, or push to `main`.
-7. Review the PR's CI checks and follow the normal maintainer review process. The
+8. Review the PR's CI checks and follow the normal maintainer review process. The
    panel never merges a PR. Evidence is uploaded at submission time and is visible
    according to the repository's visibility, even before merge. The registry site
    includes it after merge and a successful build containing that commit.
@@ -409,7 +430,8 @@ omobench ui --port 8766       # If the default port is occupied
 omobench ui --no-browser     # Print the connection URL without opening a browser
 ```
 
-This first version accepts only localhost model endpoints without authentication
-headers or redirects. Run the panel and model server in the same OS/WSL environment;
-WSL-to-Windows localhost forwarding depends on your WSL configuration. Remote server
-hardware collection and model-server lifecycle management are separate future work.
+The panel accepts only loopback model endpoints without authentication headers
+or redirects. Run the panel and model server in the same OS/WSL environment, or,
+for a server on Windows measured from WSL, use the Windows bridge, which needs a
+panel started by the companion. Model-server lifecycle management is not part of
+the panel.

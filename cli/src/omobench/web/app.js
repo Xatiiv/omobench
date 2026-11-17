@@ -1141,7 +1141,7 @@ async function detectDetails() {
   const missing = [];
   if (!bridged) missing.push("the serving hardware (this run was not served through the Windows bridge, so describe its machine under All details)");
   else if (!probe) missing.push(`the serving hardware (${probeError || "the companion did not answer"})`);
-  if (!metadata) missing.push("LM Studio's model details (start LM Studio, then use Check this server under Connect & run)");
+  if (!metadata) missing.push("LM Studio's model details (start LM Studio, then press Connect under Connect your model server)");
   $("detect-status").textContent = missing.length
     ? `Done. Not read: ${missing.join("; ")}.` : "Done.";
   // Shown now, with the status, rather than after the next refresh.

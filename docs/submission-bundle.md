@@ -7,11 +7,11 @@ OpenAI-compatible chat-completions endpoint.
 
 CPU and GPU runs are both eligible for public v1 records: `--execution-device`
 declares what actually performed inference, not merely what hardware is
-installed. A CPU run's quick **Download local summary** JSON is still not a
+installed. A run's quick **Save local report** JSON is still not a
 public `result.json` and must not be placed under `results/` by hand, use
 packaging (CLI or panel) to produce a schema-ready bundle instead.
 
-There are two submission routes: **Review & submit** in `omobench ui`, or the
+There are two submission routes: **Review & share** in `omobench ui`, or the
 [manual PR workflow](#manual-pull-request-workflow). Both preserve the same five
 evidence files — six when the bundle also proposes a model for the catalog —
 and go through CI and maintainer review. Packaging stays local;

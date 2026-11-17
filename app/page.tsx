@@ -20,6 +20,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { comparisonHref } from "@/app/lib/comparison";
+import { REPOSITORY_URL, USER_GUIDE_URL } from "@/app/lib/site";
 import { registryResults } from "@/app/data/registry-results";
 import {
   ANY,
@@ -41,11 +42,11 @@ import {
 
 const profiles = [
   {
-    id: "chat-small-v1",
+    id: "chat-small-v2",
     input: "1,024 tokens",
     output: "256 tokens",
     load: "1 stream",
-    purpose: "Interactive assistant latency",
+    purpose: "Standard chat: start here",
   },
   {
     id: "chat-small-extended-v1",
@@ -362,7 +363,8 @@ export default function Home() {
         <LocalRegistry />
 
         <footer className="border-t border-white/10 py-8 text-sm text-slate-500">
-          OmoBench is being built as a transparent registry for reproducible inference-performance evidence.
+          <p>OmoBench measures inference speed and reliability, not the quality of a model&apos;s answers. Every published result links to its evidence.</p>
+          <p className="mt-2"><a className="text-amber-300 hover:underline" href={USER_GUIDE_URL}>User guide</a> · <a className="text-amber-300 hover:underline" href={REPOSITORY_URL}>Source on GitHub</a></p>
         </footer>
       </div>
     </main>

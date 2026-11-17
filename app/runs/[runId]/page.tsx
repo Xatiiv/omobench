@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { SiteHeader } from "@/components/product/site-header";
 import { Badge } from "@/components/ui/badge";
@@ -297,6 +298,21 @@ function ResultNotFound() {
       </div>
     </main>
   );
+}
+
+export async function generateMetadata({ params }: RunDetailsProps): Promise<Metadata> {
+  const { runId } = await params;
+  const path = `/runs/${encodeURIComponent(runId)}`;
+  const result = getRegistryResult(runId);
+  if (result) {
+    const title = `${result.model} on ${result.hardware.display} · OmoBench`;
+    const description = `Published OmoBench result ${result.id}: ${result.profile} workload, with its measurements, configuration and evidence.`;
+    return { title, description, alternates: { canonical: path }, openGraph: { url: path, title, description } };
+  }
+  // Illustrative examples are labelled as such on the page and are not
+  // published results, so search engines are asked not to index them.
+  const title = "Example run · OmoBench";
+  return { title, alternates: { canonical: path }, openGraph: { url: path, title }, robots: { index: false } };
 }
 
 export default async function RunDetails({ params }: RunDetailsProps) {

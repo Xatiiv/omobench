@@ -1,20 +1,22 @@
-# Windows companion (stage 1)
+# Windows companion
 
 The companion is a small Windows program that turns the website's
-**Open OmoBench** button into a running local panel. After one graphical
-setup you click that button and the guided benchmark page opens in your
-browser, no terminal, no `wsl.exe`, no Python activation, no connection
-token to copy.
+**Open OmoBench** button, or the Start menu entry, into a running local panel,
+with no terminal, no `wsl.exe`, no Python activation and no connection token to
+copy. It also provides the **Windows bridge**, which lets the panel in WSL reach
+a model server running on Windows, such as LM Studio.
 
-This first stage **reuses a WSL installation, checkout and Python environment
-you already have**. It does not install WSL, Python, or OmoBench, and it does
-not update itself. See [scope](#scope-and-follow-up-work) below.
+The [Windows installer](windows-installer.md) installs the companion and can
+prepare an environment for it. Used on its own, the companion reuses a WSL
+installation, checkout and Python environment you already have; it does not
+install WSL, Python, or OmoBench, and it does not update itself. See
+[scope](#scope-and-follow-up-work) below.
 
-It changes nothing about benchmarking: the panel, engine, profiles, recipes,
-telemetry, packaging and submission are exactly the ones documented in
-[browser control](browser-control.md) and [the guided launcher](guided-launcher.md).
-Launching only opens the panel, downloading a model and starting a benchmark
-stay explicit actions inside the panel.
+It changes nothing about benchmarking: the panel, engine, profiles, packaging
+and submission are exactly the ones documented in the
+[user guide](user-guide.md) and the [panel reference](browser-control.md).
+Launching only opens the panel; starting a benchmark stays an explicit action
+inside it.
 
 ## What it is, and why it is built this way
 
@@ -115,30 +117,26 @@ environment that works for a *different* checkout is never counted as
 validating the one you selected, both locations are shown instead, so you can
 see which copy it is really using.
 
-## Trying it: three different things, in three different places
+## Opening the panel
 
-The `/run` page in this branch has an **Open OmoBench** button, but that page
-is not deployed yet. Be clear about which of these you are testing:
+The **Open OmoBench** button on <https://www.omobench.org/run> opens an
+`omobench://open` link, which Windows hands to the companion. A route that
+needs no website at all:
 
-| What you want to test | Where it works today |
-| --- | --- |
-| The registered `omobench://open` link, end to end | **Now**, on this machine. No terminal needed: open the companion and use **Open panel**, or open any page or shortcut containing an `omobench://open` link. |
-| The updated `/run` page with its button | **Now, locally only.** The page lives in this branch: run the site locally (`npm run dev`, then open `/run` on the printed port). To test just the link without the site, double-click [`windows/companion/test-link.html`](../windows/companion/test-link.html). |
-| The button on the hosted website | **Not yet.** It appears there only after this branch is pushed, reviewed, and deployed. Until then the hosted `/run` page still shows the old instructions. |
-
-A no-terminal route that needs no website at all:
-
-1. Double-click `OmoBenchCompanion.exe`.
+1. Open **OmoBench** from the Start menu (or double-click
+   `OmoBenchCompanion.exe`).
 2. Click **Open panel**. The panel starts and your browser opens it.
 3. Click **Stop** when you are done.
 
-That exercises exactly the same code the protocol link triggers, the link
-only adds "Windows launches the companion for you" in front of it.
+That exercises exactly the same code the protocol link triggers; the link only
+adds "Windows launches the companion for you" in front of it. To test the link
+without the website, double-click
+[`windows/companion/test-link.html`](../windows/companion/test-link.html).
 
 ## Normal use
 
-Once the page carrying the button is available to you (locally now, hosted
-later), click **Open OmoBench** on it. Windows starts the companion, which:
+Click **Open OmoBench** on the website's `/run` page, or use the Start menu.
+Windows starts the companion, which:
 
 1. picks a free loopback port, starting from your configured one;
 2. starts the panel with the interpreter you configured, invoked directly,

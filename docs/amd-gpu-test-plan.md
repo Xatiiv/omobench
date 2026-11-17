@@ -1,5 +1,11 @@
 # Testing OmoBench on a Windows PC with an AMD GPU
 
+> **Historical test plan.** This plan was written for an earlier build, whose
+> panel opened on a workload selector and used labels such as **Connect &
+> run** and **Test connection**. The current panel starts at **Connect your
+> model server**; follow the [user guide](user-guide.md) for the current
+> workflow. The plan is kept as a record of what was tested.
+
 Written for the person sitting at that machine. Every step says what to do,
 what a pass looks like, and what to write down if it does not pass.
 

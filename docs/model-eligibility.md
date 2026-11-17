@@ -65,9 +65,9 @@ locally, and the panel will do it — they are simply not publishable here.
 ## What the curated list is now
 
 A recommendation. `catalog/models/*.yaml` says "these are known to work, their
-licences are understood, and somebody has checked them". The panel offers them
-first because choosing a model is harder than it looks, not because the others
-are forbidden.
+licences are understood, and somebody has checked them". The panel suggests
+them (**Suggest a catalog model**) because identifying a model is harder than it
+looks, not because the others are forbidden.
 
 Being on the list still means something at review time: a reviewer does not
 have to re-establish the licence and the modality, because the list already
@@ -123,8 +123,9 @@ eligibility block, because neither ever collected one.
 
 ## In the panel
 
-Choose **Custom model** in the workload selector. The fields below it are the
-eligibility block: the model's canonical ID, its publisher, an immutable
+In **Review & share**, open **Model identity and licence** and enter the
+**Canonical model ID**. When it is not on the curated list, a **Your own model**
+section appears. Its fields are the eligibility block: the model's canonical ID, its publisher, an immutable
 weights revision, the licence and a URL where it can be read, the weights
 source, and a checkbox confirming anybody can download them. A tokenizer
 source and a base model are optional and recorded only when given.
