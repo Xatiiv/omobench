@@ -18,3 +18,13 @@ schema/*.json              text eol=lf
 # Shell scripts are run by bash under WSL/Linux. CRLF makes them fail with
 # errors that name the interpreter rather than the problem.
 *.sh text eol=lf
+
+# Published evidence bundles: results/<model>/<date>-<run>/<file>. Every file
+# here is recorded by SHA-256 in its bundle's result.json, so its bytes must be
+# the committed bytes on every platform. `-text` turns line-ending conversion
+# off in both directions: a Windows checkout with core.autocrlf=true no longer
+# rewrites LF to CRLF (which made every hash mismatch), and committing a bundle
+# never strips a CR that the evidence genuinely contains. Diffs still work;
+# this does not mark the files binary. results/README.md is not evidence and
+# is deliberately not matched.
+results/*/*/* -text
