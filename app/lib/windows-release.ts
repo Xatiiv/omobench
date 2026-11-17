@@ -26,11 +26,11 @@ export type WindowsRelease = {
 };
 
 export const windowsRelease: WindowsRelease | null = {
-  version: "0.1.2",
-  revision: "31ddfe362b508f2bb22b2aa4ff43a4a0ea0b951b",
-  downloadUrl: "https://github.com/Xatiiv/omobench/releases/download/windows-v0.1.2/OmoBenchSetup.exe",
-  releaseUrl: "https://github.com/Xatiiv/omobench/releases/tag/windows-v0.1.2",
-  sha256: "5e848327d320d0c9b1546f3cbf9b3f741e34c63b3d574d603375505b09ec6f68",
+  version: "0.1.3",
+  revision: "7d4a74f1278a84b6231423d970ac991f3f386496",
+  downloadUrl: "https://github.com/Xatiiv/omobench/releases/download/windows-v0.1.3/OmoBenchSetup.exe",
+  releaseUrl: "https://github.com/Xatiiv/omobench/releases/tag/windows-v0.1.3",
+  sha256: "a567c6a585404d7460c88eeb914bafd2a6c845de16f2974bbdeb702fa3d66ab3",
   signed: false,
 };
 
