@@ -4,10 +4,13 @@ OmoBench sends benchmark requests to a server you run separately. Installing
 `./cli[ui,runner]` installs the benchmark tools, not a model runtime or weights.
 Use a runtime that provides streaming OpenAI-compatible `/v1/chat/completions`.
 
-For the browser panel, start the server in the same Linux/macOS/WSL environment
-as OmoBench. Both must be able to reach the same localhost address. Windows
-LM Studio and WSL are different environments; their localhost connectivity
-depends on WSL networking and should not be assumed.
+Start the server on the same computer as OmoBench. Either run it in the same
+Linux/macOS/WSL environment as the panel, or, for a server on Windows such as
+LM Studio, use the Windows bridge from a panel started by the companion. Windows
+and WSL have separate localhost addresses, so do not assume one can reach the
+other without the bridge. The [user guide](user-guide.md#b-prepare-lm-studio-and-connect)
+covers LM Studio on Windows step by step; this page uses a llama.cpp server in
+WSL or Linux as its example.
 
 ## CPU example with llama.cpp
 
@@ -82,14 +85,12 @@ activation of the OmoBench Python environment.
 
 ## Address and model identifier
 
-For the example above, enter these exact values in OmoBench:
-
-| Field | Value |
-| --- | --- |
-| Server address | `http://127.0.0.1:8092` |
-| Server model identifier | `Qwen/Qwen3-0.6B` |
-| Benchmark profile | `chat-small-v2` |
-| Server execution device | CPU · local measurements |
+For the example above, enter `http://127.0.0.1:8092` as the **Server address**
+and press **Connect**. The panel lists `Qwen/Qwen3-0.6B` from the server's
+`/v1/models`. If your server does not list its models, use **Enter a model ID
+instead** and type the **Server model identifier**. Under **Confirm the serving
+hardware**, choose **On the CPU only** for this CPU example, and keep **Standard
+chat** (`chat-small-v2`).
 
 The model server's address is not the panel's address (`127.0.0.1:8765`).
 The panel accepts a server base URL with or without a final `/v1`; do not enter
@@ -98,7 +99,10 @@ the full `/v1/chat/completions` path in that field.
 The identifier is the exact name accepted by the server API, including case
 and any slash. Do not guess it from the model's display title. In llama.cpp
 the example's `--alias` sets it. LM Studio may show a different identifier such
-as `qwen3-0.6b`; copy the actual value from your running server.
+as `qwen3-0.6b`; copy the actual value from your running server. Such an alias
+is not a Hugging Face repository, so the panel finds the tokenizer separately
+(see [the user guide](user-guide.md#c-model-and-tokenizer)); keep the alias as
+the server identifier.
 
 When supported, list API identifiers from the **same environment as OmoBench**:
 
@@ -112,7 +116,7 @@ completion. See [LM Studio's model-list documentation](https://lmstudio.ai/docs/
 
 ## Verify streaming before benchmarking
 
-Use **Test connection** in the panel. It sends a tiny request and does not
+Use **Check this server** in the panel. It sends a tiny request and does not
 create benchmark evidence. To diagnose it from the OmoBench terminal instead:
 
 ```bash
@@ -137,12 +141,14 @@ are for the short chat profiles; long-context and 16-stream workloads need appro
 server capacity.
 
 For GPU measurements, configure offload/acceleration in the runtime first.
-Confirm actual GPU inference in logs or telemetry, then select GPU in OmoBench.
+Confirm actual GPU inference in logs or telemetry, then choose **On the
+graphics card (GPU)** (or **Split between the card and the CPU**) in OmoBench.
 Do not reuse the CPU command above unchanged and label its output GPU-backed.
 Vendor-neutral metadata does not repair a crashing runtime or install its drivers.
 
 The API alias is separate from the canonical model identity used for packaging.
-For public results, supply a catalogued ID, immutable revision, quantization, and
-the actual framework/version/settings. LM Studio should be recorded as
+For public results, supply the canonical model ID (catalogued or not), the
+weights' identity (an immutable revision or the file fingerprint from
+**Identify model file**), quantization, and the actual framework/version/settings. LM Studio should be recorded as
 `lmstudio`, not relabelled as a standalone llama.cpp server. Follow the
 [submission contract](submission-bundle.md).

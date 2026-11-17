@@ -1,17 +1,20 @@
 # Experimental bridge HTTP frontend
 
 The experimental bridge is now connected to the panel and both runner
-execution paths. It is explicit and off by default. It is not a published
-installer update, and native helper tests do not establish real Windows–WSL
+execution paths. It is explicit and off by default. Native helper tests do not establish real Windows–WSL
 interop or overhead. Bridged measurements are publishable under schema 1.1, which
 records the Windows serving host and the WSL runner separately and marks the
 bridge's latency as included in every number; see [provenance.md](provenance.md).
 
 ## Use in an updated installation
 
-Start the panel through the newly built Windows companion. In **Connect & run**,
-select **My model server runs on Windows**, enter the exact Windows IPv4 loopback
-address and port (for example `http://127.0.0.1:1234`), and use **Check this server**.
+Start the panel through the Windows companion. In **Connect your model server**,
+tick **The server runs on Windows and this panel runs in WSL. Connect through the
+Windows bridge.**, enter the exact Windows IPv4 loopback address and port (for
+example `http://127.0.0.1:1234`), and press **Connect**. **Check this server**
+then confirms streaming through the bridge. The
+[user guide](user-guide.md#when-you-need-the-windows-bridge) explains when the
+bridge is needed.
 The companion supplies its own executable path to WSL; the browser cannot select
 an executable. Keep LM Studio listening on loopback. No firewall or LAN binding
 change is required. A missing/old companion or disabled WSL interop is an error,

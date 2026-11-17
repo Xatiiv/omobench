@@ -7,13 +7,12 @@ the presentation and filters.
 
 ## Real CPU demo
 
-Prefer not to hand-install a model server for this? [Guided CPU setup](guided-launcher.md)
-downloads, verifies, and starts one reviewed small CPU model (`qwen3-4b-cpu-v1`)
-through `omobench prepare`/`omobench launch` or the panel's managed-setup
-component,
-then runs this same unchanged benchmark. It is a development milestone, not a
-general installer. The rest of this walkthrough uses a model you install and
-start yourself, which stays available either way.
+This walkthrough uses a llama.cpp server you start yourself in WSL or Linux.
+For the more common Windows + LM Studio setup, follow the
+[user guide](user-guide.md) instead. Prefer not to hand-install a model server
+at all? [Managed CPU setup](guided-launcher.md) downloads, verifies and starts
+one reviewed small CPU model from the command line (`omobench prepare` /
+`omobench launch`), then runs this same unchanged benchmark.
 
 ### 1. Prepare once, before the demo
 
@@ -76,32 +75,28 @@ does not need this Python activation.
 Leave Terminal B open too. Copy its full printed connection URL, including
 `#token=...`, into your normal browser if it does not open automatically.
 The panel normally uses port `8765`; the model server uses `8092`. The page
-that opens is the guided benchmark, which downloads and runs its own model;
-since this demo starts a server yourself, open **`/advanced`** instead (same
-token, same origin) for the connect-and-run form below. If you would rather
-skip starting a server by hand, choosing a reviewed workload does that for
-you, see [Guided CPU setup](guided-launcher.md).
+opens at **Connect your model server**.
 
 ### 4. Browser: connect and start
 
-Enter:
-
-| Field | Value |
-| --- | --- |
-| Server address | `http://127.0.0.1:8092` |
-| Server model identifier | `Qwen/Qwen3-0.6B` |
-| Benchmark profile | `chat-small-v2` |
-| Server execution device | CPU · local measurements |
-
-Click **Test connection**. After it confirms streaming works, tick the device
-confirmation and click **Run benchmark**.
+1. Enter `http://127.0.0.1:8092` as the **Server address**. Leave the Windows
+   bridge option unticked: the server and the panel run in the same
+   environment. Press **Connect**.
+2. Choose `Qwen/Qwen3-0.6B` under **Which model?** if it is not already
+   selected. Because that identifier is also a Hugging Face repository, the
+   tokenizer is found from it; if it is not cached yet, press **Download the
+   tokenizer files** and wait for **Tokenizer ready**.
+3. Under **Confirm the serving hardware**, press **Read the serving hardware**,
+   choose **On the CPU only**, and tick the confirmation.
+4. Keep **Standard chat** (`chat-small-v2`). Press **Check this server** if you
+   want to confirm streaming first, then **Run standard test**.
 
 The test sends a tiny request; the benchmark runs the full fixed profile.
 GuideLLM requests 1,024 input tokens and up to 256 output tokens, one stream at
 a time, with a 50-request and 900-second duration constraint plus its configured
 warm-up/cool-down behavior. It can take several minutes; neither a full request
 count nor an exact completion time is guaranteed. See
-[profile interpretation](../README.md#fixed-workloads-and-measurements).
+[profile interpretation](user-guide.md#f-read-and-compare-results).
 
 While it runs, show the detected machine, profile settings, status, and live log.
 Avoid chatting with the server or running other tests during measurement.
@@ -109,12 +104,12 @@ Avoid chatting with the server or running other tests during measurement.
 ### 5. Inspect and save the measurements
 
 When the status becomes **completed**, show the successful/failed request counts,
-TTFT p50/p95, output throughput, and errors. Use **Download local summary** to
+TTFT p50/p95, output throughput, and errors. Use **Save local report** to
 save the actual measured values. The complete local runner evidence stays in
 the path shown below the log.
 
 This is a real CPU language-model inference benchmark. Like a GPU run, it can be
-packaged, reviewed, and submitted through **Review & submit**. It is not a
+packaged, reviewed, and submitted through **Review & share**. It is not a
 general CPU score, model-quality test, or fabricated comparison-table row.
 
 For a short presentation, run it beforehand and select the genuine completed

@@ -2,7 +2,7 @@
 
 This is the shared project context for people and coding agents. Read it before changing the repository.
 
-The [README](README.md) is the user-facing contributor guide. This file explains how to make safe, consistent changes. If guidance conflicts, follow the user's explicit request first, then the current schema, tests, and documentation.
+The [README](README.md) is the project's front door and the [user guide](docs/user-guide.md) is the end-user walkthrough. This file explains how to make safe, consistent changes. If guidance conflicts, follow the user's explicit request first, then the current schema, tests, and documentation.
 
 ## What OmoBench is
 
@@ -13,28 +13,26 @@ or GPU workloads, and a Windows server measured from WSL through the explicit
 bridge; all are eligible for public v1 packaging and submission, the bridged
 case once its serving machine is described.
 The comparison website and its `/run` launch guide are separate from this panel.
-The panel is **one page** (`cli/src/omobench/web/index.html`): the hardware
-first, then one workload selector covering curated recipes and a custom model,
-then one shared configuration and run state. `/`, `/guided` and `/advanced` all
-serve that same page -- served, not redirected, because the connection token
-lives in the URL fragment and a redirect would discard it. Managed preparation
-is a component mounted inside that page
-(`cli/src/omobench/web/managed-setup.js`), driven by the panel's selection; it
-owns no selector, stepper or dashboard of its own. The live dashboard
+The panel is **one page** (`cli/src/omobench/web/index.html`): connect your
+model server, confirm the serving hardware, run a standard test, then review
+and share, with one shared configuration and run state. `/`, `/guided` and
+`/advanced` all serve that same page -- served, not redirected, because the
+connection token lives in the URL fragment and a redirect would discard it.
+The curated workload picker and managed preparation component
+(`cli/src/omobench/web/managed-setup.js`) remain in the page but are not shown;
+the component only adopts a managed download or run already in progress. The live dashboard
 (`dashboard.js`, `dashboard.css`) stays shared rather than reimplemented.
 Saving a local report and preparing a public submission remain separate actions
 with separate requirements.
 
 It is **not** a model host, model downloader, cloud GPU provider, or automatic proof that a model server used the declared execution device.
 
-`omobench prepare`/`omobench launch` and the panel's managed-setup component
-add a reviewed, managed CPU setup path (a development milestone, not an
+`omobench prepare`/`omobench launch` add a reviewed, managed CPU setup path (a development milestone, not an
 installer): they download and verify one pinned model + runtime recipe from
 `catalog/downloads/`, then run the same unchanged benchmark engine described
-below, and can package/prepare its submission from the same page. Choosing a
-workload the panel has a recipe for reveals that component inline; choosing a
-custom model hides it and asks for the model's own details instead.
-See [guided-launcher.md](docs/guided-launcher.md).
+below; the resulting run is packaged like any other.
+See [guided-launcher.md](docs/guided-launcher.md). End-user instructions live in
+[docs/user-guide.md](docs/user-guide.md).
 
 ## V1 scope and invariants
 

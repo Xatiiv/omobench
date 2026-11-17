@@ -1,7 +1,11 @@
 # OmoBench troubleshooting
 
-Use these checks in the terminal running OmoBench. Keep its Python interpreter,
-checkout, and model server in the intended environment.
+Start with the [troubleshooting section of the user guide](user-guide.md#i-troubleshooting),
+which covers the common problems (installer prerequisites, connecting, the
+Windows bridge, tokenizers, model folders, hardware, memory, sleep, packaging
+and GitHub). This page goes deeper, mostly for running OmoBench from a source
+checkout. Use these checks in the terminal running OmoBench. Keep its Python
+interpreter, checkout, and model server in the intended environment.
 
 ## Linux paths fail in a MINGW64 terminal
 
@@ -90,9 +94,11 @@ configuration. A timeout can mean slow loading/inference; a model listed by
 timeout can expire while a cold server is still loading; let it become ready,
 then retry. Retrying cannot repair a runtime crash.
 
-If a Windows-hosted server responds from Windows but fails from WSL, check WSL
-networking or run a server in the same WSL environment. Do not replace localhost
-with a LAN address: this version of the panel accepts loopback endpoints only.
+If a Windows-hosted server responds from Windows but fails from WSL, tick the
+Windows bridge option (**The server runs on Windows and this panel runs in WSL.
+Connect through the Windows bridge.**) in a panel started by the companion, or
+run a server in the same WSL environment. Do not replace localhost with a LAN
+address: the panel accepts loopback endpoints only.
 Authentication headers and redirects are also unsupported.
 
 A server that answers a benchmark request with a redirect fails that request
@@ -149,8 +155,10 @@ requests it actually measured, with the warmup requests still excluded.
 
 ## Run is unavailable, slow, or interrupted
 
-- **Run benchmark** is disabled when the pinned runner is missing, native Windows
-  is detected, or another operation is active. Check the setup message.
+- **Run standard test** is disabled when the pinned runner is missing, native
+  Windows is detected, another operation is active, or the tokenizer for the
+  selected model has not been loaded yet. Check the setup message and the
+  tokenizer status under the model choice.
 - Start with `chat-small-v2`. Its duration constraint is 900 seconds; setup,
   warm-up/cool-down, and in-flight requests mean this is not an exact stopwatch
   deadline. CPU runs may be slow, and log output may arrive in bursts.
@@ -170,20 +178,24 @@ A CPU or GPU selection is only a declaration. A GPU package also needs
 detected GPU metadata (a memory override can only fill unknown VRAM for
 already-detected hardware); a CPU package needs none of that, no GPU
 detection, VRAM, or driver is required, and any `--gpu-memory-gb` value is
-rejected since no GPU performed inference. Either way, validation requires a
-catalogued model, immutable revision, valid runtime details, and an intact
-evidence bundle.
+rejected since no GPU performed inference. Either way, validation requires an
+eligible model (catalogued, or declared with its licence and source), an
+immutable weights identity, valid runtime details, and an intact evidence
+bundle.
 
-**Download local summary** remains available on any run for a quick JSON
+**Save local report** remains available on any run for a quick JSON
 export; it is not the public `result.json` format, so do not copy it into
 `results/` by hand, package the run instead.
 
-For direct PR creation, `gh` must be installed and authenticated in the panel's
-environment, with write access to the displayed `origin` repository. Windows
-Git credentials are not automatically WSL GitHub CLI credentials. Use
-`gh auth status` to check.
+The default route, **OmoBench community registry**, needs only **Sign in with
+GitHub**; it creates or reuses your public fork and opens the pull request. See
+[community submissions](community-submissions.md) for retries. The **Checkout
+origin, existing GitHub CLI authentication** route instead needs `gh` installed
+and authenticated in the panel's environment, with write access to the
+displayed `origin` repository. Windows Git credentials are not automatically
+WSL GitHub CLI credentials. Use `gh auth status` to check.
 
-Without that access, download the bundle and follow the
+Without either, download the bundle and follow the
 [manual PR workflow](submission-bundle.md#manual-pull-request-workflow). The
-panel does not create forks or automatically add missing catalog entries.
+panel does not automatically add missing catalog entries.
 Do not edit measured values or artifact hashes to make an invalid bundle pass.

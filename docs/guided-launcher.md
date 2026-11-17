@@ -1,4 +1,14 @@
-# Guided CPU setup (development milestone)
+# Managed CPU setup (development milestone)
+
+> **Current status.** The panel no longer shows the curated workload picker or
+> the managed download described in parts of this page: it starts at
+> **Connect your model server** and benchmarks a server you already run (see the
+> [user guide](user-guide.md)). The managed path remains available from the
+> command line through `omobench prepare` and `omobench launch`, described
+> below. Sections that describe the managed component *inside the panel*
+> record how it worked; a download or managed run already in progress is still
+> picked up when the panel starts.
+
 
 The guided path (`omobench prepare`, `omobench launch`, and `omobench ui`'s
 **default page**) is a **development milestone**, not an installer. It adds a
@@ -49,7 +59,7 @@ fully available in the same page, and from the CLI.
 
 The panel lists saved runs in its sidebar, including after
 the panel restarts. Select a completed benchmark to reopen its measurements,
-then **Prepare submission** to review its recorded metadata, validation and
+then **Review & share** to review its recorded metadata, validation and
 submission status. Reopening never starts inference, downloads a model,
 packages evidence or uploads it. Completed runs that fail acceptance remain
 rejected; the existing packaging and validation rules still apply.
@@ -164,7 +174,7 @@ scripting, CI, or inspecting one step in isolation:
 | Download | `omobench prepare --recipe qwen3-4b-cpu-v1 --storage-dir /mnt/d/OmoBench --download` | Downloads (resumably) and verifies both files by size and SHA-256, then atomically installs them under the storage folder. Corrupted downloads are quarantined, not used. |
 | Smoke test | `omobench launch --recipe qwen3-4b-cpu-v1 --storage-dir /mnt/d/OmoBench --smoke` | Re-verifies the installed files, starts the verified server with fixed CPU-only settings, confirms it reports the expected model alias, then stops it. **No inference. No performance result.** |
 | Execute | `omobench launch --recipe qwen3-4b-cpu-v1 --storage-dir /mnt/d/OmoBench --execute` | Re-verifies the installed files, starts the same server, then runs the existing, unchanged benchmark profile against it with the existing CLI/GuideLLM runner and normalizer, and stops the server afterward. |
-| Package | `omobench package --execution-device cpu ...` (see [submission-bundle.md](submission-bundle.md)) | The run directory `omobench launch --execute` produces is a normal `.omobench-runs/` directory: package it from the CLI or from the panel's own "Share results" screen, the same as any CPU or GPU run. |
+| Package | `omobench package --execution-device cpu ...` (see [submission-bundle.md](submission-bundle.md)) | The run directory `omobench launch --execute` produces is a normal `.omobench-runs/` directory: package it from the CLI or from the panel's own **Review & share** screen, the same as any CPU or GPU run. |
 
 `omobench launch` binds the managed server to `127.0.0.1` only, uses the
 canonical model ID as its API alias, and applies fixed CPU-only settings
@@ -210,8 +220,8 @@ a reviewed recipe is chosen.
 3. **Your results.** Real throughput, time-to-first-token, latency,
    successful/attempted requests, and error rate, each with a short
    plain-language explanation, the same measurements described in the
-   [metrics table](../README.md#fixed-workloads-and-measurements).
-4. **Share results.** Packaging and submission review live in the same page,
+   [measurements table](user-guide.md#the-measurements).
+4. **Review & share.** Packaging and submission review live in the same page,
    see [packaging a managed CPU run](#packaging-a-managed-cpu-run) below.
 
 It requires the panel token, stays loopback-only, and makes no external
@@ -315,7 +325,7 @@ own direct use is completely unaffected either way.
 This recipe's `execution_device` is `cpu`. Exactly like a CPU run through the
 panel or `omobench run --execute`, its results are real evidence: a
 normal `.omobench-runs/` staging directory that can be packaged, reviewed, and
-submitted, the same way a GPU run can. The panel's **Share results**
+submitted, the same way a GPU run can. The panel's **Review & share**
 screen fills in the model identity, weight source, revision, quantization,
 runtime version, startup arguments, profile, and execution device from the
 verified recipe automatically, the same package/validate/prepare/submit

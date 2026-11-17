@@ -1,10 +1,24 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { SITE_DESCRIPTION, SITE_NAME, SITE_URL } from "./lib/site";
+
+const title = "OmoBench · Open-weight model performance on your hardware";
 
 export const metadata: Metadata = {
-  title: "OmoBench, Open model performance registry",
-  description:
-    "A GitHub-backed registry of reproducible self-hosted language-model performance benchmarks.",
+  // Relative URLs below resolve against the canonical production address,
+  // whichever deployment (production or preview) serves the page.
+  metadataBase: new URL(SITE_URL),
+  title,
+  description: SITE_DESCRIPTION,
+  alternates: { canonical: "/" },
+  openGraph: {
+    type: "website",
+    siteName: SITE_NAME,
+    url: "/",
+    title,
+    description: SITE_DESCRIPTION,
+  },
+  twitter: { card: "summary", title, description: SITE_DESCRIPTION },
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",
