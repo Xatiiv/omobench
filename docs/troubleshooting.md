@@ -199,3 +199,52 @@ Without either, download the bundle and follow the
 [manual PR workflow](submission-bundle.md#manual-pull-request-workflow). The
 panel does not automatically add missing catalog entries.
 Do not edit measured values or artifact hashes to make an invalid bundle pass.
+
+## Validation reports hash mismatches on a Windows checkout
+
+**Symptom.** `python tools/validate_results.py` reports `hash mismatch for …`
+for published bundles you never touched, typically every `result.json`,
+`environment.json`, `guidellm.stdout.log` and `reproduce.md`, while
+`git status` says the tree is clean.
+
+**Cause.** The checkout was made on Windows with `core.autocrlf=true` (Git for
+Windows' default) before the repository's `.gitattributes` turned line-ending
+conversion off for evidence files. Git rewrote their LF line endings as CRLF
+when it wrote them to disk, so their bytes no longer match the SHA-256 values
+recorded in `result.json`. Git still calls them unchanged because it compares
+file timestamps before content. The evidence in the repository is intact;
+only this checkout's copy differs. Running the validator from WSL against the
+same folder does not help, because the files on disk are already converted.
+
+**Fix, without losing local work.** Updating the checkout brings the rule, but
+it does not rewrite files Git believes are unchanged, so restore them as
+follows:
+
+1. Update the checkout as usual (for example `git pull` on `main`).
+2. Report, changing nothing:
+
+   ```bash
+   python tools/check_evidence_bytes.py
+   ```
+
+   It compares every tracked evidence file's bytes with the committed ones and
+   lists each as converted line endings, a real local edit, a staged change,
+   or missing.
+3. If it lists only converted files, or you have checked the others, restore
+   the converted ones:
+
+   ```bash
+   python tools/check_evidence_bytes.py --restore-line-endings
+   ```
+
+   This rewrites a file with its committed bytes only when the *only*
+   difference is converted line endings and nothing is staged for it. Files
+   with any other change, staged files, missing files and untracked files are
+   reported and left exactly as they are; decide about those yourself.
+4. Run `python tools/validate_results.py` again.
+
+Do not use `git reset --hard`, `git clean`, or `git add --renormalize` on
+`results/` to "fix" this: the first two can destroy local work, and the third
+would stage the converted bytes as if they were the evidence. Do not edit
+recorded hashes either. A fresh clone made after the rule was added is not
+affected.

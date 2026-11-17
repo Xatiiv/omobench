@@ -320,7 +320,10 @@ With a fork, open the eventual PR against the upstream repository's `main`.
    `git switch -c submit/your-new-run-id`.
 2. If using the panel's ZIP, extract it **at the checkout root**. It already
    contains `results/<model-slug>/<date>-<run-id>/`. Do not nest it inside another
-   `results/`, and do not replace an existing bundle.
+   `results/`, and do not replace an existing bundle. The repository's
+   `.gitattributes` turns line-ending conversion off for bundle files, so Git
+   commits and checks them out byte for byte on every platform; do not
+   override that with `git add --renormalize`.
 3. For a directly packaged CLI run, copy the standard files instead. In the
    example below, replace the source path, model slug, date, and run ID first:
 

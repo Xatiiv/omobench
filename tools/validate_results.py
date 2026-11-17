@@ -739,6 +739,11 @@ def main() -> int:
 
     if errors:
         print("\n".join(errors), file=sys.stderr)
+        if any(": hash mismatch for " in error for error in errors):
+            # A hint only: the hash check above is unchanged and still fails.
+            print("If this checkout was made on Windows with core.autocrlf=true, Git may have "
+                  "converted line endings in committed evidence. Check, without changing "
+                  "anything, with: python tools/check_evidence_bytes.py", file=sys.stderr)
         return 1
     print(f"Validated {len(result_files)} OmoBench result bundle(s).")
     return 0

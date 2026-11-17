@@ -325,6 +325,17 @@ class ValidateResultsTests(RegistryFixture):
         exit_code, _, stderr = self.run_main()
         self.assertEqual(exit_code, 1)
         self.assertIn("hash mismatch for runner_stdout_log", stderr)
+        self.assertIn("tools/check_evidence_bytes.py", stderr)
+
+    def test_crlf_converted_evidence_still_fails(self) -> None:
+        """A checkout's line-ending conversion is a mismatch, never forgiven."""
+        bundle_dir = self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234"
+        write_bundle(bundle_dir)
+        log = bundle_dir / "guidellm.stdout.log"
+        log.write_bytes(log.read_bytes().replace(b"\n", b"\r\n"))
+        exit_code, _, stderr = self.run_main()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("hash mismatch for runner_stdout_log", stderr)
 
     def test_path_escaping_the_bundle_is_rejected(self) -> None:
         bundle_dir = self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234"
