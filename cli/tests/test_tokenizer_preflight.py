@@ -391,7 +391,9 @@ class RealRunnerTests(unittest.TestCase):
             folder.mkdir()
             report = preflight(str(folder), network=NETWORK_NONE, timeout=120.0)
         self.assertFalse(report.ok)
-        self.assertEqual(report.kind, "not-cached")
+        # A folder has nothing to download; the person needs a different source.
+        self.assertEqual(report.kind, "local-unloadable")
+        self.assertEqual(report.recovery, "choose-source")
         self.assertEqual(report.network, "none")
 
     def test_a_real_local_tokenizer_loads_through_the_runners_own_path(self) -> None:
@@ -561,7 +563,10 @@ class ProbeSourceTests(PreflightFixture):
                         raise AssertionError("repository code was not refused")
                     raise ValueError("Loading acme/custom requires you to execute custom code")
         """}))
-        self.assertEqual(report.kind, "not-cached")
+        # Refused, and named as refused: offering a download here would be a
+        # promise nothing can keep.
+        self.assertEqual(report.kind, "needs-remote-code")
+        self.assertEqual(report.recovery, "choose-source")
 
     def test_a_runner_without_transformers_is_named_as_the_problem(self) -> None:
         """Shadow the library rather than relying on it being absent here."""
@@ -570,6 +575,167 @@ class ProbeSourceTests(PreflightFixture):
                                "transformers": "raise ImportError('no transformers here')"}))
         self.assertEqual(report.kind, "runner-unusable")
         self.assertIn("runner installation", report.message)
+
+class FailureCategoryTests(PreflightFixture):
+    """Each way a tokenizer can fail to load gets its own name and the right next step.
+
+    The shipped probe runs against stand-ins for transformers and huggingface_hub
+    that raise what the real libraries raise -- the hub's own error wrapped in an
+    OSError -- so classification is tested on the evidence the backend really
+    has, without a network or a download. A download is offered only where one
+    can help.
+    """
+
+    interpreter_with = ProbeSourceTests.interpreter_with
+
+    HUB = """
+        class RepositoryNotFoundError(Exception): pass
+        class GatedRepoError(RepositoryNotFoundError): pass
+        class LocalEntryNotFoundError(Exception): pass
+        class Sibling:
+            def __init__(self, name): self.rfilename = name
+        class Info:
+            def __init__(self, files): self.siblings = [Sibling(f) for f in files]; self.cardData = None
+        CACHED = {cached!r}
+        LISTING = {listing!r}
+        def try_to_load_from_cache(repo, name):
+            return "/cache/models--x/snapshots/abc123/" + name if name in CACHED else None
+        class HfApi:
+            def model_info(self, repo, files_metadata=False):
+                if LISTING == "not-found":
+                    # The hub's real wording, which mentions gated repositories
+                    # without the repository being gated.
+                    raise RepositoryNotFoundError(
+                        "401 Client Error. Repository Not Found for url. If you are trying to "
+                        "access a private or gated repo, make sure you are authenticated.")
+                if LISTING == "offline":
+                    import socket
+                    raise ConnectionError("Max retries exceeded") from socket.gaierror("Name or service not known")
+                return Info(LISTING)
+    """
+
+    def run_with(self, source: str, network: str, transformers: str, *, cached=(), listing=()):
+        hub = self.HUB.format(cached=tuple(cached), listing=listing if isinstance(listing, str) else list(listing))
+        return preflight(source, network=network, timeout=120,
+                         interpreter=self.interpreter_with({"transformers": transformers, "huggingface_hub": hub}))
+
+    @staticmethod
+    def raising(statement: str) -> str:
+        return f"""
+            import huggingface_hub as hub
+            class AutoTokenizer:
+                @staticmethod
+                def from_pretrained(source, **kwargs):
+                    assert kwargs.get("trust_remote_code") is False
+                    {statement}
+        """
+
+    MISSING = ("raise OSError(\"We couldn't connect to 'https://huggingface.co' to load the files, "
+               "and couldn't find them in the cached files.\") from hub.LocalEntryNotFoundError('offline')")
+
+    def assert_failure(self, report, kind: str, recovery: str) -> None:
+        self.assertFalse(report.ok)
+        self.assertEqual(report.kind, kind, report.message)
+        self.assertEqual(report.recovery, recovery, report.message)
+
+    def test_absent_from_the_cache_offers_the_download(self) -> None:
+        report = self.run_with("Qwen/Qwen3-4B", NETWORK_NONE, self.raising(self.MISSING))
+        self.assert_failure(report, "not-cached", "download")
+        self.assertIn("cannot tell whether the repository exists", report.message)
+
+    def test_a_partly_cached_tokenizer_still_offers_the_download(self) -> None:
+        report = self.run_with("Qwen/Qwen3-4B", NETWORK_NONE, self.raising(self.MISSING),
+                               cached=["tokenizer_config.json"])
+        self.assert_failure(report, "not-cached", "download")
+        self.assertIn("some of its tokenizer files are cached", report.message)
+
+    def test_cached_files_that_will_not_load_are_not_called_missing(self) -> None:
+        report = self.run_with("Qwen/Qwen3-4B", NETWORK_NONE,
+                               self.raising("raise ValueError('Expecting value: line 1 column 1 (char 0)')"),
+                               cached=["tokenizer.json", "tokenizer_config.json"])
+        self.assert_failure(report, "cached-unloadable", "choose-source")
+        self.assertIn("could not be determined", report.message)
+        self.assertNotIn("not on this machine", report.message)
+        self.assertIn("Expecting value", report.detail)
+
+    def test_remote_code_offline_is_refused_not_offered_a_download(self) -> None:
+        report = self.run_with("acme/custom", NETWORK_NONE, self.raising(
+            "raise ValueError('acme/custom requires you to execute custom code; set trust_remote_code=True')"),
+            cached=["tokenizer_config.json"])
+        self.assert_failure(report, "needs-remote-code", "choose-source")
+        self.assertIn("will not help", report.message)
+
+    def test_a_nonexistent_repository_says_so_and_admits_it_may_be_private(self) -> None:
+        report = self.run_with("Qwen/Qwen2.5-Coder-14B-Instruct-Typo", NETWORK_DOWNLOAD, self.raising(
+            "raise OSError('is not a valid model identifier listed on huggingface.co. If this is a "
+            "private repository, make sure to pass a token') from hub.RepositoryNotFoundError('401')"),
+            listing="not-found")
+        self.assert_failure(report, "not-found", "choose-source")
+        self.assertIn("private", report.message)
+
+    def test_a_gguf_only_repository_is_not_offered_a_download(self) -> None:
+        report = self.run_with("acme/Model-GGUF", NETWORK_DOWNLOAD, self.raising(
+            "raise OSError('acme/Model-GGUF does not appear to have a file named tokenizer_config.json')"),
+            listing=["README.md", "model-Q4_K_M.gguf"])
+        self.assert_failure(report, "gguf-only", "choose-source")
+        self.assertIn("downloading will not", report.message)
+
+    def test_a_network_failure_asks_for_the_connection_and_a_retry(self) -> None:
+        report = self.run_with("Qwen/Qwen3-4B", NETWORK_DOWNLOAD, self.raising(
+            "import socket\n                    raise OSError('Connection error') "
+            "from ConnectionError('Max retries exceeded')"),
+            listing="offline")
+        self.assert_failure(report, "network", "fix-network")
+        self.assertIn("could not be reached", report.message)
+
+    def test_a_gated_repository_asks_for_access_not_a_different_tokenizer(self) -> None:
+        report = self.run_with("meta-llama/Llama-3.1-8B-Instruct", NETWORK_DOWNLOAD, self.raising(
+            "raise OSError('You are trying to access a gated repo. Access to model "
+            "meta-llama/Llama-3.1-8B-Instruct is restricted.') from hub.GatedRepoError('401')"),
+            listing=["tokenizer.json", "tokenizer_config.json", "model.safetensors"])
+        self.assert_failure(report, "gated", "fix-access")
+        self.assertIn("accepted its terms", report.message)
+
+    def test_a_listed_repository_that_still_will_not_load_says_the_cause_is_unknown(self) -> None:
+        report = self.run_with("acme/odd", NETWORK_DOWNLOAD,
+                               self.raising("raise OSError('unexpected tokenizer format')"),
+                               listing=["tokenizer.json", "config.json"])
+        self.assert_failure(report, "load-failed", "choose-source")
+        self.assertIn("unexpected tokenizer format", report.detail)
+
+    def test_a_local_folder_without_a_tokenizer_has_nothing_to_download(self) -> None:
+        folder = self.directory / "empty-tokenizer"
+        folder.mkdir()
+        report = self.run_with(str(folder), NETWORK_NONE,
+                               self.raising("raise OSError('Can\\'t load tokenizer')"))
+        self.assert_failure(report, "local-unloadable", "choose-source")
+        self.assertIn("nothing to download", report.message)
+
+    def test_the_download_that_was_offered_then_succeeds(self) -> None:
+        """Recovery: offline it is missing; the offered download loads and encodes it."""
+        transformers = """
+            import huggingface_hub as hub
+            class Loaded:
+                vocab_size = 151936
+                def encode(self, text): return [1, 2, 3, 4]
+            class AutoTokenizer:
+                @staticmethod
+                def from_pretrained(source, **kwargs):
+                    assert kwargs.get("trust_remote_code") is False
+                    if kwargs.get("local_files_only"):
+                        raise OSError("couldn't find them in the cached files") from hub.LocalEntryNotFoundError("x")
+                    return Loaded()
+        """
+        offline = self.run_with("Qwen/Qwen3-4B", NETWORK_NONE, transformers)
+        self.assert_failure(offline, "not-cached", "download")
+        fetched = self.run_with("Qwen/Qwen3-4B", NETWORK_DOWNLOAD, transformers,
+                                cached=["tokenizer_config.json"])
+        self.assertTrue(fetched.ok, fetched.message)
+        self.assertEqual(fetched.kind, "loaded")
+        self.assertIsNone(fetched.recovery)
+        self.assertEqual(fetched.encoded_tokens, 4)
+        self.assertEqual(fetched.revision, "abc123")
+
 
 if __name__ == "__main__":
     unittest.main()

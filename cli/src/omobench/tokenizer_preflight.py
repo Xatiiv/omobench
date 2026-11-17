@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -69,6 +70,22 @@ request = json.loads(sys.stdin.read())
 source, level = request["source"], request["network"]
 report = {"stage": "import", "files": [], "downloaded": [], "base_model": None,
           "repository_listed": False, "identity": None, "cache_dir": None}
+# The files a tokenizer is built from, looked for in the cache when an offline
+# load fails, so "not downloaded" can be told apart from "downloaded, broken".
+TOKENIZER_NAMES = ("tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt",
+                   "spiece.model", "tokenizer.model", "special_tokens_map.json")
+
+
+def error_types(error):
+    """The class names along an exception's chain. Transformers wraps the hub's
+    own errors (GatedRepoError, RepositoryNotFoundError, connection errors) in
+    an OSError, and the class is better evidence than the wording."""
+    names, seen = [], set()
+    while error is not None and id(error) not in seen and len(names) < 8:
+        seen.add(id(error))
+        names.append(type(error).__name__)
+        error = error.__cause__ or error.__context__
+    return names
 
 
 def finish(**fields):
@@ -92,6 +109,7 @@ try:
         local_files_only=(level != "download"))
 except Exception as error:
     report["load_error"] = "%s: %s" % (type(error).__name__, error)
+    report["load_error_types"] = error_types(error)
 else:
     files = {}
     for attribute in ("vocab_file", "merges_file"):
@@ -134,14 +152,25 @@ else:
     }, resolved_files=files, encoded_tokens=len(encoded), revision=revision)
 
 if level == "none":
-    finish(outcome="not-loaded")
+    cached = []
+    if os.path.isdir(source):
+        cached = sorted(name for name in os.listdir(source) if name in TOKENIZER_NAMES)
+    else:
+        try:
+            from huggingface_hub import try_to_load_from_cache
+            cached = [name for name in TOKENIZER_NAMES
+                      if isinstance(try_to_load_from_cache(source, name), str)]
+        except Exception:
+            cached = None  # could not look: unknown, not "absent"
+    finish(outcome="not-loaded", cached_files=cached)
 
 report["stage"] = "inspect"
 try:
     from huggingface_hub import HfApi
     info = HfApi().model_info(source, files_metadata=False)
 except Exception as error:
-    finish(outcome="not-loaded", inspect_error="%s: %s" % (type(error).__name__, error))
+    finish(outcome="not-loaded", inspect_error="%s: %s" % (type(error).__name__, error),
+           inspect_error_types=error_types(error))
 
 report["repository_listed"] = True
 report["files"] = sorted(
@@ -187,6 +216,9 @@ class TokenizerPreflight:
     # Tokens the sample sentence encoded to: proof the tokenizer was used, not
     # just constructed.
     encoded_tokens: int | None = None
+    # What would move this forward, so the panel offers the right action and
+    # only offers a download when a download can help. None once it loaded.
+    recovery: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -196,6 +228,7 @@ class TokenizerPreflight:
             "downloaded": self.downloaded, "destination": self.destination,
             "detail": self.detail, "seconds": round(self.seconds, 2),
             "revision": self.revision, "encoded_tokens": self.encoded_tokens,
+            "recovery": self.recovery,
         }
 
 
@@ -324,6 +357,7 @@ def preflight(
     except ValueError as error:
         return TokenizerPreflight(
             ok=False, kind="invalid", source=text, network=network, message=str(error),
+            recovery=RECOVER_CHOOSE,
             checks=_checks(("failed", str(error)),
                            ("skipped", "Not looked for: there is no usable repository id or path."),
                            ("skipped", "Not attempted: nothing to load.")),
@@ -341,6 +375,7 @@ def preflight(
     if state == "cancelled":
         return TokenizerPreflight(
             ok=False, kind="cancelled", source=resolved, network=network, seconds=seconds,
+            recovery=RECOVER_RETRY,
             message="The tokenizer check was stopped. Nothing further was loaded or downloaded.",
             checks=_checks(("ok", f"Accepted: {resolved}."),
                            ("skipped", "The check was stopped before this was established."),
@@ -348,6 +383,7 @@ def preflight(
     if state == "timeout":
         return TokenizerPreflight(
             ok=False, kind="timeout", source=resolved, network=network, seconds=seconds, detail=detail,
+            recovery=RECOVER_RETRY,
             message=(f"Loading the tokenizer did not finish within {int(timeout)} s and was stopped. "
                      "On a slow connection try again with more time, or download the files first."),
             checks=_checks(("ok", f"Accepted: {resolved}."),
@@ -356,6 +392,7 @@ def preflight(
     if state in {"unavailable", "crashed"} or document.get("outcome") == "runner-unusable":
         return TokenizerPreflight(
             ok=False, kind="runner-unusable", source=resolved, network=network, seconds=seconds,
+            recovery=RECOVER_RUNNER,
             detail=detail or document.get("error", ""),
             message=("The tokenizer could not be checked because the runner's own environment "
                      f"could not load Transformers using {executable}. Fix the runner "
@@ -371,9 +408,11 @@ def preflight(
     if document.get("outcome") == "encode-failed":
         return TokenizerPreflight(
             ok=False, kind="encode-failed", source=resolved, network=network, seconds=seconds,
+            recovery=RECOVER_CHOOSE,
             detail=document.get("error", ""),
             message=(f"{resolved} loaded but could not encode a sample sentence, so the runner "
-                     "could not build the workload with it."),
+                     "could not build the workload with it. Downloading will not change that: "
+                     "choose a different tokenizer source under Advanced: tokenizer."),
             checks=_checks(syntax, ("ok", "Present where the loader looks for them."),
                            ("failed", "Loaded, but encoding a sample sentence failed.")))
 
@@ -406,55 +445,178 @@ def preflight(
              if isinstance(name, str)]
     suggestion = _suggestion(document, resolved)
 
+    error_types = [name for name in (document.get("load_error_types") or []) if isinstance(name, str)]
+    inspect_error = document.get("inspect_error", "")
+    inspect_types = [name for name in (document.get("inspect_error_types") or []) if isinstance(name, str)]
+    evidence = "\n".join(part for part in (error, inspect_error) if part)
+    common = dict(source=resolved, network=network, seconds=seconds, repository_files=files,
+                  suggestion=suggestion)
+
+    def failed(kind: str, recovery: str, message: str, files_check: tuple[str, str],
+               loaded_check: tuple[str, str]) -> TokenizerPreflight:
+        return TokenizerPreflight(ok=False, kind=kind, recovery=recovery, message=message,
+                                  detail=evidence, checks=_checks(syntax, files_check, loaded_check),
+                                  **common)
+
+    # Refused, whatever else is true: OmoBench never runs repository code.
+    if _needs_remote_code(error):
+        return failed(
+            "needs-remote-code", RECOVER_CHOOSE,
+            f"{resolved} ships its own tokenizer code and asks to execute it. OmoBench refuses "
+            "that, here and in the benchmark, so downloading will not help. Choose a repository "
+            "whose tokenizer loads with the standard implementation, under Advanced: tokenizer.",
+            ("ok", "Found."), ("failed", "Refused: loading it would run code from the repository."))
+
+    if _gated(error_types + inspect_types, evidence):
+        return failed(
+            "gated", RECOVER_ACCESS,
+            f"{resolved} is a gated repository: Hugging Face serves its files only to an account "
+            "that has accepted its terms. Accept them on the repository's page, sign the "
+            "benchmark runner's environment in to Hugging Face (for example with "
+            "`hf auth login`), then download the tokenizer files again. Or choose a local "
+            "tokenizer folder.",
+            ("missing", "Not downloadable without access."), ("failed", "Not loaded: access was refused."))
+
     if _gguf_only(files):
-        return TokenizerPreflight(
-            ok=False, kind="gguf-only", source=resolved, network=network, seconds=seconds,
-            detail=error, repository_files=files, suggestion=suggestion,
-            message=(f"{resolved} contains GGUF weights and no Transformers tokenizer "
-                     f"({', '.join(TOKENIZER_FILENAMES[:3])}…). Your server loads GGUF happily; "
-                     "the benchmark runner cannot build a workload from it. Enter the repository "
-                     "that publishes the tokenizer instead"
-                     + (f" — the publisher names {suggestion['source']}." if suggestion else
-                        " — usually the original, unquantized model the GGUF was converted from.")),
-            checks=_checks(syntax,
-                           ("missing", "This repository publishes weight files only; it has no "
-                                       "tokenizer file for the loader to read."),
-                           ("failed", "Not loaded: there is nothing here to load.")))
+        return failed(
+            "gguf-only", RECOVER_CHOOSE,
+            f"{resolved} contains GGUF weights and no Transformers tokenizer "
+            f"({', '.join(TOKENIZER_FILENAMES[:3])}…). Your server loads GGUF happily; "
+            "the benchmark runner cannot build a workload from it, and downloading will not "
+            "add a tokenizer. Enter the repository that publishes the tokenizer instead"
+            + (f" — the publisher names {suggestion['source']}." if suggestion else
+               " — usually the original, unquantized model the GGUF was converted from."),
+            ("missing", "This repository publishes weight files only; it has no "
+                        "tokenizer file for the loader to read."),
+            ("failed", "Not loaded: there is nothing here to load."))
 
     if network == NETWORK_NONE:
-        return TokenizerPreflight(
-            ok=False, kind="not-cached", source=resolved, network=network, seconds=seconds, detail=error,
-            message=(f"{resolved} is not in this machine's cache, so this offline check could not "
-                     "load it. Check it with repository access, or download its tokenizer files, "
-                     "before starting a benchmark — the run would stop here otherwise."
-                     if not local else
-                     f"{resolved} could not be loaded from disk. The folder exists, but "
-                     "AutoTokenizer could not build a tokenizer from what is in it."),
-            checks=_checks(syntax,
-                           ("missing", "Not in the local cache." if not local
-                                       else "The folder has no file the loader could use."),
-                           ("failed", "Not attempted over the network: this check stayed offline."
-                                      if not local else "Loading from the folder failed.")))
+        cached = document.get("cached_files")
+        if local:
+            return failed(
+                "local-unloadable", RECOVER_CHOOSE,
+                f"{resolved} could not be loaded from disk. The folder exists, but no tokenizer "
+                "could be built from what is in it"
+                + (f" (tokenizer files found: {', '.join(cached)})." if cached else
+                   " (it has none of the usual tokenizer files).")
+                + " There is nothing to download for a folder: choose a folder that holds the "
+                "model's tokenizer files, or a repository.",
+                ("ok" if cached else "missing",
+                 "Tokenizer files are present." if cached else "No tokenizer file in the folder."),
+                ("failed", "Loading from the folder failed."))
+        if cached and not _cache_miss(error_types, error):
+            return failed(
+                "cached-unloadable", RECOVER_CHOOSE,
+                f"Tokenizer files for {resolved} are in this machine's cache "
+                f"({', '.join(cached)}), but they could not be loaded. The cause could not be "
+                "determined from here; the loader's own error is below. Downloading again "
+                "reuses the cached files, so it is unlikely to help. Choose a different "
+                "tokenizer source under Advanced: tokenizer, or remove this repository from the "
+                "Hugging Face cache and download it again.",
+                ("ok", "In the local cache."), ("failed", "Present, but the loader could not use it."))
+        return failed(
+            "not-cached", RECOVER_DOWNLOAD,
+            f"{resolved} is not on this machine yet"
+            + (" (some of its tokenizer files are cached, not all)" if cached else "")
+            + ": its tokenizer files are not in this machine's cache. This check stayed offline, "
+            "so it cannot tell whether the repository exists or is "
+            "accessible. Download its tokenizer files (a few megabytes, never the model weights) "
+            "to continue; the download also finds out whether the repository exists.",
+            ("missing", "Only partly in the local cache." if cached else "Not in the local cache."),
+            ("failed", "Not attempted over the network: this check stayed offline."))
 
-    if "trust_remote_code" in error or "custom code" in error.lower():
-        return TokenizerPreflight(
-            ok=False, kind="needs-remote-code", source=resolved, network=network, seconds=seconds,
-            detail=error, repository_files=files, suggestion=suggestion,
-            message=(f"{resolved} ships its own tokenizer code and asks to execute it. OmoBench "
-                     "refuses that, here and in the benchmark. Use a repository whose tokenizer "
-                     "loads with the standard implementation."),
-            checks=_checks(syntax, ("ok", "The repository is reachable."),
-                           ("failed", "Refused: loading it would run code from the repository.")))
+    if not document.get("repository_listed"):
+        if _not_found(error_types + inspect_types, evidence):
+            return failed(
+                "not-found", RECOVER_CHOOSE,
+                f"Hugging Face has no public repository called {resolved}. It may be misspelled, "
+                "not exist, or be private to an account this computer is not signed in with; "
+                "Hugging Face answers the same way for all three. Check the name against the "
+                "model card, or choose a different tokenizer source under Advanced: tokenizer.",
+                ("missing", "Not found on Hugging Face."), ("failed", "Not loaded: nothing to load."))
+        if _network_failure(error_types + inspect_types, evidence):
+            return failed(
+                "network", RECOVER_NETWORK,
+                f"Hugging Face could not be reached, so {resolved} could not be downloaded. Check "
+                "this computer's internet connection, proxy or firewall, then try the download "
+                "again. Nothing was saved.",
+                ("unknown", "Not established: the network request failed."),
+                ("failed", "Not loaded: the files could not be fetched."))
+        if _access_refused(error_types + inspect_types, evidence):
+            return failed(
+                "access-refused", RECOVER_ACCESS,
+                f"Hugging Face refused access to {resolved}. If the repository is private or "
+                "gated, sign the benchmark runner's environment in to Hugging Face with an "
+                "account that has access, then try again; otherwise choose a different "
+                "tokenizer source.",
+                ("missing", "Access refused."), ("failed", "Not loaded: access was refused."))
+        return failed(
+            "load-failed", RECOVER_CHOOSE,
+            f"{resolved} could not be loaded, and the repository could not be looked up. The "
+            "cause could not be determined from here; both errors are below. The runner would "
+            "fail in the same place, before any request is sent. Check the name and your "
+            "connection, or choose a different tokenizer source under Advanced: tokenizer.",
+            ("unknown", "Could not be established."),
+            ("failed", "AutoTokenizer could not build a tokenizer from this source."))
 
-    return TokenizerPreflight(
-        ok=False, kind="load-failed", source=resolved, network=network, seconds=seconds,
-        detail=error or document.get("inspect_error", ""), repository_files=files, suggestion=suggestion,
-        message=(f"{resolved} did not load. The runner would fail in the same place, before any "
-                 "request is sent. The loader's own error is below."),
-        checks=_checks(syntax,
-                       ("ok" if files else "unknown",
-                        "The repository was listed." if files else "Could not be established."),
-                       ("failed", "AutoTokenizer could not build a tokenizer from this source.")))
+    return failed(
+        "load-failed", RECOVER_CHOOSE,
+        f"{resolved} exists, but no tokenizer could be built from it. The runner would fail in "
+        "the same place, before any request is sent. The loader's own error is below; choose a "
+        "different tokenizer source under Advanced: tokenizer.",
+        ("ok", "The repository was listed."),
+        ("failed", "AutoTokenizer could not build a tokenizer from this source."))
+
+
+# What would move a failed check forward. The panel offers a download for
+# RECOVER_DOWNLOAD, and a retry of the download after a network or access
+# problem has been dealt with; never for the others.
+RECOVER_DOWNLOAD = "download"
+RECOVER_CHOOSE = "choose-source"
+RECOVER_ACCESS = "fix-access"
+RECOVER_NETWORK = "fix-network"
+RECOVER_RUNNER = "fix-runner"
+RECOVER_RETRY = "retry"
+
+_NETWORK_TYPES = {"ConnectionError", "ConnectTimeout", "ReadTimeout", "Timeout", "TimeoutError",
+                  "NewConnectionError", "MaxRetryError", "ProxyError", "SSLError", "gaierror",
+                  "ConnectError", "NetworkError", "OfflineModeIsEnabled"}
+_NETWORK_TEXT = ("failed to resolve", "name or service not known", "temporary failure in name",
+                 "max retries exceeded", "connection refused", "connection reset", "timed out",
+                 "network is unreachable")
+
+
+def _needs_remote_code(error: str) -> bool:
+    return "trust_remote_code" in error or "custom code" in error.lower()
+
+
+def _gated(types: list[str], text: str) -> bool:
+    # Not merely the word "gated": a repository that does not exist is answered
+    # with "If you are trying to access a private or gated repo...", and that is
+    # a not-found, not a gate.
+    lowered = text.lower()
+    return ("GatedRepoError" in types or "trying to access a gated repo" in lowered
+            or "awaiting a review" in lowered)
+
+
+def _not_found(types: list[str], text: str) -> bool:
+    return "RepositoryNotFoundError" in types or "repository not found" in text.lower()
+
+
+def _network_failure(types: list[str], text: str) -> bool:
+    lowered = text.lower()
+    return bool(_NETWORK_TYPES.intersection(types)) or any(marker in lowered for marker in _NETWORK_TEXT)
+
+
+def _access_refused(types: list[str], text: str) -> bool:
+    return bool(re.search(r"\b(401|403)\b", text)) and ("HTTPError" in types or "HTTPError" in text)
+
+
+def _cache_miss(types: list[str], error: str) -> bool:
+    """The offline load failed because a file was absent, not because one was bad."""
+    lowered = error.lower()
+    return ("LocalEntryNotFoundError" in types or "couldn't find them in the cached files" in lowered
+            or "does not appear to have a file named" in lowered or "not cached locally" in lowered)
 
 
 def download_plan(source: str) -> dict[str, Any]:
