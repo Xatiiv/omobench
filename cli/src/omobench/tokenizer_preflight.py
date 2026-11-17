@@ -525,47 +525,58 @@ def preflight(
             ("missing", "Only partly in the local cache." if cached else "Not in the local cache."),
             ("failed", "Not attempted over the network: this check stayed offline."))
 
-    if not document.get("repository_listed"):
-        if _not_found(error_types + inspect_types, evidence):
-            return failed(
-                "not-found", RECOVER_CHOOSE,
-                f"Hugging Face has no public repository called {resolved}. It may be misspelled, "
-                "not exist, or be private to an account this computer is not signed in with; "
-                "Hugging Face answers the same way for all three. Check the name against the "
-                "model card, or choose a different tokenizer source under Advanced: tokenizer.",
-                ("missing", "Not found on Hugging Face."), ("failed", "Not loaded: nothing to load."))
-        if _network_failure(error_types + inspect_types, evidence):
-            return failed(
-                "network", RECOVER_NETWORK,
-                f"Hugging Face could not be reached, so {resolved} could not be downloaded. Check "
-                "this computer's internet connection, proxy or firewall, then try the download "
-                "again. Nothing was saved.",
-                ("unknown", "Not established: the network request failed."),
-                ("failed", "Not loaded: the files could not be fetched."))
-        if _access_refused(error_types + inspect_types, evidence):
-            return failed(
-                "access-refused", RECOVER_ACCESS,
-                f"Hugging Face refused access to {resolved}. If the repository is private or "
-                "gated, sign the benchmark runner's environment in to Hugging Face with an "
-                "account that has access, then try again; otherwise choose a different "
-                "tokenizer source.",
-                ("missing", "Access refused."), ("failed", "Not loaded: access was refused."))
+    # Two separate pieces of evidence: the tokenizer load (which downloads the
+    # files) and the repository lookup (model_info). Either can fail on its
+    # own -- the files can be refused or cut off while the lookup succeeds --
+    # so each is judged on what it actually said, and the lookup's error only
+    # counts when the lookup itself failed.
+    listed = bool(document.get("repository_listed"))
+    lookup_types = [] if listed else inspect_types
+    lookup_error = "" if listed else inspect_error
+    files_check = (("ok", "The repository was listed.") if listed
+                   else ("unknown", "Not established: the repository lookup failed too."))
+
+    if not listed and _not_found(error_types + lookup_types, evidence):
+        return failed(
+            "not-found", RECOVER_CHOOSE,
+            f"Hugging Face has no public repository called {resolved}. It may be misspelled, "
+            "not exist, or be private to an account this computer is not signed in with; "
+            "Hugging Face answers the same way for all three. Check the name against the "
+            "model card, or choose a different tokenizer source under Advanced: tokenizer.",
+            ("missing", "Not found on Hugging Face."), ("failed", "Not loaded: nothing to load."))
+    if _network_failure(error_types, error) or _network_failure(lookup_types, lookup_error):
+        return failed(
+            "network", RECOVER_NETWORK,
+            (f"{resolved} exists, but its tokenizer files could not be downloaded: the "
+             "connection to Hugging Face failed. " if listed else
+             f"Hugging Face could not be reached, so {resolved} could not be downloaded. ")
+            + "Check this computer's internet connection, proxy or firewall, then try the "
+            "download again. The tokenizer source itself is not in question.",
+            files_check, ("failed", "Not loaded: the files could not be fetched."))
+    if _access_refused(error_types, error) or _access_refused(lookup_types, lookup_error):
+        return failed(
+            "access-refused", RECOVER_ACCESS,
+            (f"{resolved} exists, but Hugging Face refused to serve its tokenizer files. "
+             if listed else f"Hugging Face refused access to {resolved}. ")
+            + "If the repository is private or gated, sign the benchmark runner's environment "
+            "in to Hugging Face with an account that has access, then try the download again; "
+            "otherwise choose a different tokenizer source.",
+            files_check, ("failed", "Not loaded: access was refused."))
+    if not listed:
         return failed(
             "load-failed", RECOVER_CHOOSE,
             f"{resolved} could not be loaded, and the repository could not be looked up. The "
             "cause could not be determined from here; both errors are below. The runner would "
             "fail in the same place, before any request is sent. Check the name and your "
             "connection, or choose a different tokenizer source under Advanced: tokenizer.",
-            ("unknown", "Could not be established."),
-            ("failed", "AutoTokenizer could not build a tokenizer from this source."))
+            files_check, ("failed", "AutoTokenizer could not build a tokenizer from this source."))
 
     return failed(
         "load-failed", RECOVER_CHOOSE,
         f"{resolved} exists, but no tokenizer could be built from it. The runner would fail in "
         "the same place, before any request is sent. The loader's own error is below; choose a "
         "different tokenizer source under Advanced: tokenizer.",
-        ("ok", "The repository was listed."),
-        ("failed", "AutoTokenizer could not build a tokenizer from this source."))
+        files_check, ("failed", "AutoTokenizer could not build a tokenizer from this source."))
 
 
 # What would move a failed check forward. The panel offers a download for
@@ -581,7 +592,10 @@ RECOVER_RETRY = "retry"
 _NETWORK_TYPES = {"ConnectionError", "ConnectTimeout", "ReadTimeout", "Timeout", "TimeoutError",
                   "NewConnectionError", "MaxRetryError", "ProxyError", "SSLError", "gaierror",
                   "ConnectError", "NetworkError", "OfflineModeIsEnabled"}
-_NETWORK_TEXT = ("failed to resolve", "name or service not known", "temporary failure in name",
+# Only consulted after a load that was allowed to reach the network: offline
+# checks return earlier, so "couldn't connect" here means a real attempt failed.
+_NETWORK_TEXT = ("couldn't connect to", "failed to resolve", "name or service not known",
+                 "temporary failure in name",
                  "max retries exceeded", "connection refused", "connection reset", "timed out",
                  "network is unreachable")
 
@@ -609,7 +623,11 @@ def _network_failure(types: list[str], text: str) -> bool:
 
 
 def _access_refused(types: list[str], text: str) -> bool:
-    return bool(re.search(r"\b(401|403)\b", text)) and ("HTTPError" in types or "HTTPError" in text)
+    # requests raises HTTPError, httpx HTTPStatusError; the hub's text reads
+    # "401 Client Error". A status code alone, in arbitrary text, is not enough.
+    http = any(name.endswith(("HTTPError", "HTTPStatusError")) for name in types) \
+        or "client error" in text.lower() or "HTTPError" in text
+    return bool(re.search(r"\b(401|403)\b", text)) and http
 
 
 def _cache_miss(types: list[str], error: str) -> bool:

@@ -592,6 +592,7 @@ class FailureCategoryTests(PreflightFixture):
         class RepositoryNotFoundError(Exception): pass
         class GatedRepoError(RepositoryNotFoundError): pass
         class LocalEntryNotFoundError(Exception): pass
+        class HTTPStatusError(Exception): pass
         class Sibling:
             def __init__(self, name): self.rfilename = name
         class Info:
@@ -632,6 +633,10 @@ class FailureCategoryTests(PreflightFixture):
 
     MISSING = ("raise OSError(\"We couldn't connect to 'https://huggingface.co' to load the files, "
                "and couldn't find them in the cached files.\") from hub.LocalEntryNotFoundError('offline')")
+
+    @staticmethod
+    def state(report, check_id: str) -> str:
+        return next(check["state"] for check in report.checks if check["id"] == check_id)
 
     def assert_failure(self, report, kind: str, recovery: str) -> None:
         self.assertFalse(report.ok)
@@ -695,6 +700,28 @@ class FailureCategoryTests(PreflightFixture):
             listing=["tokenizer.json", "tokenizer_config.json", "model.safetensors"])
         self.assert_failure(report, "gated", "fix-access")
         self.assertIn("accepted its terms", report.message)
+
+    def test_a_download_cut_off_while_the_lookup_succeeds_is_a_network_problem(self) -> None:
+        """The files fail, model_info works: still a retry, not a different source."""
+        report = self.run_with("Qwen/Qwen3-4B", NETWORK_DOWNLOAD, self.raising(
+            "raise OSError(\"We couldn't connect to 'https://huggingface.co' to load the files, and "
+            "couldn't find them in the cached files.\") from ConnectionError('Connection reset by peer')"),
+            listing=["tokenizer.json", "tokenizer_config.json", "config.json"])
+        self.assert_failure(report, "network", "fix-network")
+        self.assertIn("exists, but its tokenizer files could not be downloaded", report.message)
+        self.assertEqual(self.state(report, "files"), "ok")
+        self.assertIn("couldn't connect", report.detail)
+
+    def test_files_refused_while_the_lookup_succeeds_is_an_access_problem(self) -> None:
+        """A 401/403 on the files themselves, with the repository listed."""
+        report = self.run_with("acme/private-tokenizer", NETWORK_DOWNLOAD, self.raising(
+            "raise OSError('403 Client Error: Forbidden for url: "
+            "https://huggingface.co/acme/private-tokenizer/resolve/main/tokenizer.json') "
+            "from hub.HTTPStatusError('403 Forbidden')"),
+            listing=["tokenizer.json", "tokenizer_config.json"])
+        self.assert_failure(report, "access-refused", "fix-access")
+        self.assertIn("refused to serve its tokenizer files", report.message)
+        self.assertEqual(self.state(report, "files"), "ok")
 
     def test_a_listed_repository_that_still_will_not_load_says_the_cause_is_unknown(self) -> None:
         report = self.run_with("acme/odd", NETWORK_DOWNLOAD,

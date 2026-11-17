@@ -36,8 +36,9 @@ def git(cwd: Path, *args: str) -> bytes:
                           cwd=cwd, check=True, capture_output=True).stdout
 
 
-@unittest.skipUnless(shutil.which("git"), "git is not installed")
-class AutocrlfCheckoutTests(unittest.TestCase):
+class RepositoryFixture(unittest.TestCase):
+    """Throwaway origin and core.autocrlf=true clones; no tests of its own."""
+
     def setUp(self):
         self.temporary = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.temporary, ignore_errors=True)
@@ -64,6 +65,10 @@ class AutocrlfCheckoutTests(unittest.TestCase):
     def committed(self, clone: Path, path: str) -> bytes:
         return git(clone, "cat-file", "blob", f"HEAD:{path}")
 
+
+
+@unittest.skipUnless(shutil.which("git"), "git is not installed")
+class AutocrlfCheckoutTests(RepositoryFixture):
     def test_the_repository_rule_keeps_every_evidence_byte(self):
         clone = self.clone(self.origin((ROOT / ".gitattributes").read_bytes()), "fixed")
         for path in [*LF_FILES, GENUINE_CRLF[0]]:
@@ -128,6 +133,103 @@ class AutocrlfCheckoutTests(unittest.TestCase):
         self.assertEqual(checker.classify(b"a\nb\n", b"a\r\nb\r\n"), checker.LINE_ENDINGS)
         self.assertEqual(checker.classify(b"a\nb\n", b"a\r\nb\n"), checker.EDITED)
         self.assertEqual(checker.classify(b"a\n", b"a\n"), checker.MATCHES)
+
+
+@unittest.skipUnless(shutil.which("git"), "git is not installed")
+class RestoreEligibilityTests(RepositoryFixture):
+    """Only an unchanged, normal (stage-0) entry that exists at HEAD may be restored.
+
+    Each case leaves a working copy that differs from some blob only by LF→CRLF
+    -- exactly what --restore-line-endings repairs -- in a situation where
+    repairing it would overwrite somebody's work in progress.
+    """
+
+    CONTROL = EVIDENCE + "result.json"
+
+    def affected(self) -> Path:
+        clone = self.clone(self.origin(b""), "affected")
+        self.assertNotEqual((clone / self.CONTROL).read_bytes(), self.committed(clone, self.CONTROL))
+        return clone
+
+    @staticmethod
+    def crlf(data: bytes) -> bytes:
+        return data.replace(b"\n", b"\r\n")
+
+    def restore_and_report(self, clone: Path) -> dict[str, str]:
+        states = {f.path: f.state for f in checker.inspect(clone)}
+        checker.main(["--root", str(clone), "--restore-line-endings"])
+        # The ordinary converted file is still repaired, so each test also
+        # shows restoration ran rather than nothing happening at all.
+        self.assertEqual((clone / self.CONTROL).read_bytes(), self.committed(clone, self.CONTROL))
+        return states
+
+    def test_a_staged_new_file_converted_by_lf_to_crlf_is_left_alone(self):
+        clone = self.affected()
+        added = "results/org-model/2026-01-02-run-new/result.json"
+        lf = b'{\n  "run_id": "run-new"\n}\n'
+        (clone / added).parent.mkdir(parents=True)
+        (clone / added).write_bytes(lf)
+        git(clone, "add", added)
+        index_blob = git(clone, "ls-files", "-s", "--", added).split()[1].decode()
+        self.assertEqual(git(clone, "cat-file", "blob", index_blob), lf)
+        (clone / added).write_bytes(self.crlf(lf))  # differs from the index only by LF→CRLF
+
+        states = self.restore_and_report(clone)
+        self.assertEqual(states[added], checker.STAGED)
+        self.assertEqual((clone / added).read_bytes(), self.crlf(lf))
+
+    def test_a_staged_modification_is_left_alone(self):
+        clone = self.affected()
+        path = EVIDENCE + "reproduce.md"
+        changed = b"# Reproduce\n\nchanged\n"
+        (clone / path).write_bytes(changed)
+        git(clone, "add", path)
+        (clone / path).write_bytes(self.crlf(changed))
+
+        states = self.restore_and_report(clone)
+        self.assertEqual(states[path], checker.STAGED)
+        self.assertEqual((clone / path).read_bytes(), self.crlf(changed))
+
+    def test_a_staged_deletion_is_left_alone(self):
+        clone = self.affected()
+        path = EVIDENCE + "guidellm.stdout.log"
+        before = (clone / path).read_bytes()
+        git(clone, "rm", "-q", "--cached", path)
+
+        states = self.restore_and_report(clone)
+        self.assertEqual(states[path], checker.STAGED)
+        self.assertEqual((clone / path).read_bytes(), before)
+
+    def test_a_staged_mode_change_is_left_alone(self):
+        clone = self.affected()
+        path = EVIDENCE + "reproduce.md"
+        before = (clone / path).read_bytes()
+        git(clone, "update-index", "--chmod=+x", path)
+
+        states = self.restore_and_report(clone)
+        self.assertEqual(states[path], checker.STAGED)
+        self.assertEqual((clone / path).read_bytes(), before)
+
+    def test_an_unresolved_merge_is_left_alone(self):
+        clone = self.affected()
+        path = EVIDENCE + "reproduce.md"
+        git(clone, "checkout", "-q", "-b", "side")
+        (clone / path).write_bytes(b"# Reproduce\n\nside\n")
+        git(clone, "commit", "-q", "-am", "side")
+        git(clone, "checkout", "-q", "-")
+        (clone / path).write_bytes(b"# Reproduce\n\nmain\n")
+        git(clone, "commit", "-q", "-am", "main")
+        merged = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                                 "merge", "-q", "side"], cwd=clone, capture_output=True)
+        self.assertNotEqual(merged.returncode, 0, "the merge was expected to conflict")
+        stages = git(clone, "ls-files", "-s", "--", path).decode()
+        self.assertTrue(any(line.split()[2] != "0" for line in stages.splitlines()))
+        before = (clone / path).read_bytes()
+
+        states = {f.path: f.state for f in checker.inspect(clone)}
+        self.assertEqual(states[path], checker.UNMERGED)
+        checker.main(["--root", str(clone), "--restore-line-endings"])
+        self.assertEqual((clone / path).read_bytes(), before)
 
 
 class PublishedEvidenceAttributeTests(unittest.TestCase):
