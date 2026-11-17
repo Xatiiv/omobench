@@ -169,7 +169,12 @@ Treat `results/` as append-only public evidence.
 
 - Do not fabricate, edit by hand, redact incompletely, or regenerate benchmark evidence to make a result look better.
 - Preserve the complete bundle: `result.json`, raw runner output, runner log, environment snapshot, and reproduction instructions.
-- Keep artifact paths and SHA-256 hashes valid.
+- Keep artifact paths and SHA-256 hashes valid. `.gitattributes` turns
+  line-ending conversion off for bundle files (`results/*/*/* -text`) so a
+  Windows checkout keeps their exact bytes; do not remove it, normalize
+  evidence, or recompute hashes to match converted files. An affected checkout
+  recovers with `python tools/check_evidence_bytes.py` (see
+  [troubleshooting](docs/troubleshooting.md#validation-reports-hash-mismatches-on-a-windows-checkout)).
 - Never place API keys, tokens, private hostnames, private prompts, model weights, or other secrets in a bundle, log, or documentation.
 - Evidence is redacted as it is written: before the raw report is compressed,
   and therefore before it is hashed. Evidence collected earlier passes through

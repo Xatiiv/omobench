@@ -178,20 +178,24 @@ class LineEndingTests(unittest.TestCase):
         """Every tracked path the repository's own rules pin to LF."""
         import subprocess
 
-        listed = subprocess.run(["git", "ls-files"], cwd=ROOT,
-                                capture_output=True, text=True, check=False)
+        # NUL-separated bytes both ways: in text mode on Windows, Python writes
+        # "\r\n" into git's stdin, every path arrives with a trailing CR, and
+        # nothing matches a rule.
+        listed = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT,
+                                capture_output=True, check=False)
         if listed.returncode != 0:
             raise unittest.SkipTest("git is not available to read the index")
-        paths = [line for line in listed.stdout.splitlines() if line]
-        checked = subprocess.run(["git", "check-attr", "--stdin", "eol"], cwd=ROOT,
-                                 input="\n".join(paths), capture_output=True, text=True,
+        paths = [path for path in listed.stdout.split(b"\0") if path]
+        checked = subprocess.run(["git", "check-attr", "-z", "--stdin", "eol"], cwd=ROOT,
+                                 input=b"\0".join(paths) + b"\0", capture_output=True,
                                  check=False)
         if checked.returncode != 0:
             raise unittest.SkipTest("git check-attr is unavailable")
+        fields = checked.stdout.split(b"\0")
         pinned = []
-        for line in checked.stdout.splitlines():
-            path, _, verdict = line.rpartition(": eol: ")
-            if verdict.strip() == "lf" and path:
+        for index in range(0, len(fields) - 2, 3):
+            path, verdict = fields[index].decode("utf-8"), fields[index + 2].decode("utf-8")
+            if verdict == "lf" and path:
                 pinned.append(path)
         return pinned
 

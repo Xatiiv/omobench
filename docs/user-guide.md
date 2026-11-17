@@ -286,16 +286,27 @@ computer first, so a tokenizer you used before works offline.
 
 - **Tokenizer ready: …** means it loaded. **Run standard test** can now be
   used.
-- **… is not on this machine yet** usually means it has not been downloaded.
-  Press **Download the tokenizer files**. This fetches only the small tokenizer
-  files from Hugging Face, never the model weights. Afterwards it works offline.
-  In the current version the panel shows this same message for some other
-  loading failures too, such as a repository that publishes only GGUF weight
-  files and no tokenizer, a tokenizer that would need to run code from its
-  repository (which OmoBench refuses), or a cached tokenizer that fails to
-  load. Downloading cannot fix those. If the download completes and the
-  tokenizer still does not load, the message then shows the actual error; use
-  **Advanced: tokenizer** to choose a different source.
+- **… is not on this machine yet** means its tokenizer files are not in this
+  computer's cache. Press **Download the tokenizer files**. This fetches only
+  the small tokenizer files from Hugging Face, never the model weights, and
+  afterwards it works offline. The download also finds out whether the
+  repository exists, which an offline check cannot.
+- Any other problem is named, with what to do next. A download is only offered
+  where it can help:
+
+  | What the panel says | What it means | What to do |
+  | --- | --- | --- |
+  | No public repository with that name | Misspelled, does not exist, or private. Hugging Face answers the same way for all three | Check the name on the model card, or choose another source under **Advanced: tokenizer** |
+  | GGUF weights and no tokenizer | The repository holds model files only | Choose the original model's repository (the panel names it when the publisher declares it) |
+  | Ships its own tokenizer code | Loading it would run code from the repository, which OmoBench refuses | Choose a repository whose tokenizer loads normally |
+  | A gated repository | Its files need an account that accepted the publisher's terms | Accept the terms on Hugging Face, sign the benchmark runner's environment in (`hf auth login`), then **Try the download again**; or use a local tokenizer folder |
+  | Hugging Face could not be reached | A network, proxy or firewall problem | Fix the connection, then **Try the download again** |
+  | In the cache, but could not be loaded | Files are present but unusable; the exact cause is not known | Choose another source, or remove that repository from the Hugging Face cache and download it again |
+  | Loaded but could not encode a sample | The tokenizer does not work for building the workload | Choose another source |
+
+  When the cause cannot be established, the panel says so and shows the
+  loader's own error rather than guessing. OmoBench never swaps in a
+  different tokenizer by itself.
 
 **Run standard test** stays disabled until the tokenizer is ready for the model
 currently selected. If you choose a different model, the check runs again.
@@ -733,15 +744,17 @@ WSL cannot run Windows programs. → Open the panel from the Start menu entry or
 if needed. OmoBench never falls back to a different server when the bridge
 fails.
 
-**The tokenizer is "not on this machine yet", or a run fails while loading the tokenizer**
-→ Usually the tokenizer has not been downloaded, or the served identifier (such
-as `qwen2.5-coder-14b-instruct`) was used where a Hugging Face repository is
-needed. The same message currently also appears for some other loading
-failures, such as a repository with no tokenizer files or one that requires
-running its own code. → Press **Download the tokenizer files**. If it still
-fails, read the error it then shows, enter the right repository or a local
-tokenizer folder under **Advanced: tokenizer**, and press **Check and load this
-tokenizer**. Do not rename the model in your server.
+**The tokenizer is not ready**
+→ The panel names the reason: not downloaded yet, no such repository, a GGUF-only
+repository, a tokenizer that would run its own code, a gated repository, no
+network, or cached files that cannot be loaded. A served identifier such as
+`qwen2.5-coder-14b-instruct` is not a Hugging Face repository at all, so it is
+refused as a tokenizer source. → Follow the action shown (see
+[Checking and downloading the tokenizer](#checking-and-downloading-the-tokenizer)).
+**Download the tokenizer files** appears only when downloading can help.
+Otherwise, enter the right repository or a local tokenizer folder under
+**Advanced: tokenizer** and press **Check and load this tokenizer**. Do not
+rename the model in your server.
 
 **"Model folder not set", or no model file is found**
 → OmoBench does not know where your server keeps its files, or the path is

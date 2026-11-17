@@ -647,11 +647,10 @@ async function verifyTokenizer(source, basis, why = "") {
     $("tokenizer-fetch").hidden = true;
     return;
   }
-  const missing = report.kind !== "invalid" && report.kind !== "encode-failed";
-  tokenizerStatus(missing
-    ? `${source} is not on this machine yet. Download its tokenizer files (a few megabytes, never the model weights) to continue.`
-    : `${source} cannot be used: ${report.message}`, "error");
-  $("tokenizer-fetch").hidden = !missing;
+  // The backend says what kind of failure this was and what would help; a
+  // download is offered only when it can (files absent from the cache), or as
+  // a retry once a network or access problem has been dealt with.
+  showTokenizerFailure(source, report, false);
   $("tokenizer-fetch").onclick = () => action(async () => {
     const plan = await api("/api/tokenizer-download-plan", { tokenizer: source });
     $("tokenizer-fetch-plan").textContent = `From ${plan.source} into ${plan.destination}.`;
@@ -660,14 +659,34 @@ async function verifyTokenizer(source, basis, why = "") {
       tokenizer: source, model, network: "download",
       identity_key: modelResolution && modelResolution.identity_key, basis,
     });
+    if ($("model").value.trim() !== model || tokenizerSource() !== source) return;
     if (fetched.ok) {
       tokenizerVerified = { model, source, revision: fetched.revision || null };
       $("tokenizer-fetch").hidden = true;
       tokenizerStatus(`Tokenizer ready: ${source}. Downloaded, loaded and encoded a sample prompt; next time it works offline.`, "ok");
     } else {
-      tokenizerStatus(`${source} could not be downloaded or loaded: ${fetched.message}`, "error");
+      showTokenizerFailure(source, fetched, true);
     }
   });
+}
+
+// Recovery the backend can name: only "download" means a download can help;
+// a network or access problem may be fixed and the download tried again.
+const TOKENIZER_DOWNLOAD_HELPS = new Set(["download"]);
+const TOKENIZER_RETRY_DOWNLOAD = new Set(["fix-network", "fix-access"]);
+
+function showTokenizerFailure(source, report, afterDownload) {
+  const recovery = report.recovery || "";
+  const offer = TOKENIZER_DOWNLOAD_HELPS.has(recovery) || TOKENIZER_RETRY_DOWNLOAD.has(recovery);
+  const text = recovery === "download" && !afterDownload
+    ? `${source} is not on this machine yet. Download its tokenizer files (a few megabytes, never the model weights) to continue.`
+    : `${source} cannot be used yet: ${report.message}`;
+  tokenizerStatus(text, "error");
+  $("tokenizer-fetch").hidden = !offer;
+  $("tokenizer-fetch").textContent = afterDownload || TOKENIZER_RETRY_DOWNLOAD.has(recovery)
+    ? "Try the download again" : "Download the tokenizer files";
+  // Choosing a different source is done under Advanced: tokenizer.
+  if (recovery === "choose-source") $("tokenizer-details").open = true;
 }
 
 $("tokenizer-confirm").addEventListener("click", () => action(async () => {
@@ -1795,8 +1814,10 @@ function renderPreflight(report) {
     $("tokenizer-suggestion-reason").textContent = report.suggestion.reason;
     $("tokenizer-use-suggestion").onclick = () => { $("tokenizer").value = report.suggestion.source; };
   }
-  // A download is a separate, named act with a visible source and destination.
-  $("tokenizer-download").hidden = report.ok || report.kind === "invalid";
+  // A download is a separate, named act with a visible source and destination,
+  // offered only when the backend says it can help.
+  $("tokenizer-download").hidden = report.ok
+    || !(TOKENIZER_DOWNLOAD_HELPS.has(report.recovery) || TOKENIZER_RETRY_DOWNLOAD.has(report.recovery));
 }
 
 // The same check Connect runs, for an override typed under Advanced.
