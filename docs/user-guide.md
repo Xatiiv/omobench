@@ -286,9 +286,16 @@ computer first, so a tokenizer you used before works offline.
 
 - **Tokenizer ready: …** means it loaded. **Run standard test** can now be
   used.
-- **… is not on this machine yet** means it has not been downloaded. Press
-  **Download the tokenizer files**. This fetches only the small tokenizer
+- **… is not on this machine yet** usually means it has not been downloaded.
+  Press **Download the tokenizer files**. This fetches only the small tokenizer
   files from Hugging Face, never the model weights. Afterwards it works offline.
+  In the current version the panel shows this same message for some other
+  loading failures too, such as a repository that publishes only GGUF weight
+  files and no tokenizer, a tokenizer that would need to run code from its
+  repository (which OmoBench refuses), or a cached tokenizer that fails to
+  load. Downloading cannot fix those. If the download completes and the
+  tokenizer still does not load, the message then shows the actual error; use
+  **Advanced: tokenizer** to choose a different source.
 
 **Run standard test** stays disabled until the tokenizer is ready for the model
 currently selected. If you choose a different model, the check runs again.
@@ -471,14 +478,18 @@ Speed depends on much more than hardware. Results are only directly comparable
 when these match, or when the difference is the thing you are asking about:
 
 - the **model** and its exact weights;
-- the **quantization** (for example `Q4_K_M`): a smaller format is faster and
-  uses less memory, but it is a different set of weights;
+- the **quantization** (for example `Q4_K_M`): a smaller format uses less
+  memory and is often faster, but not always; how much it helps, or whether it
+  helps at all, depends on the hardware, the runtime and its settings. It is
+  also a different set of weights;
 - the **runtime** (for example llama.cpp inside LM Studio) and its version;
 - the **benchmark profile**;
 - the **context length** and other server settings;
 - **concurrency**, which is fixed by the profile;
-- **CPU/GPU placement**: a split run is slower than the same model fully on a
-  card;
+- **CPU/GPU placement**: where the weights run changes speed a great deal. A
+  split run is often slower than the same model fully on a card, but the size of
+  the difference, and whether a split is the only way the model fits at all,
+  depends on the hardware and configuration;
 - the **transport**: bridged results include the bridge's delay.
 
 ### Comparing on the website
@@ -661,9 +672,18 @@ created, before any review: the measurements, the model and runtime details,
 your hardware description, the operating system, your GitHub account name,
 and the submitter name you entered.
 
-Before files are written, OmoBench replaces local addresses, credentials and
-your home and folder paths with placeholders such as `<LOCAL_ENDPOINT>` and
-`<HOME>`. Still, read the bundle before you confirm.
+For runs made with the current version, OmoBench redacts some things as the
+evidence is written: the server address it measured and other loopback
+addresses become `<LOCAL_ENDPOINT>`, fields such as `api_key` or `access_token`
+and `Bearer` headers become `<REDACTED_CREDENTIAL>`, and the run folder,
+checkout and home directory become `<RUN_DIRECTORY>`, `<CHECKOUT>` and `<HOME>`.
+Validation also scans for these. It does not understand everything a file may
+contain: anything else you typed into a field, a model's output, or a server
+setting that includes a secret in an unusual form is not recognised. Evidence
+from older versions may not be redacted at all (see
+[evidence that does not name you](submission-bundle.md#evidence-that-does-not-name-you)).
+Open and read every file in the bundle (**Download complete bundle**) before
+you confirm.
 
 ### After the pull request
 
@@ -714,11 +734,14 @@ if needed. OmoBench never falls back to a different server when the bridge
 fails.
 
 **The tokenizer is "not on this machine yet", or a run fails while loading the tokenizer**
-→ The tokenizer has not been downloaded, or the served identifier (such as
-`qwen2.5-coder-14b-instruct`) was used where a Hugging Face repository is
-needed. → Press **Download the tokenizer files**. If the wrong repository was
-found, enter the right one under **Advanced: tokenizer** and press **Check and
-load this tokenizer**. Do not rename the model in your server.
+→ Usually the tokenizer has not been downloaded, or the served identifier (such
+as `qwen2.5-coder-14b-instruct`) was used where a Hugging Face repository is
+needed. The same message currently also appears for some other loading
+failures, such as a repository with no tokenizer files or one that requires
+running its own code. → Press **Download the tokenizer files**. If it still
+fails, read the error it then shows, enter the right repository or a local
+tokenizer folder under **Advanced: tokenizer**, and press **Check and load this
+tokenizer**. Do not rename the model in your server.
 
 **"Model folder not set", or no model file is found**
 → OmoBench does not know where your server keeps its files, or the path is
@@ -746,9 +769,16 @@ published.
 
 **Package & validate fails**
 → A required detail is missing, or the run did not meet the profile's
-thresholds. → Read the message beside the button and **Still needed**. Fix the
-details and package again; you never need to re-run the benchmark for a
-missing detail. A run with failed requests cannot be made publishable.
+thresholds. → Read the message beside the button and **Still needed**.
+Descriptive details can be added afterwards without re-running: the model's
+identity and licence, runtime version, server settings, and the model file's
+fingerprint while the same file is still on disk (recorded as chosen by you if
+it was not recorded at run start). Evidence that was not captured while the run
+happened cannot be verified afterwards: hardware read at the time, a model file
+that has since changed or been deleted, or measurements from an interrupted or
+failed run. Facts like these can only be added as your declaration, if at all,
+and some problems need a new run. A run with failed requests cannot be made
+publishable.
 
 **Create pull request fails**
 → The GitHub sign-in expired, the fork is still being created, or the network
@@ -779,7 +809,10 @@ can have different terms from the model they were built on.
 
 ### Which models can be published
 
-Any model can be benchmarked locally. To be **published**, a result must meet
+Any model can be benchmarked locally, provided your server can serve it
+through a streaming, OpenAI-compatible `/v1/chat/completions` endpoint on this
+computer, and OmoBench can load a matching tokenizer (from Hugging Face or a
+local folder) without running code from it. To be **published**, a result must meet
 the requirements in [Which models may be submitted](model-eligibility.md). In
 short:
 

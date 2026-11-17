@@ -80,8 +80,10 @@ Each run produces an **evidence bundle**: the normalized `result.json`, the
 benchmark runner's raw report and log, the environment description, and
 reproduction notes. It records the model, its exact file identity, the runtime,
 the hardware and how each fact was established: detected, reported by the
-server, or declared by you. Local paths, addresses and credentials are replaced
-with placeholders before anything is written.
+server, or declared by you. As evidence is written, OmoBench replaces the server
+address, other loopback addresses, recognised credential fields and local
+folder paths with placeholders. This does not catch everything a file can
+contain, so inspect every file in the bundle before publishing.
 
 Nothing is uploaded by running or packaging. Publishing is optional: the panel
 signs in to GitHub, shows you every file, and opens a pull request when you
