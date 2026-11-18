@@ -20,7 +20,11 @@ const publishedFiles = readdirSync(resultsDirectory, { recursive: true }).filter
 const publishedRaw = publishedFiles.map(path => JSON.parse(readFileSync(new URL(path.replaceAll("\\", "/"), resultsDirectory), "utf8")));
 const published = publishedRaw.map((raw, index) => readResultRecord(publishedFiles[index], raw));
 
-const base = publishedRaw.find(raw => raw.schema_version === "1.2" && raw.model.id === "qwen2.5-coder-14b-instruct");
+// Every fixture is built from one fixed published record. Published evidence
+// is append-only, so this record does not change when others are added.
+const BASE_RUN = "run-cc80dd597abb";
+const base = publishedRaw.find(raw => raw.run_id === BASE_RUN);
+assert.ok(base, `${BASE_RUN} is the fixtures' base record and must stay published`);
 const fact = (value, provenance = "detected") => ({ value, provenance });
 
 // A labelled fixture: the Qwen record on another machine.
@@ -62,26 +66,66 @@ const unknownVramBase = fixture("unknown-vram", () => {});
 const unknownVram = { ...unknownVramBase, serving: { ...unknownVramBase.serving,
   accelerators: [{ vendor: "intel", model: "Intel(R) Arc(TM) A770", memoryGb: null, count: 1, role: "inference", provenance: "unknown" }] } };
 
-test("the real RX 9070 runs are found by GPU and 16 GB per GPU", () => {
-  const filters = { ...hf.NO_FILTERS, gpu: "AMD Radeon RX 9070", vram: "vram-16" };
-  const found = hf.filterResults(published, filters);
-  assert.equal(found.length, published.length, "every published run so far is this machine");
-  assert.ok(found.length >= 4);
-  const options = hf.filterOptions(published);
-  assert.deepEqual(options.gpu.map(o => o.value), ["AMD Radeon RX 9070"]);
-  assert.deepEqual(options.vram.map(o => o.value), ["vram-16"]);
-  assert.deepEqual(options.ram.map(o => o.value), ["ram-32"]);
-  assert.deepEqual(options.mode.map(o => o.value), ["gpu-only"]);
+// The base record's own setup, as filters: its GPU, VRAM range, model, profile.
+const BASE_SETUP = { ...hf.NO_FILTERS, gpu: "AMD Radeon RX 9070", vram: "vram-16",
+  model: "qwen2.5-coder-14b-instruct", profile: "chat-small-v2" };
+
+// LABELLED FIXTURES that differ from the base in exactly one respect, plus one
+// that differs in none. Exact filter output is asserted on these alone, so a
+// new published result can never change what these tests expect.
+const sameSetup = fixture("same-setup", () => {});
+const otherModel = fixture("other-model", raw => { raw.model.id = "fixture-org/Other-Model-7B"; });
+const otherProfile = fixture("other-profile", raw => { raw.benchmark.profile_id = "chat-long-v1"; });
+const controlled = [sameSetup, split, otherModel, otherProfile, twoEights, sixteenNvidia, cpuOnly];
+
+test("published results are all read, and the base record is among them", () => {
+  assert.ok(published.length >= 1);
+  assert.equal(published.length, publishedFiles.length);
+  assert.ok(published.some(result => result.id === BASE_RUN));
+  for (const result of published) assert.ok(result.id && result.model && result.profile, result.id);
 });
 
-test("then a model and a profile narrow it to the runs that measured the same thing", () => {
-  const all = [...published, twoEights, sixteenNvidia, cpuOnly, split];
-  const filters = { ...hf.NO_FILTERS, gpu: "AMD Radeon RX 9070", vram: "vram-16", model: "qwen2.5-coder-14b-instruct", profile: "chat-small-v2" };
-  const found = hf.filterResults(all, filters);
-  assert.deepEqual(found.map(r => r.id).sort(), ["run-cc80dd597abb", "run-fixture-split"].sort());
+test("on the published registry, each filter keeps exactly the runs whose recorded facts satisfy it", () => {
+  // No list of published run ids: the expectation is computed from each
+  // record's own facts, so a valid new submission cannot break this.
+  const facetsOf = new Map(published.map(result => [result.id, hf.hardwareFacets(result)]));
+  const satisfies = (result, filters) => {
+    const facets = facetsOf.get(result.id);
+    const vram = hf.VRAM_RANGES.find(range => range.id === filters.vram);
+    return facets.inferenceGpus.some(device => device.model === filters.gpu)
+      && facets.inferenceGpus.length > 0 && facets.inferenceGpus.every(device => hf.inRange(device.memoryGb, vram))
+      && (filters.model === hf.ANY || result.model === filters.model)
+      && (filters.profile === hf.ANY || result.profile === filters.profile);
+  };
+  for (const filters of [{ ...BASE_SETUP, model: hf.ANY, profile: hf.ANY }, BASE_SETUP]) {
+    const found = hf.filterResults(published, filters);
+    assert.deepEqual(found.map(r => r.id).sort(), published.filter(r => satisfies(r, filters)).map(r => r.id).sort());
+    assert.ok(found.some(r => r.id === BASE_RUN), "the base run matches its own setup");
+  }
+  // Every choice offered comes from some published record and matches it.
+  const options = hf.filterOptions(published);
+  for (const key of ["gpu", "vram", "ram", "mode", "model", "profile"]) {
+    for (const option of options[key].filter(o => o.value !== "Not recorded" && o.value !== "No inference GPU")) {
+      assert.ok(hf.filterResults(published, { ...hf.NO_FILTERS, [key]: option.value }).length > 0, `${key}=${option.value}`);
+    }
+  }
+  assert.ok(options.gpu.some(o => o.value === "AMD Radeon RX 9070"));
+});
+
+test("hardware filters find a setup across machines, then a model and a profile narrow it", () => {
+  const byHardware = hf.filterResults(controlled, { ...hf.NO_FILTERS, gpu: "AMD Radeon RX 9070", vram: "vram-16" });
+  assert.deepEqual(byHardware.map(r => r.id).sort(),
+    ["run-fixture-other-model", "run-fixture-other-profile", "run-fixture-same-setup", "run-fixture-split"]);
+  const found = hf.filterResults(controlled, BASE_SETUP);
+  assert.deepEqual(found.map(r => r.id).sort(), ["run-fixture-same-setup", "run-fixture-split"]);
   assert.deepEqual(hf.differingSettings(found), ["execution mode"]);
-  const gpuOnly = hf.filterResults(all, { ...filters, mode: "gpu-only" });
-  assert.deepEqual(gpuOnly.map(r => r.id), ["run-cc80dd597abb"]);
+  const gpuOnly = hf.filterResults(controlled, { ...BASE_SETUP, mode: "gpu-only" });
+  assert.deepEqual(gpuOnly.map(r => r.id), ["run-fixture-same-setup"]);
+  // The non-matching fixtures stay out for the right reason, one respect each.
+  assert.equal(hf.matchesFilters(otherModel, BASE_SETUP), false);
+  assert.equal(hf.matchesFilters(otherProfile, BASE_SETUP), false);
+  assert.equal(hf.matchesFilters(sixteenNvidia, BASE_SETUP), false);
+  assert.equal(hf.matchesFilters(cpuOnly, BASE_SETUP), false);
 });
 
 test("two 8 GB cards never match a 16 GB-per-GPU filter", () => {
@@ -133,7 +177,12 @@ test("the 1.2 facts appear in the evidence summary only when recorded", () => {
   assert.equal(byLabel["Serving CPU cores"], "8 physical cores · 16 threads");
   assert.equal(byLabel["Installed memory"], "32 GB");
   assert.equal(byLabel["Tokenizer revision"], "0123456789abcdef0123456789abcdef01234567");
-  const older = summarize(published[0]).sections.flatMap(section => section.rows).map(row => row.label);
+  // A labelled fixture without the 1.2 host facts, rather than whichever
+  // published record happens to sort first.
+  const withoutCores = fixture("without-cores", raw => {
+    for (const key of ["cpu_cores", "cpu_threads", "ram_installed_gb"]) delete raw.environment.serving.host[key];
+  });
+  const older = summarize(withoutCores).sections.flatMap(section => section.rows).map(row => row.label);
   assert.ok(!older.includes("Serving CPU cores"));
   assert.ok(!older.includes("Installed memory"));
 });
