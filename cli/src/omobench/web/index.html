@@ -103,7 +103,7 @@
             <div class="actions"><button id="tokenizer-fetch" type="button" class="secondary" hidden>Download the tokenizer files</button><span id="tokenizer-fetch-plan" class="hint"></span></div>
           </div>
           <details class="quiet-details" id="model-root-details"><summary>Model folder <span class="hint" id="model-root-summary"></span></summary>
-            <label>Folder your server loads model files from<input id="model-root" placeholder="D:\OmoBench\lmstudio-models" spellcheck="false"><span class="hint">A Windows path such as <code>D:\OmoBench\lmstudio-models</code> or a Linux path. OmoBench reads model file headers here to find the tokenizer, and fingerprints the file a run used after the run, never during it. Nothing is changed or uploaded.</span></label>
+            <label>Folder your server loads model files from<input id="model-root" placeholder="D:\OmoBench\lmstudio-models" spellcheck="false"><span class="hint">A Windows drive path such as <code>D:\OmoBench\lmstudio-models</code> or a Linux path such as <code>/mnt/d/OmoBench/lmstudio-models</code>. OmoBench reads model file headers here to find the tokenizer, and fingerprints the file a run used after the run, never during it. Nothing is changed or uploaded.</span></label>
             <div class="actions"><button id="model-root-save" type="button" class="secondary">Save folder</button><span id="model-root-status" class="hint" role="status"></span></div>
           </details>
           <div id="model-manual" hidden>
@@ -353,7 +353,7 @@
             </div>
             <div id="weights-identify" class="weights-identify">
               <p class="field-title">Identify the model file you used</p>
-              <p class="hint">OmoBench reads the exact file and records its fingerprint on this run, so the result names the bytes you ran rather than a filename. Nothing is uploaded. This is the same folder as <strong>Model folder</strong> in Connect and starts with it; a Windows path such as <code>D:\OmoBench\lmstudio-models</code> works. <strong>Identify model file</strong>, beside Package, uses this folder too.</p>
+              <p class="hint">OmoBench reads the exact file and records its fingerprint on this run, so the result names the bytes you ran rather than a filename. Nothing is uploaded. This is the same folder as <strong>Model folder</strong> in Connect and starts with it. A Windows drive path such as <code>D:\OmoBench\lmstudio-models</code> or a Linux path such as <code>/mnt/d/OmoBench/lmstudio-models</code> works; enter the folder, not the file. <strong>Identify model file</strong>, beside Package, uses this folder too.</p>
               <div class="grid two">
                 <label>Folder containing the model file<input id="weights-folder" spellcheck="false" placeholder="D:\OmoBench\lmstudio-models\publisher\model"></label>
                 <div class="actions"><button id="weights-list" type="button" class="secondary">Show files</button></div>

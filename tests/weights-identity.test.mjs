@@ -39,22 +39,75 @@ const hashed = (digit, provenance) => document => {
       files: [{ name: "Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf", bytes: 8988110784, sha256: `sha256:${hex("e")}` }] } };
 };
 
-test("the two published Qwen runs stay excluded, and the reason names the folder path", () => {
+test("the two published Qwen runs stay excluded, each with its own reason", () => {
   const older = published("run-cc80dd597abb"), newer = published("run-c758acaf0c4e");
   const olderIdentity = weightsIdentity(older);
   assert.equal(olderIdentity.established, false);
   assert.match(olderIdentity.why, /local folder path/);
-  // The newer run's 64-character value is read only as what older records
-  // meant by model.revision: a declared revision of its source. Its length
-  // does not make it a file hash.
+  // The newer run's 64-character value is not read as a file hash, a commit or
+  // anything else: its record never said what it is.
   const newerIdentity = weightsIdentity(newer);
-  assert.equal(newerIdentity.established, true);
-  assert.equal(newerIdentity.kind, "declared-revision");
-  assert.match(newerIdentity.label, /what kind of revision it is was not recorded/);
+  assert.equal(newerIdentity.established, false);
+  assert.match(newerIdentity.why, /does not say what it identifies/);
   const verdict = assess(newer, older, "exact");
   assert.equal(verdict.suitability, "unsuitable");
   assert.ok(verdict.blockers.includes("Weights identity not established"));
   assert.ok(verdict.reasons.some(reason => /local folder path/.test(reason)));
+  assert.ok(verdict.reasons.some(reason => /does not say what it identifies/.test(reason)));
+});
+
+test("two identical unexplained bare hashes do not establish identical weights", () => {
+  // The published c758 record against itself, and a labelled fixture pair
+  // carrying one bare value each of commit and SHA-256 length: equal strings
+  // with no recorded kind are never counted as the same bytes.
+  const newer = published("run-c758acaf0c4e");
+  assert.ok(assess(newer, published("run-c758acaf0c4e"), "exact").blockers.includes("Weights identity not established"));
+  for (const revision of ["0123456789abcdef0123456789abcdef01234567", hex("a"), "v1.0-release"]) {
+    const bare = label => fixture(label, document => { document.model.revision = revision; delete document.model.weights; });
+    const verdict = assess(bare("bare-one"), bare("bare-two"), "exact");
+    assert.ok(verdict.blockers.includes("Weights identity not established"), revision);
+    assert.ok(verdict.missing.some(text => /Weights identity is not established on the reference run/.test(text)), revision);
+    assert.ok(verdict.missing.some(text => /Weights identity is not established on the other run/.test(text)), revision);
+  }
+});
+
+test("folder paths and labels that move stay unestablished", () => {
+  const base = fixture("base", () => {});
+  for (const revision of ["D:\\OmoBench\\lmstudio-models\\Qwen", "\\\\server\\share\\model.gguf", "/home/me/model.gguf",
+                          "./model.gguf", "~/models/model.gguf", "file:///C:/models/model.gguf", "https://example.invalid/model.gguf"]) {
+    const identity = weightsIdentity({ ...base, modelRevision: revision, weights: null });
+    assert.equal(identity.established, false, revision);
+    assert.match(identity.why, /folder path|URL/, revision);
+  }
+  for (const revision of ["main", "master", "latest", "HEAD"]) {
+    // The reader refuses these outright; a record built around it still says why.
+    assert.throws(() => fixture("moving", document => { document.model.revision = revision; delete document.model.weights; }), /immutable/);
+    const identity = weightsIdentity({ ...base, modelRevision: revision, weights: null });
+    assert.equal(identity.established, false, revision);
+    assert.match(identity.why, /label that moves/, revision);
+  }
+});
+
+test("matching typed identities still establish the same weights", () => {
+  const one = fixture("one", hashed("1", "verified-at-run-start"));
+  assert.deepEqual(assess(one, fixture("one-again", hashed("1", "verified-at-run-start")), "exact").blockers, []);
+  const commit = "d0a692ef765eefbf2fabb130b3cb2e8917e3d225";
+  const declared = label => fixture(label, document => {
+    document.model.revision = commit;
+    document.model.weights = { kind: "repository", repository: "https://huggingface.co/Qwen/Qwen2.5-Coder-14B-Instruct-GGUF",
+      repository_revision: commit, identity: "repository-revision", content: null, provenance: "contributor-declared" };
+  });
+  const verdict = assess(declared("repository-one"), declared("repository-two"), "exact");
+  assert.deepEqual(verdict.blockers, []);
+  assert.equal(weightsIdentity(declared("repository-one")).kind, "repository-commit");
+});
+
+test("reading and comparing the published records changes none of them", () => {
+  const before = JSON.stringify(raw);
+  const records = Object.keys(raw).map(published);
+  for (const left of records) for (const right of records) assess(left, right, "exact");
+  assert.equal(JSON.stringify(raw), before);
+  for (const record of records) assert.equal(weightsIdentity(record).established, Boolean(record.weights), record.id);
 });
 
 test("two runs with the same file fingerprint are comparable when everything else matches", () => {

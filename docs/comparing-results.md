@@ -32,13 +32,16 @@ Direct comparisons and the run leaderboard require exact matches for:
 - Catalog model ID.
 - The weights, by typed identity: the same file fingerprint
   (`sha256-manifest:`), or the same repository and commit. A fingerprint and a
-  commit are never treated as the same thing. Records made before identities
-  were typed are read as a declared revision of their weights source (or of the
-  canonical model when no source is recorded), and only match the same
-  declaration. A revision that is a folder path, a URL or a moving label
-  establishes nothing: such a run is excluded, with that reason, and two runs
-  that both lack an identity are not counted as agreeing. A fingerprint chosen
-  by the contributor after the run still compares, and the comparison says so.
+  commit are never treated as the same thing. A record with only a bare
+  `model.revision` (every record made before identities were typed) stays
+  readable and shows that revision, but establishes no weights identity: the
+  old contract said "an immutable model revision or commit SHA" and never
+  recorded which, so two equal strings are not evidence of the same bytes,
+  whatever their length. A folder path, a URL or a moving label establishes
+  nothing either. Such a run is excluded from direct comparison with the
+  reason, and two runs that both lack an identity are never counted as
+  agreeing. A fingerprint chosen by the contributor after the run still
+  compares, and the comparison says so.
 - Recorded quantization. Missing quantization cannot establish a match.
 - Profile ID and the SHA-256 of its contents.
 - GuideLLM version.

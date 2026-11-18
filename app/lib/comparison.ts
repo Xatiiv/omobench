@@ -174,8 +174,8 @@ const dimensions: Dimension[] = [
   {
     // Judged by weightsIdentity() below, not by string equality: an
     // identity nobody established is never an agreement, and a file
-    // fingerprint, a repository commit and an older declared revision are
-    // three different kinds of thing.
+    // fingerprint and a repository commit are different kinds of thing, and
+    // a bare revision with no recorded kind establishes neither.
     id: "weights", label: "Weights", varies: ["model", "workload"],
     blocker: "Different weights", value: (r) => describeWeights(weightsIdentity(r)),
   },
@@ -255,7 +255,7 @@ const URL_LIKE = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//;
 const MOVING = new Set(["main", "master", "head", "latest"]);
 
 export type WeightsIdentity =
-  | { established: true; kind: "file-fingerprint" | "repository-commit" | "declared-revision"; key: string; label: string;
+  | { established: true; kind: "file-fingerprint" | "repository-commit"; key: string; label: string;
       provenance: string | null }
   | { established: false; why: string };
 
@@ -270,9 +270,13 @@ export function weightsIdentity(result: ResultRecord): WeightsIdentity {
     return { established: true, kind: "repository-commit", key: `${weights.repository}@${weights.repositoryRevision}`,
       label: `${weights.repository} at ${weights.repositoryRevision}`, provenance: weights.provenance };
   }
-  // No typed identity: read model.revision with the meaning older records gave
-  // it -- a revision of the weights source, or of the canonical model -- and
-  // say plainly when it names nothing.
+  // No typed identity. The record stays readable and its revision is shown
+  // wherever the run is, but a bare model.revision never establishes which
+  // bytes ran: its contract was "an immutable model revision or commit SHA"
+  // and never recorded which of those a value is, nor checked it against
+  // anything. Two equal strings of that kind are equal strings, not the same
+  // weights, so they are never read as agreeing. Nothing about a value's
+  // length or shape changes that.
   const revision = (result.modelRevision ?? "").trim();
   if (!revision) return { established: false, why: "no weights revision is recorded" };
   if (URL_LIKE.test(revision)) return { established: false, why: `the recorded revision (${revision}) is a URL, which names a place, not bytes` };
@@ -280,9 +284,9 @@ export function weightsIdentity(result: ResultRecord): WeightsIdentity {
     return { established: false, why: `the recorded revision (${revision}) is a local folder path, which identifies no bytes` };
   }
   if (MOVING.has(revision.toLowerCase())) return { established: false, why: `the recorded revision (${revision}) is a label that moves` };
-  const of = result.modelSource ?? result.model;
-  return { established: true, kind: "declared-revision", key: `${of}@${revision}`,
-    label: `revision ${revision} of ${of}, as declared (what kind of revision it is was not recorded)`, provenance: "contributor-declared" };
+  return { established: false,
+    why: `the recorded revision (${revision}) does not say what it identifies: a repository commit, a file hash or `
+      + "something else. The record was made before weights identities were typed, and nothing in it establishes which" };
 }
 
 function describeWeights(identity: WeightsIdentity): string | null {
@@ -292,7 +296,6 @@ function describeWeights(identity: WeightsIdentity): string | null {
 const KIND_WORDS = {
   "file-fingerprint": "a fingerprint of the model files",
   "repository-commit": "a repository commit",
-  "declared-revision": "a declared revision of unrecorded kind",
 } as const;
 
 function compareWeights(left: ResultRecord, right: ResultRecord):
@@ -335,9 +338,6 @@ export function assess(
       for (const [result, where] of [[reference, "the reference run"], [candidate, "the other run"]] as const) {
         const identity = weightsIdentity(result);
         if (!identity.established) missing.push(`Weights identity is not established on ${where}`);
-        else if (identity.kind === "declared-revision" && !result.modelSource) {
-          missing.push(`Weights source is not recorded on ${where}`);
-        }
       }
       const verdict = compareWeights(reference, candidate);
       if (verdict.same) {

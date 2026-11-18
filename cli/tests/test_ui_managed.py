@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from omobench.ui import UIServer
 from omobench import managed_setup as ms
-from test_cli import GUIDELLM_REPORT_V2, install_guidellm_module_stub, patch_parent_process_preflight, typed_form
+from test_cli import GUIDELLM_REPORT_V2, install_guidellm_module_stub, patch_parent_process_preflight
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -489,11 +489,18 @@ class GuidedRunLifecycleTests(unittest.TestCase):
         self.platform_patch = patch(
             "omobench.managed_setup.check_platform", return_value=ms.PlatformStatus(True, "ok")
         )
+        # The install manifest names the model file the server is started on.
+        self.manifest_patch = patch(
+            "omobench.managed_setup.read_manifest",
+            return_value={"model": {"path": str(self.model_path)}},
+        )
+        self.manifest_patch.start()
         self.get_recipe_patch.start()
         self.verify_patch.start()
         self.platform_patch.start()
 
     def tearDown(self):
+        self.manifest_patch.stop()
         self.get_recipe_patch.stop()
         self.verify_patch.stop()
         self.platform_patch.stop()
@@ -576,7 +583,14 @@ class GuidedRunLifecycleTests(unittest.TestCase):
         # identity, weight source, revision, quantization, or runtime version by
         # hand -- only the submitter identity is genuinely unknown.
         self.assertEqual(benchmark_detail["model_source"], self.fixture_model_source)
-        self.assertEqual(benchmark_detail["model_revision"], "fixture-revision-abc123")
+        # The weights are identified by the file the server was started on,
+        # recorded as the run started and fingerprinted after it finished --
+        # not by the recipe's commit typed in as a bare revision.
+        self.assertNotIn("model_revision", benchmark_detail)
+        identity = benchmark_detail["weights_identity"]
+        self.assertEqual(identity["provenance"], "verified-at-run-start")
+        self.assertTrue(identity["revision"].startswith("sha256-manifest:"))
+        self.assertEqual([entry["path"] for entry in identity["files"]], [str(self.model_path)])
         self.assertEqual(benchmark_detail["quantization"], "Q4_K_M")
         self.assertEqual(benchmark_detail["framework"], "llama.cpp")
         self.assertEqual(benchmark_detail["framework_version"], "b99999")
@@ -695,30 +709,40 @@ class GuidedRunLifecycleTests(unittest.TestCase):
         self.assertEqual(reopened["result"], detail["result"])
         self.assertTrue(reopened["recovered"])
 
+        form = {
+            # A real recipe's model_id is the canonical catalog identity;
+            # this fixture's alias ("Fixture/Alias") is only a stand-in for
+            # the API name used during inference, so the package call uses
+            # a real catalog-eligible model id here, as an actual managed
+            # recipe's own model_id would.
+            "model": "Qwen/Qwen3-4B",
+            # No revision typed: the run's own verified file identity is used.
+            "framework": "llama.cpp",
+            "framework_version": "b99999",
+            "quantization": "Q4_K_M",
+            "model_source": self.fixture_model_source,
+            "runtime_args": ["--device", "none"],
+            "submitter": "octocat",
+        }
         with patch("omobench.cli.current_git_commit", return_value="a" * 40):
-            status, _, body = self.post(
-                f"/api/runs/{benchmark_job_id}/package",
-                {
-                    # A real recipe's model_id is the canonical catalog identity;
-                    # this fixture's alias ("Fixture/Alias") is only a stand-in for
-                    # the API name used during inference, so the package call uses
-                    # a real catalog-eligible model id here, as an actual managed
-                    # recipe's own model_id would.
-                    "model": "Qwen/Qwen3-4B",
-                    # A new submission says what its revision is: here a declared
-                    # repository commit, with the serving machine described.
-                    **typed_form("cpu", engine=("llama.cpp", "b99999")),
-                    "framework": "llama.cpp",
-                    "framework_version": "b99999",
-                    "quantization": "Q4_K_M",
-                    "model_source": self.fixture_model_source,
-                    "runtime_args": ["--device", "none"],
-                    "submitter": "octocat",
-                },
-            )
+            # A result that records the identified file also describes the
+            # serving machine; without that, packaging says what to fill in.
+            status, _, body = self.post(f"/api/runs/{benchmark_job_id}/package", form)
+            self.assertEqual(status, 400, body)
+            self.assertIn(b"Fill in the serving machine in Review", body)
+            # What the panel's form sends for this run: the engine from the
+            # prefilled runtime fields, CPU only, the host left to the record.
+            status, _, body = self.post(f"/api/runs/{benchmark_job_id}/package", {**form, "serving": {
+                "host": {}, "accelerators": [], "placement": {"mode": "cpu-only"},
+                "runtime": {"engine": {"name": "llama.cpp", "version": "b99999"}, "settings": []}}})
         self.assertEqual(status, 200, body)
         packaged = json.loads(body)
         self.assertTrue(packaged["validation"]["valid"], packaged["validation"])
+        result = json.loads((self.server.controller.run_directory(benchmark_job_id) / "result.json")
+                            .read_text(encoding="utf-8"))
+        self.assertEqual(result["model"]["weights"]["provenance"], "verified-at-run-start")
+        self.assertEqual(result["model"]["revision"],
+                         "sha256-manifest:" + result["model"]["weights"]["content"]["manifest_sha256"][len("sha256:"):])
 
         status, _, body = self.post(f"/api/runs/{benchmark_job_id}/prepare", {})
         self.assertEqual(status, 200, body)

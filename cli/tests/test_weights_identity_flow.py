@@ -35,7 +35,9 @@ SHARDS = [f"someone/Big-70B-GGUF/Big-70B-Q4_K_M-{index:05d}-of-00002.gguf" for i
 FORM = {**PACKAGE_FORM, "model_revision": "", "serving": SAME_HOST_SERVING}
 
 
-class WeightsIdentityFlowTests(PanelFixture):
+class ModelsFolderFixture(PanelFixture):
+    """A panel with a labelled LM Studio models folder saved as its Model folder."""
+
     def setUp(self) -> None:
         super().setUp()
         self.models = lmstudio_folder(self.root.parent / f"{self.root.name}-models")
@@ -46,6 +48,17 @@ class WeightsIdentityFlowTests(PanelFixture):
             write_gguf(self.models / name, {"general.name": "Big 70B fixture"})
         self.controller.update_settings({"model_root": str(self.models)})
 
+    def qwen_run(self) -> str:
+        """A finished run of the LM Studio Qwen alias, whose files are in the folder."""
+        job_id = self.completed_job(bridged=False)
+        with self.controller.lock:
+            job = self.controller.jobs[job_id]
+            job.update(model="qwen2.5-coder-14b-instruct", server_metadata={"quantization": "Q4_K_M"})
+            self.controller._save(job)
+        return job_id
+
+
+class WeightsIdentityFlowTests(ModelsFolderFixture):
     # --- helpers -------------------------------------------------------------
 
     def stage(self, job_id: str) -> str:
@@ -62,15 +75,6 @@ class WeightsIdentityFlowTests(PanelFixture):
         job.update(id=job_id, run_path=str(run))
         with self.controller.lock:
             self.controller.jobs[job_id] = job
-            self.controller._save(job)
-        return job_id
-
-    def qwen_run(self) -> str:
-        """A finished run of the LM Studio Qwen alias, whose files are in the folder."""
-        job_id = self.completed_job(bridged=False)
-        with self.controller.lock:
-            job = self.controller.jobs[job_id]
-            job.update(model="qwen2.5-coder-14b-instruct", server_metadata={"quantization": "Q4_K_M"})
             self.controller._save(job)
         return job_id
 
@@ -245,3 +249,76 @@ class WeightsIdentityFlowTests(PanelFixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FolderPathScopeTests(ModelsFolderFixture):
+    """Exactly what the two folder fields accept: a Windows drive path (read
+    through WSL's default /mnt mount) and an absolute Linux/WSL path. Anything
+    else is refused with what to enter instead. Drive letters are mapped onto a
+    labelled stand-in mount root here, never onto the machine's real drives."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        from omobench import local_models
+        mount = self.root.parent / f"{self.root.name}-mount"
+        mount.mkdir()
+        self.addCleanup(shutil.rmtree, mount, ignore_errors=True)
+        (mount / "d").symlink_to(self.models, target_is_directory=True)
+        original = local_models.WINDOWS_DRIVE_MOUNT_ROOT
+        local_models.WINDOWS_DRIVE_MOUNT_ROOT = str(mount)
+        self.addCleanup(setattr, local_models, "WINDOWS_DRIVE_MOUNT_ROOT", original)
+        self.job_id = self.qwen_run()  # one finished run; the fixture makes it once
+
+    def fields(self, value):
+        """The same folder through the saved Model folder, Identify, and the manual listing."""
+        job_id = self.job_id
+        self.controller.update_settings({"model_root": value})
+        saved = self.controller.identify_weights(job_id, {})
+        self.controller.update_settings({"model_root": ""})
+        typed = self.controller.identify_weights(job_id, {"root": value})
+        return saved, typed
+
+    def test_windows_and_wsl_paths_work_in_both_fields(self) -> None:
+        for value in ("D:\\", "d:/", str(self.models)):  # D:\ maps onto the stand-in mount
+            with self.subTest(value=value):
+                saved, typed = self.fields(value)
+                self.assertEqual(saved["state"], "choose")
+                self.assertEqual(typed["state"], "choose")
+        listing = self.controller.weight_identity(
+            {"directory": r"D:\lmstudio-community\Qwen2.5-Coder-14B-Instruct-GGUF"})
+        self.assertIn("Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf", [c["name"] for c in listing["candidates"]])
+
+    def refusal(self, value) -> str:
+        messages = []
+        with self.assertRaises(UIError) as saved:
+            self.controller.update_settings({"model_root": value})
+        messages.append(str(saved.exception))
+        job_id = self.job_id
+        with self.assertRaises(UIError) as typed:
+            self.controller.identify_weights(job_id, {"root": value})
+        messages.append(str(typed.exception))
+        with self.assertRaises(UIError) as listed:
+            self.controller.weight_identity({"directory": value})
+        messages.append(str(listed.exception))
+        self.assertEqual(len(set(messages)), 1, messages)
+        return messages[0]
+
+    def test_unsupported_inputs_say_what_to_enter_instead(self) -> None:
+        cases = {
+            str(self.models / Q4): "is a file. Enter the folder that contains it: "
+                                   + str((self.models / Q4).parent),
+            "D:\\" + Q4.replace("/", "\\"):
+                r"is a file. Enter the folder that contains it: D:\lmstudio-community\Qwen2.5-Coder-14B-Instruct-GGUF",
+            r"Q:\models": "Drive Q: is not at",
+            r"\\wsl$\Ubuntu\home\me\models": "Enter the Linux path",
+            r"\\wsl.localhost\Ubuntu\home\me": "Enter the Linux path",
+            r"\\server\share\models": "network share",
+            "//server/share/models": "network share",
+            "models": "Enter the full path",
+            "~/models": "Enter the full path",
+            "file:///D:/models": "not a URL",
+            str(self.models / "no-such-folder"): "does not exist or cannot be read here",
+        }
+        for value, expected in cases.items():
+            with self.subTest(value=value):
+                self.assertIn(expected, self.refusal(value))

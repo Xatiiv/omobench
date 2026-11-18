@@ -556,9 +556,26 @@ file fingerprint.
 ### The model folder
 
 Under **Model folder** in the Connect section, enter the folder your server
-loads model files from and press **Save folder**. A Windows path such as
-`D:\OmoBench\lmstudio-models` works. For LM Studio, this is the models directory
-shown in its **My Models** tab.
+loads model files from and press **Save folder**. For LM Studio, this is the
+models directory shown in its **My Models** tab.
+
+This field and **Folder containing the model file** in Review accept the same
+two forms:
+
+- A Windows drive path, such as `D:\OmoBench\lmstudio-models` (or
+  `D:/OmoBench/lmstudio-models`). It is read through WSL's default mount of
+  that drive, `/mnt/d/OmoBench/lmstudio-models`.
+- An absolute Linux path, such as `/mnt/d/OmoBench/lmstudio-models` or
+  `/home/you/models`. It is used as given.
+
+Anything else is refused with what to enter instead: a path to a file rather
+than its folder (the message names the folder), a network share (`\\server\share`),
+WSL's own files as Windows shows them (`\\wsl$\...` or `\\wsl.localhost\...`;
+enter the Linux path), a relative path, `~`, or a URL. If your WSL mounts
+Windows drives somewhere other than `/mnt` (a custom `automount` root in
+`/etc/wsl.conf`), a Windows path is not translated: enter the Linux path
+under your mount root instead. The panel runs in WSL on Windows; it does not
+translate paths for any other system.
 
 OmoBench reads model file headers there to help find the tokenizer, and records
 which file a run used when the run starts. It does not change, move or upload
@@ -792,9 +809,10 @@ rename the model in your server.
 **"Model folder not set", or no model file is found**
 → OmoBench does not know where your server keeps its files, or the path is
 wrong. → Under **Model folder**, enter the folder LM Studio uses (see its **My
-Models** tab) and press **Save folder**. A Windows path such as
-`D:\OmoBench\lmstudio-models` is accepted and translated for WSL. A folder
-outside the Windows drives WSL can see cannot be read.
+Models** tab) and press **Save folder**. A Windows drive path such as
+`D:\OmoBench\lmstudio-models` or a Linux path such as
+`/mnt/d/OmoBench/lmstudio-models` works; see [The model folder](#the-model-folder)
+for what is refused and why.
 
 **Hardware shows "Not recorded" or "VRAM not reported"**
 → The driver did not report it, or the run was not bridged so Windows could not

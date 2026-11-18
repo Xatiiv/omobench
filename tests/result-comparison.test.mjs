@@ -27,7 +27,14 @@ function fixture() {
     artifacts: Object.fromEntries(["raw_runner_output", "runner_stdout_log", "environment_snapshot", "reproduce_markdown"].map(key => [key, { path: `fixture-${key}`, sha256: checksum }])),
   };
 }
-function record() { return readResultRecord("test fixture", fixture()); }
+// A schema 1.0 record as read: its bare model.revision establishes no weights
+// identity, so two of them are never counted as the same weights.
+function legacyRecord() { return readResultRecord("test fixture", fixture()); }
+// The same record with a typed weights identity, so that the tests about every
+// other dimension compare runs whose weights are established as the same.
+const FIXTURE_WEIGHTS = { fileCount: 1, identity: "content-hash", kind: "local-files",
+  manifestSha256: `sha256:${"1".repeat(64)}`, provenance: "verified-at-run-start", repository: null, repositoryRevision: null };
+function record() { return { ...legacyRecord(), weights: FIXTURE_WEIGHTS }; }
 function entry(key, value, origin = "registry") { return { key, origin, result: { ...record(), outputTokensPerSecond: value, ttftP50: value } }; }
 
 test("reads final measured latency, profile identity and reliability without recomputing throughput", () => {
@@ -45,10 +52,13 @@ test("different hardware, runtime and fingerprints remain comparable", () => {
 
 test("every workload identity difference excludes direct comparison", () => {
   for (const [field, value, expected] of [
-    // The revision and its source are one identity now: a different revision,
-    // or the same revision of a different (or unrecorded) source, is different weights.
-    ["model", "Other/Model", "model"], ["modelRevision", "another-revision", "weights"],
-    ["modelSource", "https://example.invalid/other.gguf", "weights"], ["modelSource", null, "weights"],
+    // Weights are judged by the typed identity: other files, a repository
+    // commit instead of a fingerprint, or no identity at all.
+    ["model", "Other/Model", "model"],
+    ["weights", { ...FIXTURE_WEIGHTS, manifestSha256: `sha256:${"2".repeat(64)}` }, "different weights"],
+    ["weights", { ...FIXTURE_WEIGHTS, identity: "repository-revision", kind: "repository", manifestSha256: null,
+                  repository: "https://example.invalid/fixture", repositoryRevision: "f".repeat(40) }, "identified differently"],
+    ["weights", null, "not established"],
     ["quantization", "Q8", "quantization"], ["profile", "fixture-extended-v1", "profile"],
     ["profileSha256", `sha256:${"b".repeat(64)}`, "checksum"], ["runnerVersion", "0.8.0", "runner"],
   ]) assert.match(incompatibilities(record(), { ...record(), [field]: value }).join(" "), new RegExp(expected, "i"));
@@ -60,10 +70,19 @@ test("unknown quantization cannot form a ranking even against itself", () => {
   assert.deepEqual(eligibleLeaderboard([{ key: "unknown", origin: "registry", result: unknown }], unknown, "registry"), []);
 });
 
-test("legacy canonical source records match each other but not a sourced re-export", () => {
-  const legacy = { ...record(), modelSource: null };
-  assert.deepEqual(incompatibilities(legacy, legacy), []);
-  assert.notDeepEqual(incompatibilities(legacy, record()), []);
+test("equal bare revisions on records without a typed identity are not the same weights", () => {
+  // Schema 1.0 said "an immutable model revision or commit SHA" and never
+  // recorded which; equal strings of that kind are not evidence of equal bytes,
+  // with or without a source, whatever their length.
+  for (const revision of ["immutable-fixture-revision", "f0caced9823778600314115bf0b96834a0e82f6024e2af96625147626a1d8158",
+                          "2f3b082b1356a6123f7ed71e65aea340da25d53c"]) {
+    for (const modelSource of [null, "https://example.invalid/fixture.gguf"]) {
+      const legacy = { ...legacyRecord(), modelRevision: revision, modelSource };
+      const verdict = assess(legacy, { ...legacy }, "exact");
+      assert.ok(verdict.blockers.includes("Weights identity not established"), `${revision} ${modelSource}`);
+      assert.match(verdict.reasons.join(" "), /does not say what it identifies/);
+    }
+  }
 });
 
 test("percentages describe values accurately and correctly favor lower latency", () => {
@@ -198,7 +217,7 @@ function bridgedFixture(overrides = {}) {
 function bridged(overrides) { return readResultRecord("bridged fixture", bridgedFixture(overrides)); }
 
 test("a legacy 1.0 result still reads, and gains no facts it never recorded", () => {
-  const result = record();
+  const result = legacyRecord();
   assert.equal(result.schemaVersion, "1.0");
   assert.equal(result.serving, null);
   assert.equal(result.tokenizer, null);
@@ -541,7 +560,10 @@ test("a proposed model does not join a catalogued leaderboard", () => {
   assert.deepEqual(eligibleLeaderboard([{ key: "p", origin: "registry", result: proposed }], bridged(), "registry"), []);
 });
 
-test("legacy results stay comparable with each other", () => {
+test("legacy results stay readable but are not comparable on their weights", () => {
+  const legacy = legacyRecord();
+  assert.equal(legacy.modelRevision, "immutable-fixture-revision");
+  assert.deepEqual(incompatibilities(legacy, legacy), ["Weights identity not established"]);
   assert.deepEqual(incompatibilities(record(), record()), []);
 });
 
@@ -817,7 +839,7 @@ test("a confounded example is comparable only where the question allows it", () 
 test("an example with gaps reports what nobody recorded, by name", () => {
   const assessment = assess(example("example-reference"), example("example-missing"), "model");
   assert.ok(assessment.missing.some((text) => text.includes("Quantization is not recorded")));
-  assert.ok(assessment.missing.some((text) => text.includes("Weights source is not recorded")));
+  assert.ok(assessment.missing.some((text) => text.includes("Weights identity is not established on the other run")));
   // Unrecorded is not the same as different: the gaps are listed separately
   // from the differences, and nothing is invented to fill them.
   assert.ok(!assessment.missing.some((text) => text.includes("against")));

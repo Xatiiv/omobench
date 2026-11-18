@@ -378,6 +378,21 @@ class ManagedController:
                 job["finished_at"] = datetime.now(UTC).isoformat()
                 self.cancel_events.pop(job["id"], None)
 
+    @staticmethod
+    def _model_files_at_start(storage_dir: Path, recipe_id: str) -> dict | None:
+        """The installed model file's identity (path, size, mtime), or None."""
+        from . import local_models, managed_setup
+
+        try:
+            installed = managed_setup.read_manifest(storage_dir, recipe_id) or {}
+            path = Path(installed["model"]["path"])
+        except (TypeError, KeyError, OSError, ValueError, managed_setup.ManagedSetupError):
+            return None
+        if not path.is_file():
+            return None
+        return {"root": str(path.parent), "files": local_models.file_identity([path]),
+                "recorded_at": datetime.now(UTC).isoformat()}
+
     def _missing_runtime_libraries(self, manifest: Any) -> str | None:
         """The prerequisite message, or None when there is nothing to report."""
         from . import managed_setup
@@ -495,6 +510,11 @@ class ManagedController:
                         raise UIError("The managed run was cancelled before the benchmark started.")
                     job["status"] = "running_benchmark"
                     self._save_run(job)
+                # The model file the server was started on: launcher.managed_server
+                # re-hashed it against the reviewed recipe immediately before
+                # starting. Its path, size and modification time are recorded
+                # now, as the run starts; no byte is read here.
+                model_files = self._model_files_at_start(storage_dir, job["recipe"])
                 benchmark_job = self.benchmark_controller.start(
                     {
                         "endpoint": endpoint,
@@ -520,9 +540,12 @@ class ManagedController:
                 model_source = recipe.get("model", {}).get("url")
                 if model_source:
                     prefill["model_source"] = model_source
-                model_revision = recipe.get("model", {}).get("revision")
-                if model_revision:
-                    prefill["model_revision"] = model_revision
+                # The weights revision is the fingerprint of the file itself,
+                # identified when the run has finished. The recipe's repository
+                # commit is not put in its place: a bare commit says nothing the
+                # registry can check about which bytes ran.
+                if model_files:
+                    prefill["model_files_at_start"] = model_files
                 if recipe.get("quantization"):
                     prefill["quantization"] = recipe["quantization"]
                 runtime_version = recipe.get("runtime", {}).get("version")
@@ -534,6 +557,15 @@ class ManagedController:
                     if detail["status"] not in {"running", "cancelling"}:
                         break
                     time.sleep(1)
+                if detail["status"] == "completed" and model_files:
+                    # After the measured window: fingerprint the recorded file,
+                    # which is verified only if it is unchanged since the start.
+                    # Anything that stops it is left for Review, where Identify
+                    # model file says why.
+                    try:
+                        self.benchmark_controller.identify_weights(benchmark_job["id"], {})
+                    except UIError:
+                        pass
                 with self.lock:
                     job["status"] = "cancelled" if job["status"] == "cancelling" else detail["status"]
                     job["result"] = detail.get("summary")

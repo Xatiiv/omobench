@@ -731,8 +731,9 @@ class Controller:
                 local = local_models.to_local_path(root)
             except ValueError as error:
                 raise UIError(str(error)) from error
-            if not local.is_dir():
-                raise UIError(f"{root} is not a folder this panel can read ({local}).")
+            problem = local_models.folder_problem(root, local)
+            if problem:
+                raise UIError(problem)
         self._settings_path.parent.mkdir(parents=True, exist_ok=True)
         self._settings_path.write_text(json.dumps({"model_root": root or None}, indent=2) + "\n",
                                        encoding="utf-8")
@@ -857,8 +858,9 @@ class Controller:
             folder = local_models.to_local_path(given.strip())
         except ValueError as error:
             raise UIError(str(error)) from error
-        if not folder.is_dir():
-            raise UIError(f"{given.strip()} is not a folder this panel can read.")
+        problem = local_models.folder_problem(given, folder)
+        if problem:
+            raise UIError(problem)
         return folder
 
     def _with_weights_identity(self, job: dict, declaration: dict | None, revision: str) -> dict | None:
@@ -890,6 +892,14 @@ class Controller:
                         f"identified for this run is {stored['revision']}. One weight set has one "
                         "revision: clear the field (it is filled from the identified file) or "
                         "identify the file again.")
+                if not (declaration or {}).get("serving"):
+                    # A typed weights identity is recorded in schema 1.1 or
+                    # later, which always describes the serving machine.
+                    # Nothing here is invented to fill that in.
+                    raise UIError(
+                        "The model file is identified, and a result that records it also "
+                        "describes the serving machine. Fill in the serving machine in Review "
+                        "(at least the runtime engine and its build), then package again.")
                 return {**(declaration or {}),
                         "weights": {"kind": "local-files", "manifest": stored["manifest"],
                                     "provenance": stored["provenance"]}}
