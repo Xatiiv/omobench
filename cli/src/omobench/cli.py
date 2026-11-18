@@ -1915,6 +1915,23 @@ def required_text(value: Any, label: str) -> str:
     return value.strip()
 
 
+def checked_model_revision(value: Any) -> str:
+    """The revision as given, refused when its form says it cannot be one.
+
+    A folder path, a URL or a label that moves never identifies weights. What a
+    revision that passes actually is -- a commit or a content hash -- is said
+    by model.weights, not guessed from the string.
+    """
+    from .model_identity import revision_form_problem
+    revision = required_text(value, "Model revision")
+    problem = revision_form_problem(revision)
+    if problem:
+        raise ValueError(
+            f"Model revision {revision!r} {problem}. Identify the model file (its content hash "
+            "becomes the revision) or give the commit of the repository the weights came from.")
+    return revision
+
+
 def require_https_source_url(value: Any, label: str) -> str:
     """Validate a generic, operator-supplied weights-source URL.
 
@@ -2676,7 +2693,7 @@ def package_local_run(args: argparse.Namespace) -> int:
 
         model = {
             "id": required_text(args.model, "Model ID"),
-            "revision": required_text(args.model_revision, "Model revision"),
+            "revision": checked_model_revision(args.model_revision),
             "quantization": (
                 required_text(args.quantization, "Quantization")
                 if args.quantization is not None

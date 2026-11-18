@@ -288,7 +288,9 @@ function renderRun(job, telemetry = null) {
     $("validation-result").textContent = job.validation.valid ? "Bundle validation passed. Review the files before submission." : job.validation.errors.join("\n");
     $("validation-result").classList.toggle("error", !job.validation.valid);
   }
-  $("prepare-button").hidden = !job.validation?.valid;
+  // Reviewable bundles can be inspected and downloaded even when the registry
+  // will not take them yet; the preview says why and keeps submission shut.
+  $("prepare-button").hidden = !(job.validation?.valid || job.validation?.reviewable);
   $("submission-link").hidden = true;
   const pr = job.submission?.pull_request_url;
   if (typeof pr === "string" && /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+$/.test(pr)) {
@@ -334,6 +336,7 @@ async function selectRun(id) {
     $("served-model-id").value = job.model;
   }
   const reused = applyCaptured(job);
+  restoreWeightsIdentity(job);
   renderDetected(reused, []);
   // Verified managed-run metadata, when present, so packaging never requires typing a source by hand.
   $("package-model-source").value = job.model_source || "";
@@ -715,6 +718,7 @@ async function loadSettings() {
   const settings = await api("/api/settings").catch(() => null);
   if (!settings) return;
   $("model-root").value = settings.model_root || "";
+  if (!$("weights-folder").value.trim() && settings.model_root) $("weights-folder").value = settings.model_root;
   $("model-root-summary").textContent = settings.model_root
     ? (settings.model_root_readable ? settings.model_root : `${settings.model_root} · cannot be read`)
     : "not set";
@@ -1288,18 +1292,21 @@ $("weights-list").addEventListener("click", () => action(async () => {
 $("weights-hash").addEventListener("click", () => action(async () => {
   const files = [...document.querySelectorAll("#weights-files input:checked")].map((box) => box.value);
   if (!files.length) throw new Error("Select the file you ran. A model split into parts needs every part.");
+  if (!$("weights-manual-confirmed").checked) {
+    $("weights-result").textContent = "Tick the confirmation first: only you can say these are the files this run used.";
+    return;
+  }
   $("weights-result").textContent = "Reading every byte of the selected file(s). For a large model this takes a few minutes.";
-  const report = await api("/api/weight-identity", { directory: $("weights-folder").value.trim(), files });
-  $("weights-manifest").value = JSON.stringify(report.manifest);
-  // The fingerprint identifies these bytes. It replaces nothing the person
-  // typed: a different revision already in the field is kept and flagged.
-  const result = fill(field("model_revision"), report.revision, "Weights revision", "fingerprint of the file you selected");
-  const count = (report.manifest && report.manifest.files || []).length;
-  $("weights-result").textContent = result && result.kept
-    ? `Identified ${count} file(s). The revision field already holds something you typed, so it was left alone; this file's fingerprint is ${report.revision}.`
-    : `Identified ${count} file(s) and recorded the fingerprint as this run's weights revision. It names these exact bytes, not their filenames.`;
-  scheduleWorkflowRefresh();
+  // Recorded on this run, as chosen by you, exactly like a file chosen under
+  // Identify model file; packaging then uses it without anything copied across.
+  const report = await api(`/api/runs/${selected}/weights`, {
+    root: $("weights-folder").value.trim(), files, confirm: true });
+  renderWeights(report);
+  $("weights-result").textContent = report.state === "identified"
+    ? `Identified ${report.files.length} file(s) and recorded them on this run as chosen by you. Packaging uses this fingerprint: ${report.revision}.`
+    : (report.message || "");
 }));
+
 
 // --- the summary --------------------------------------------------------------
 
@@ -1738,9 +1745,8 @@ function withProvenance(data) {
   if (reviewed && reviewed.hardware_at_start) enriched.probe = "run";
   // A request for the probe the panel read itself, not a document from here.
   else if (servingProbeRead) enriched.probe = true;
-  if (!weights && identifiedWeights && identifiedWeights.job === selected) {
-    enriched.weights = { kind: "local-files", manifest: identifiedWeights.manifest };
-  }
+  // The model file identified for this run is stored with the run, and the
+  // server attaches it, re-checking that the file has not changed.
   delete enriched.serving_os; delete enriched.serving_cpu; delete enriched.serving_ram_gb;
   delete enriched.serving_placement; delete enriched.serving_placement_detail;
   delete enriched.serving_accelerators; delete enriched.serving_application;
@@ -1842,6 +1848,50 @@ $("tokenizer-download-confirm").addEventListener("click", () => action(async () 
 // a file chosen now is recorded as chosen, after a confirmation.
 let identifiedWeights = null;  // { job, manifest, revision, verified }
 
+// Only this run's own packaging field. The custom-model revision in Connect
+// belongs to the setup, not to a run, and is not reset when another run is
+// opened; filling it from one run would carry that run's fingerprint into the
+// next.
+function revisionInputs() {
+  return [document.querySelector('#package-form [name="model_revision"]')].filter(Boolean);
+}
+// Fills empty revision inputs from the identified file; never overwrites one.
+function fillRevisionFrom(revision) {
+  revisionInputs().forEach((input) => { if (!input.value.trim()) input.value = revision; });
+}
+function revisionAgreement(revision) {
+  const typed = revisionInputs().map((input) => input.value.trim()).find((value) => value && value !== revision);
+  return typed
+    ? `The revision field holds ${typed}, which is not this file's fingerprint; packaging will refuse that. Clear it to use ${revision}.`
+    : "Packaging uses this fingerprint as the weights revision and checks the file is unchanged first.";
+}
+
+// A reload or a reopened run shows the identity already recorded on the run.
+function restoreWeightsIdentity(job) {
+  identifiedWeights = null;
+  $("weights-status").hidden = true;
+  const stored = job.weights_identity;
+  if (!stored) return;
+  identifiedWeights = { job: job.id, manifest: stored.manifest, revision: stored.revision,
+                        verified: stored.provenance === "verified-at-run-start" };
+  fillRevisionFrom(stored.revision);
+  $("weights-status").hidden = false;
+  $("weights-status").classList.remove("error");
+  $("weights-choose").hidden = true;
+  const how = stored.provenance === "verified-at-run-start"
+    ? "Model file verified: the file recorded when this run started, unchanged when it was fingerprinted."
+    : "Model file recorded as chosen by you: fingerprinted after the run, not called verified.";
+  $("weights-message").textContent = `${how} ${revisionAgreement(stored.revision)}`;
+  $("weights-details").hidden = false;
+  const files = (stored.manifest && stored.manifest.files || []).map((file) => file.name);
+  const facts = [["Revision", stored.revision], ["Files", files.join("\n")],
+    ["How", stored.provenance], ["Identified", stored.identified_at || "not recorded"]];
+  $("weights-facts").replaceChildren(...facts.flatMap(([label, value]) => {
+    const dt = document.createElement("dt"), dd = document.createElement("dd");
+    dt.textContent = label; dd.textContent = value; return [dt, dd];
+  }));
+}
+
 function renderWeights(report) {
   const box = $("weights-status");
   box.hidden = false;
@@ -1849,9 +1899,10 @@ function renderWeights(report) {
   $("weights-choose").hidden = true; $("weights-details").hidden = true;
   if (report.state === "identified") {
     identifiedWeights = { job: selected, manifest: report.manifest, revision: report.revision, verified: report.verified };
-    $("weights-message").textContent = report.verified
+    $("weights-message").textContent = (report.verified
       ? `Model file verified: ${report.files.join(", ")} is the file recorded when this run started, unchanged since.`
-      : `Model file recorded as chosen by you: ${report.files.join(", ")}. It was found today, so it is not called verified.`;
+      : `Model file recorded as chosen by you: ${report.files.join(", ")}. It was found after the run, so it is not called verified.`)
+      + " " + revisionAgreement(report.revision);
     $("weights-details").hidden = false;
     const facts = [["Revision", report.revision], ["Files", report.files.join("\n")],
       ["Size", `${(report.bytes / 1e9).toFixed(2)} GB`], ["How", report.reused_fingerprint ? "Fingerprint reused: the file is unchanged since it was last hashed" : "Hashed now"]];
@@ -1859,8 +1910,8 @@ function renderWeights(report) {
       const dt = document.createElement("dt"), dd = document.createElement("dd");
       dt.textContent = label; dd.textContent = value; return [dt, dd];
     }));
-    const revision = document.querySelector('#package-form [name="model_revision"]');
-    if (revision && !revision.value.trim()) revision.value = report.revision;
+    fillRevisionFrom(report.revision);
+    scheduleWorkflowRefresh();
     return;
   }
   identifiedWeights = null;
@@ -1894,7 +1945,10 @@ function renderWeights(report) {
 $("identify-weights").addEventListener("click", () => action(async () => {
   $("weights-status").hidden = false;
   $("weights-message").textContent = "Looking for the file this run used…";
-  renderWeights(await api(`/api/runs/${selected}/weights`, {}));
+  // One folder: the one under 'Folder containing the model file' when it is
+  // filled in (it starts as the saved model folder), else the saved one.
+  const folder = $("weights-folder").value.trim();
+  renderWeights(await api(`/api/runs/${selected}/weights`, folder ? { root: folder } : {}));
 }));
 
 // What happened to the last Package press, said next to the button that was

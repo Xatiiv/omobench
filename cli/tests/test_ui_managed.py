@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from omobench.ui import UIServer
 from omobench import managed_setup as ms
-from test_cli import GUIDELLM_REPORT_V2, install_guidellm_module_stub, patch_parent_process_preflight
+from test_cli import GUIDELLM_REPORT_V2, install_guidellm_module_stub, patch_parent_process_preflight, typed_form
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -705,7 +705,9 @@ class GuidedRunLifecycleTests(unittest.TestCase):
                     # a real catalog-eligible model id here, as an actual managed
                     # recipe's own model_id would.
                     "model": "Qwen/Qwen3-4B",
-                    "model_revision": "fixture-revision-abc123",
+                    # A new submission says what its revision is: here a declared
+                    # repository commit, with the serving machine described.
+                    **typed_form("cpu", engine=("llama.cpp", "b99999")),
                     "framework": "llama.cpp",
                     "framework_version": "b99999",
                     "quantization": "Q4_K_M",

@@ -324,6 +324,8 @@ class ProposedModelSubmissionTests(unittest.TestCase):
             result["environment"] = copy.deepcopy(self.SERVING_ENVIRONMENT)
             result["model"].update(id=model_id, catalog_status="proposed",
                                    served_model_id="deepseek-r1-distill-qwen-99b")
+            # How the weights were identified is a 1.2 fact; this is a 1.1 bundle.
+            (result["model"].get("weights") or {}).pop("provenance", None)
         self.change_result(change)
         if proposal is self.NO_PROPOSAL:
             return

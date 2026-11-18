@@ -1490,6 +1490,43 @@ def base_package_args(run_directory: Path, **overrides: object) -> argparse.Name
     return argparse.Namespace(**args)
 
 
+# A new submission carries a typed weights identity. These fixtures use the
+# repository route: the weights repository and its commit, declared.
+WEIGHTS_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+WEIGHTS_REPOSITORY = "https://huggingface.co/Qwen/Qwen3-4B"
+TYPED_WEIGHTS = {"kind": "repository", "repository": WEIGHTS_REPOSITORY,
+                 "repository_revision": WEIGHTS_COMMIT, "provenance": "contributor-declared"}
+
+
+def typed_declaration(execution_device: str = "gpu", engine=("vllm", "0.11.0")) -> dict:
+    """The smallest declaration a new submission carries: the serving machine
+    (schema 1.1+ always records it) and a declared repository identity."""
+    gpu = execution_device == "gpu"
+    return {"weights": TYPED_WEIGHTS, "serving": {
+        "host": {"os": "Test Linux", "cpu": "Test CPU", "ram_gb": 64.0},
+        # The fixture machine (build_staged_run_directory) has two of these.
+        "accelerators": ([{"vendor": "nvidia", "model": "NVIDIA Test GPU", "memory_gb": 24.0,
+                           "count": 2, "role": "inference"}] if gpu else []),
+        "placement": {"mode": "gpu-only" if gpu else "cpu-only"},
+        "runtime": {"engine": {"name": engine[0], "version": engine[1]}}}}
+
+
+def typed_form(execution_device: str = "gpu", engine=("llama.cpp", "test-build")) -> dict:
+    """What the panel's package form sends for a new submission: a commit as
+    the revision, the weights repository it belongs to, and the serving machine."""
+    declaration = typed_declaration(execution_device, engine)
+    return {"model_revision": WEIGHTS_COMMIT, "weights": declaration["weights"],
+            "serving": declaration["serving"]}
+
+
+def typed_package_args(run: Path, **overrides):
+    """base_package_args with a declared repository identity for the weights."""
+    declaration = run.parent / f"{run.name}-provenance.json"
+    device = overrides.get("execution_device", "gpu")
+    declaration.write_text(json.dumps(typed_declaration(device)), encoding="utf-8")
+    return base_package_args(run, model_revision=WEIGHTS_COMMIT, provenance=str(declaration), **overrides)
+
+
 class RuntimeFrameworkParserTests(unittest.TestCase):
     def test_package_accepts_every_documented_framework_choice(self) -> None:
         parser = build_parser()

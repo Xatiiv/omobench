@@ -330,6 +330,10 @@
               "enum": ["repository-revision", "content-hash"],
               "description": "Which route establishes this weight set: a pinned repository commit, or a hash over the bytes of the selected files for weights that have no public immutable revision."
             },
+            "provenance": {
+              "enum": ["verified-at-run-start", "contributor-selected", "contributor-declared"],
+              "description": "Schema 1.2 only, optional. How this identity was established. verified-at-run-start: the files recorded when the run started, unchanged when they were hashed after it. contributor-selected: files a person chose and confirmed after the run; hashed, but not shown to be the ones served. contributor-declared: a repository and commit a person stated; nothing here hashed them. Absent on records made before it existed, which says nothing either way."
+            },
             "content": {
               "type": ["object", "null"],
               "additionalProperties": false,
@@ -552,7 +556,8 @@
             "allOf": [
               { "not": { "required": ["eligibility"] } },
               { "properties": { "catalog_status": { "enum": ["catalogued", "proposed"] } } },
-              { "properties": { "tokenizer": { "not": { "required": ["revision"] } } } }
+              { "properties": { "tokenizer": { "not": { "required": ["revision"] } } } },
+              { "properties": { "weights": { "not": { "required": ["provenance"] } } } }
             ]
           },
           "environment": {

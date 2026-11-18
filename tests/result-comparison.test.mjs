@@ -45,8 +45,10 @@ test("different hardware, runtime and fingerprints remain comparable", () => {
 
 test("every workload identity difference excludes direct comparison", () => {
   for (const [field, value, expected] of [
-    ["model", "Other/Model", "model"], ["modelRevision", "another-revision", "revision"],
-    ["modelSource", "https://example.invalid/other.gguf", "source"], ["modelSource", null, "source"],
+    // The revision and its source are one identity now: a different revision,
+    // or the same revision of a different (or unrecorded) source, is different weights.
+    ["model", "Other/Model", "model"], ["modelRevision", "another-revision", "weights"],
+    ["modelSource", "https://example.invalid/other.gguf", "weights"], ["modelSource", null, "weights"],
     ["quantization", "Q8", "quantization"], ["profile", "fixture-extended-v1", "profile"],
     ["profileSha256", `sha256:${"b".repeat(64)}`, "checksum"], ["runnerVersion", "0.8.0", "runner"],
   ]) assert.match(incompatibilities(record(), { ...record(), [field]: value }).join(" "), new RegExp(expected, "i"));

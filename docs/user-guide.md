@@ -564,6 +564,10 @@ OmoBench reads model file headers there to help find the tokenizer, and records
 which file a run used when the run starts. It does not change, move or upload
 anything in that folder.
 
+In **Review & share**, **Folder containing the model file** is the same folder:
+it starts with the one saved here, and **Identify model file** uses whatever it
+shows. You only need to enter the folder once, in either place.
+
 ### Identify model file
 
 After the run, in **Review & share**, press **Identify model file**. OmoBench
@@ -583,9 +587,38 @@ never during it.
   run. The result then says the file was chosen by you, which is honest and
   still publishable.
 
+You can also pick the files yourself under **Folder containing the model
+file**: **Show files**, tick every file the model is made of, tick **These are
+the files this run used**, and press **Identify the selected file(s)**. That is
+recorded as chosen by you, exactly like choosing above.
+
+The identity is saved with the run, so a page reload or a reopened run keeps it.
+Packaging uses it: leave **Immutable model revision** empty and it is filled
+from the identified file. Before packaging, OmoBench checks that the file has
+not changed since it was fingerprinted; if it has, or it is gone, identify it
+again. If the revision field holds something else, packaging stops and names
+both values rather than recording two answers.
+
 The fingerprint and the file names are shown under **Details**. Neither the
 tokenizer revision nor the repository's current revision is ever used as the
 weights' identity.
+
+### What the registry accepts as a weights revision
+
+A new result needs a **typed** identity: either the file fingerprint from
+**Identify model file**, or, for weights taken unchanged from a repository, the
+repository's address and its commit. A bare string is not read by its length or
+shape, so typing a 64-character hash into the revision field is not enough on
+its own. A folder path (`D:\…`, `\server\…`, `/home/…`, `./…`), a `file://`
+address, and moving labels (`main`, `master`, `HEAD`, `latest`) are refused
+before packaging. A run without a typed identity can still be packaged,
+reviewed and downloaded; it just cannot be submitted until you identify the
+model file and package again. You never need to re-run the benchmark for this.
+
+Results published before this rule keep the meaning they were accepted with.
+Some of them record a folder path as their revision; the website shows them,
+but cannot say they used the same weights as anything else, and says so when
+you compare them.
 
 ## H. Review, package and publish
 

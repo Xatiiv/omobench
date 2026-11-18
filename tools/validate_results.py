@@ -8,6 +8,8 @@ import hashlib
 import base64
 import binascii
 import json
+import re
+import subprocess
 import sys
 import zlib
 from pathlib import Path
@@ -23,11 +25,18 @@ RESULTS_PATH = ROOT / "results"
 CATALOG_PATH = ROOT / "catalog" / "models"
 PROFILES_PATH = ROOT / "benchmarks" / "profiles"
 ELIGIBLE_MODALITY = "text-generation"
-MUTABLE_REVISION_LABELS = {"main", "master", "latest"}
+MUTABLE_REVISION_LABELS = {"main", "master", "latest", "head"}
 PROPOSAL_SCHEMA_PATH = ROOT / "schema" / "model-proposal.schema.json"
 PROPOSAL_FILENAME = "model-proposal.json"
 MANIFEST_REVISION_PREFIX = "sha256-manifest:"
 BRIDGE_TRANSPORT = "windows-wsl-stdio-bridge"
+# A repository commit: a git object name, SHA-1 or SHA-256.
+COMMIT = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+# Where a revision was mistaken for a place: a drive, a share, an absolute or
+# relative path, a home directory, or any URL (file:// included).
+PATH_LIKE = re.compile(r"^(?:[A-Za-z]:(?:[\\/]|$)|\\\\|//|/|~|\.{1,2}(?:[\\/]|$))")
+URL_LIKE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+WEIGHT_PROVENANCE = {"verified-at-run-start", "contributor-selected", "contributor-declared"}
 
 
 class CatalogError(Exception):
@@ -523,6 +532,62 @@ def weight_identity_errors(relative: Path, result: dict[str, Any]) -> list[str]:
     return errors
 
 
+def revision_form_error(revision: str) -> str | None:
+    """Why a value cannot be an immutable weights revision, or None.
+
+    Only the form is judged here. A value that passes is not thereby known to
+    be anything in particular: what it identifies is said by model.weights.
+    """
+    value = revision.strip()
+    if not value:
+        return "is empty"
+    if URL_LIKE.match(value):
+        return "is a URL, not a revision (a file:// or web address names a place, not bytes)"
+    if PATH_LIKE.match(value) or "\\" in value or "/" in value:
+        return "is a local path, not a revision; a folder name says nothing about the bytes in it"
+    if value.lower() in MUTABLE_REVISION_LABELS:
+        return "is a label that moves (main, master, HEAD, latest), not an immutable revision"
+    return None
+
+
+def new_submission_errors(relative: Path, result: dict[str, Any]) -> list[str]:
+    """What a bundle added now must establish, beyond what older bundles did.
+
+    Published bundles keep the meaning, and the validation, they were accepted
+    under. A bundle a change adds has to carry a typed weights identity, under
+    any schema version: an older version cannot carry model.weights, so it
+    cannot be used to step around this.
+    """
+    model = result["model"]
+    errors: list[str] = []
+    problem = revision_form_error(model["revision"])
+    if problem:
+        errors.append(f"{relative}: new submission: model.revision: {model['revision']!r} {problem}. Identify the "
+                      "model file (its content hash becomes the revision) or record the weights "
+                      "repository and its commit.")
+    weights = model.get("weights")
+    if not isinstance(weights, dict):
+        errors.append(
+            f"{relative}: new submission: model.weights: a new submission must say what its revision is: either "
+            "a content hash of the model files (Identify model file in the panel, or `omobench "
+            "weights`), or the repository the weights came from and its commit. A bare "
+            "model.revision is not interpreted by its length or shape. Schema 1.0 cannot carry "
+            "this; package with --provenance.")
+        return errors
+    if weights.get("identity") == "repository-revision":
+        repository = weights.get("repository") or ""
+        commit = (weights.get("repository_revision") or "").strip()
+        if not repository.startswith("https://"):
+            errors.append(f"{relative}: new submission: model.weights.repository: the https:// URL the weights "
+                          "came from is required")
+        if not COMMIT.fullmatch(commit):
+            errors.append(f"{relative}: new submission: model.weights.repository_revision: {commit!r} is not a "
+                          "repository commit (40 or 64 lowercase hexadecimal characters)")
+    if "provenance" in weights and weights["provenance"] not in WEIGHT_PROVENANCE:
+        errors.append(f"{relative}: new submission: model.weights.provenance: unknown value")
+    return errors
+
+
 def proposal_errors(
     relative: Path,
     result_path: Path,
@@ -597,6 +662,7 @@ def validate_result(
     duplicate_keys: set[tuple[str, str]],
     proposal_validator: Draft202012Validator | None = None,
     proposed_ids: dict[str, str] | None = None,
+    new_submission: bool = False,
 ) -> list[str]:
     errors: list[str] = []
     relative = result_path.relative_to(ROOT)
@@ -619,7 +685,7 @@ def validate_result(
     if revision.strip().lower() in MUTABLE_REVISION_LABELS:
         errors.append(
             f"{relative}: model.revision: '{revision}' is a mutable label; "
-            "submit an immutable revision or commit SHA instead of main, master, or latest"
+            "submit an immutable revision or commit SHA instead of main, master, HEAD or latest"
         )
     errors.extend(weight_identity_errors(relative, result))
     errors.extend(serving_consistency_errors(relative, result))
@@ -711,10 +777,41 @@ def validate_result(
                 "the benchmark finished, but this result does not meet submission requirements"
             )
 
+    # Last, so it never hides another finding: a bundle that is also below the
+    # acceptance thresholds or was interrupted says so too.
+    if new_submission:
+        errors.extend(new_submission_errors(relative, result))
     return errors
 
 
-def main() -> int:
+def published_at(ref: str) -> set[str]:
+    """result.json paths (repository-relative) present at a git ref."""
+    listed = subprocess.run(["git", "-C", str(ROOT), "ls-tree", "-r", "--name-only", ref, "--",
+                             "results"], capture_output=True, text=True, check=False)
+    if listed.returncode != 0:
+        raise RuntimeError(f"cannot read {ref!r}: {listed.stderr.strip() or 'git failed'}")
+    return {line for line in listed.stdout.splitlines() if line.endswith("/result.json")}
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--new-since", metavar="REF",
+        help="apply the new-submission rules to every bundle whose result.json is not present at "
+             "this git ref (CI passes the pull request's base). Without it, every bundle is "
+             "checked under the rules it was published with.")
+    # Only the arguments given: a caller that passes none means none, rather
+    # than whatever happens to be on this process's command line.
+    args = parser.parse_args(argv or [])
+    historical: set[str] | None = None
+    if args.new_since:
+        try:
+            historical = published_at(args.new_since)
+        except RuntimeError as error:
+            # Fail closed: an unreadable base must not wave new bundles through.
+            print(f"--new-since: {error}", file=sys.stderr)
+            return 2
     try:
         catalog = load_model_catalog(CATALOG_PATH)
     except CatalogError as error:
@@ -733,9 +830,13 @@ def main() -> int:
     duplicate_keys: set[tuple[str, str]] = set()
     proposed_ids: dict[str, str] = {}
     errors: list[str] = []
+    new_count = 0
     for result_path in result_files:
+        relative = result_path.relative_to(ROOT).as_posix()
+        new = historical is not None and relative not in historical
+        new_count += new
         errors.extend(validate_result(result_path, validator, catalog, run_ids, duplicate_keys,
-                                      proposal_validator, proposed_ids))
+                                      proposal_validator, proposed_ids, new_submission=new))
 
     if errors:
         print("\n".join(errors), file=sys.stderr)
@@ -745,9 +846,10 @@ def main() -> int:
                   "converted line endings in committed evidence. Check, without changing "
                   "anything, with: python tools/check_evidence_bytes.py", file=sys.stderr)
         return 1
-    print(f"Validated {len(result_files)} OmoBench result bundle(s).")
+    print(f"Validated {len(result_files)} OmoBench result bundle(s)"
+          + (f", {new_count} under the new-submission rules." if historical is not None else "."))
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

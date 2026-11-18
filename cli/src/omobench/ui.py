@@ -415,6 +415,12 @@ def captured_metadata(run) -> dict | None:
     return captured or None
 
 
+NO_MODEL_FOLDER = (
+    "No model folder is set. Enter the folder your server loads model files from under "
+    "'Model folder' (in Connect) or under 'Folder containing the model file' (in Review), "
+    "then identify the model file again. Either one works; you do not need both.")
+
+
 def _finished_before(job: dict, moment) -> bool:
     """Did this run finish before `moment`? Unknown counts as yes: a run whose
     time cannot be read is not one anybody can call current."""
@@ -771,7 +777,7 @@ class Controller:
 
         with self.lock:
             job = dict(self._get(job_id))
-        root = self._model_root()
+        root = self._folder_for_identity(data.get("root"))
         at_start = job.get("model_files_at_start") or None
         chosen = data.get("files")
         if chosen is None and at_start:
@@ -785,7 +791,7 @@ class Controller:
             basis = "recorded-at-run-start"
         elif chosen is not None:
             if root is None:
-                raise UIError("Set the folder your model files are in first.")
+                raise UIError(NO_MODEL_FOLDER)
             if not isinstance(chosen, list) or not chosen or len(chosen) > 128 or any(
                     not isinstance(name, str) or not name for name in chosen):
                 raise UIError("Choose the model file(s) by their place in the model folder.")
@@ -800,12 +806,11 @@ class Controller:
             basis = "chosen-by-you"
         else:
             if root is None:
-                return {"state": "no-root", "message": "Set the folder your model files are in, "
-                                                       "then OmoBench can find the file this run used."}
+                return {"state": "no-root", "message": NO_MODEL_FOLDER}
             quantization = (job.get("server_metadata") or {}).get("quantization")
             found = local_models.find_model_files(root, job.get("model") or "", quantization=quantization)
             return {**found, "match": found.get("state"), "state": "choose",
-                    "root": self.settings()["model_root"]}
+                    "root": str(data.get("root") or self.settings()["model_root"])}
 
         cache = local_models.FingerprintCache(self.storage / "weights-fingerprints.json")
         cached = cache.get(paths)
@@ -819,10 +824,80 @@ class Controller:
             revision = manifest_revision(manifest)
             cache.put(paths, manifest, revision)
             reused = False
+        provenance = ("verified-at-run-start" if basis == "recorded-at-run-start"
+                      else "contributor-selected")
+        # Kept on the run, not only in the page: a reload, a reopened run or a
+        # second packaging uses the same identity, and its provenance travels
+        # with it. A chosen file is never later upgraded to a verified one.
+        stored = {"manifest": manifest, "revision": revision, "provenance": provenance,
+                  "files": local_models.file_identity(paths),
+                  "identified_at": datetime.now(UTC).isoformat()}
+        with self.lock:
+            live = self._get(job_id)
+            live["weights_identity"] = stored
+            self._save(live)
         return {"state": "identified", "verified": basis == "recorded-at-run-start", "basis": basis,
-                "manifest": manifest, "revision": revision, "reused_fingerprint": reused,
-                "files": [path.name for path in paths],
+                "provenance": provenance, "manifest": manifest, "revision": revision,
+                "reused_fingerprint": reused, "files": [path.name for path in paths],
                 "bytes": sum(path.stat().st_size for path in paths)}
+
+    def _folder_for_identity(self, given) -> Path | None:
+        """The folder to look in: the one given now, else the saved model folder.
+
+        Both are the same kind of thing -- the folder a server loads model files
+        from -- so a Windows path works in either, and neither has to be typed
+        twice.
+        """
+        from . import local_models
+        if given is None:
+            return self._model_root()
+        if not isinstance(given, str) or not given.strip():
+            raise UIError("Enter the folder that holds the model file.")
+        try:
+            folder = local_models.to_local_path(given.strip())
+        except ValueError as error:
+            raise UIError(str(error)) from error
+        if not folder.is_dir():
+            raise UIError(f"{given.strip()} is not a folder this panel can read.")
+        return folder
+
+    def _with_weights_identity(self, job: dict, declaration: dict | None, revision: str) -> dict | None:
+        """Carry the identity identified for this run into the declaration.
+
+        The identity stored on the run is used when the form sent none, or sent
+        the same manifest. It is used only if its files are unchanged since they
+        were fingerprinted, and only under its own revision: a different value
+        typed into the revision field is refused here, with both values named,
+        rather than at the end of packaging.
+        """
+        from . import local_models
+        stored = job.get("weights_identity")
+        declared = (declaration or {}).get("weights")
+        if stored:
+            same = declared is None or (
+                isinstance(declared, dict) and declared.get("kind") == "local-files"
+                and (declared.get("manifest") or {}).get("manifest_sha256")
+                == stored["manifest"]["manifest_sha256"])
+            if same:
+                unchanged, why = local_models.identity_unchanged(stored.get("files") or [])
+                if not unchanged:
+                    raise UIError(f"{why} The model file identified for this run has changed since "
+                                  "it was fingerprinted, so that fingerprint no longer describes "
+                                  "it. Identify the model file again.")
+                if revision != stored["revision"]:
+                    raise UIError(
+                        f"The weights revision field holds {revision!r}, but the model file "
+                        f"identified for this run is {stored['revision']}. One weight set has one "
+                        "revision: clear the field (it is filled from the identified file) or "
+                        "identify the file again.")
+                return {**(declaration or {}),
+                        "weights": {"kind": "local-files", "manifest": stored["manifest"],
+                                    "provenance": stored["provenance"]}}
+        if isinstance(declared, dict) and declared.get("kind") == "local-files" \
+                and "provenance" not in declared:
+            # A pasted manifest: somebody hashed files this contributor names.
+            return {**declaration, "weights": {**declared, "provenance": "contributor-selected"}}
+        return declaration
 
     def _model_files_at_start(self, files) -> dict | None:
         """The model files' identity -- path, size, modification time -- when
@@ -1537,6 +1612,7 @@ class Controller:
             # nobody declared anything, which is not the same as declaring
             # that there is nothing to declare.
             "eligibility": values.get("eligibility") if isinstance(values.get("eligibility"), dict) else None,
+            "weights": values.get("weights") if isinstance(values.get("weights"), dict) else None,
         }
 
     def evidence_location(self, job_id: str | None) -> str | None:
@@ -1564,6 +1640,7 @@ class Controller:
             job=job, model=inputs["model"], revision=inputs["revision"],
             framework=inputs["framework"], framework_version=inputs["framework_version"],
             serving=inputs["serving"], eligibility=inputs["eligibility"],
+            weights=inputs["weights"],
         ) + workflow.submit_checks(
             job=job, model=inputs["model"], catalog=self.catalog_models(),
             proposal=inputs["proposal"], submitter=inputs["submitter"],
@@ -1747,7 +1824,7 @@ class Controller:
         """
         from .model_identity import ModelIdentityError, manifest_revision, weight_files_in, weight_manifest
 
-        directory = Path(text_field(data, "directory")).expanduser()
+        directory = self._folder_for_identity(text_field(data, "directory"))
         names = data.get("files")
         try:
             if not names:
@@ -1888,8 +1965,24 @@ class Controller:
     def package(self, job_id: str, data: dict) -> dict:
         from .ui_submission import validate_bundle
         # Reject malformed arguments before claiming the action lock.
-        names = ["model", "model_revision", "framework", "framework_version", "submitter"]
+        names = ["model", "framework", "framework_version", "submitter"]
         values = {name: text_field(data, name) for name in names}
+        # The revision comes from the model file identified for this run when
+        # the field is left empty: nobody should have to copy it across.
+        with self.lock:
+            identified = (self._get(job_id).get("weights_identity") or {}).get("revision")
+        typed = text_field(data, "model_revision", optional=True)
+        if not typed and not identified:
+            raise UIError("Enter the weights revision, or identify the model file so its "
+                          "fingerprint is used.")
+        values["model_revision"] = typed or identified
+        # Refused before anything is written beside the evidence.
+        from .model_identity import revision_form_problem
+        problem = revision_form_problem(values["model_revision"])
+        if problem:
+            raise UIError(f"Model revision {values['model_revision']!r} {problem}. Use Identify "
+                          "model file (its fingerprint becomes the revision) or give the commit "
+                          "of the repository the weights came from.")
         if values["framework"] not in cli.RUNTIME_FRAMEWORKS:
             raise UIError("Choose a supported framework.")
         optional = {
@@ -1918,7 +2011,8 @@ class Controller:
                 f"--profile={job['profile']}",
                 f"--execution-device={job['execution_device']}",
             ]
-            declaration = self.serving_declaration(job, data)
+            declaration = self._with_weights_identity(
+                job, self.serving_declaration(job, data), values["model_revision"])
             if declaration is not None:
                 # Kept beside the evidence so the same declaration can be read
                 # back, reviewed, and reused if this run is packaged again.
@@ -1945,8 +2039,13 @@ class Controller:
                                        capture_output=True, text=True, timeout=60)
             if completed.returncode:
                 raise UIError(safe_log(completed.stderr or completed.stdout or "Packaging failed."))
-            errors = validate_bundle(self.root, run)
-            job["validation"] = {"valid": not errors, "errors": errors}
+            errors = validate_bundle(self.root, run, new_submission=True)
+            # Reviewable: complete and hash-correct, refused only for reasons a
+            # contributor can still look at and download (acceptance, an
+            # interruption, a weights identity still to add). Submission stays shut.
+            from .ui_submission import acceptance_only
+            job["validation"] = {"valid": not errors, "errors": errors,
+                                 "reviewable": not errors or acceptance_only(errors)}
             job["submission"] = None
             job["error"] = None
         except (OSError, subprocess.TimeoutExpired) as error:

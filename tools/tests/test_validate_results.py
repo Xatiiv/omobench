@@ -1316,6 +1316,115 @@ class WeightIdentityTests(RegistryFixture):
         self.assertIn("mutable label", stderr)
 
 
+class NewSubmissionPolicyTests(RegistryFixture):
+    """A bundle a change adds must carry a typed weights identity; published
+    bundles keep the validation they were accepted under.
+
+    Which bundles are new is read from git (the ref CI passes), not from a list
+    of run ids and not from anything the bundle says about itself, so choosing
+    an older schema version or an older date cannot step around it.
+    """
+
+    BUNDLE = "results/qwen3-4b/2026-08-30-run-fixture-1234/result.json"
+    write_11 = WeightIdentityTests.write
+    manifest = staticmethod(WeightIdentityTests.manifest)
+
+    def write(self, model, schema_version="1.1"):
+        self.write_11(model)
+        path = self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234" / "result.json"
+        document = json.loads(path.read_text(encoding="utf-8"))
+        document["schema_version"] = schema_version
+        path.write_text(json.dumps(document), encoding="utf-8")
+
+    def run_as(self, historical):
+        """Validate with the given set of paths treated as already published."""
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(validate_results, "published_at", return_value=set(historical)),                 redirect_stdout(stdout), redirect_stderr(stderr):
+            exit_code = validate_results.main(["--new-since", "BASE"])
+        return exit_code, stdout.getvalue(), stderr.getvalue()
+
+    def hashed(self, provenance=None):
+        files = [{"name": "model-Q4_K_M.gguf", "bytes": 1234, "sha256": "sha256:" + "1" * 64}]
+        digest = self.manifest(files)
+        weights = {"kind": "local-files", "repository": None, "repository_revision": None,
+                   "identity": "content-hash", "content": {"manifest_sha256": digest, "files": files}}
+        if provenance:
+            weights["provenance"] = provenance
+        return {"revision": "sha256-manifest:" + digest.split(":")[1], "weights": weights}
+
+    def test_a_published_bundle_keeps_the_rules_it_was_accepted_under(self) -> None:
+        self.write({"revision": "D:\OmoBench\lmstudio-models\Qwen"})
+        self.assertEqual(self.run_as({self.BUNDLE})[0], 0)
+        self.assertEqual(self.run_main()[0], 0, "without --new-since every bundle is historical")
+
+    def test_the_same_bundle_added_now_is_refused(self) -> None:
+        self.write({"revision": "D:\OmoBench\lmstudio-models\Qwen"})
+        exit_code, _, stderr = self.run_as(set())
+        self.assertEqual(exit_code, 1)
+        self.assertIn("is a local path", stderr)
+        self.assertIn("model.weights", stderr)
+
+    def test_paths_urls_and_moving_labels_are_not_revisions(self) -> None:
+        for revision, expected in [
+            ("C:\models\qwen", "local path"), ("D:/models/qwen", "local path"),
+            ("\\server\share\qwen.gguf", "local path"), ("//server/share/qwen.gguf", "local path"),
+            ("/home/me/models/qwen.gguf", "local path"), ("./qwen.gguf", "local path"),
+            ("../models/qwen.gguf", "local path"), ("~/models/qwen.gguf", "local path"),
+            ("file:///C:/models/qwen.gguf", "is a URL"), ("main", "moves"), ("master", "moves"),
+            ("HEAD", "moves"), ("latest", "moves"),
+        ]:
+            with self.subTest(revision=revision):
+                self.assertIn(expected, validate_results.revision_form_error(revision))
+        for revision in ("sha256-manifest:" + "a" * 64, "d0a692ef765eefbf2fabb130b3cb2e8917e3d225"):
+            self.assertIsNone(validate_results.revision_form_error(revision))
+
+    def test_head_is_refused_even_for_a_published_bundle(self) -> None:
+        self.write({"revision": "HEAD"})
+        exit_code, _, stderr = self.run_as({self.BUNDLE})
+        self.assertEqual(exit_code, 1)
+        self.assertIn("mutable label", stderr)
+
+    def test_a_bare_revision_is_not_read_by_its_length(self) -> None:
+        # 64 hexadecimal characters look like a SHA-256 and are not taken as one.
+        self.write({"revision": "f0caced9823778600314115bf0b96834a0e82f6024e2af96625147626a1d8158"})
+        exit_code, _, stderr = self.run_as(set())
+        self.assertEqual(exit_code, 1)
+        self.assertIn("not interpreted by its length or shape", stderr)
+
+    def test_an_older_schema_does_not_evade_the_rule(self) -> None:
+        write_bundle(self.results_path / "qwen3-4b" / "2026-08-30-run-fixture-1234")  # schema 1.0
+        exit_code, _, stderr = self.run_as(set())
+        self.assertEqual(exit_code, 1)
+        self.assertIn("Schema 1.0 cannot carry this", stderr)
+
+    def test_a_file_fingerprint_is_accepted_and_its_provenance_kept(self) -> None:
+        self.write(self.hashed("verified-at-run-start"), schema_version="1.2")
+        exit_code, stdout, stderr = self.run_as(set())
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertIn("1 under the new-submission rules", stdout)
+
+    def test_provenance_is_a_1_2_fact(self) -> None:
+        self.write(self.hashed("contributor-selected"), schema_version="1.1")
+        exit_code, _, stderr = self.run_as(set())
+        self.assertEqual(exit_code, 1)
+        self.assertIn("provenance", stderr)
+
+    def test_a_repository_commit_is_accepted_with_its_repository(self) -> None:
+        commit = "d0a692ef765eefbf2fabb130b3cb2e8917e3d225"
+        self.write({"revision": commit, "weights": {
+            "kind": "repository", "repository": "https://huggingface.co/Qwen/Qwen3-4B-GGUF",
+            "repository_revision": commit, "identity": "repository-revision", "content": None}})
+        self.assertEqual(self.run_as(set())[0], 0)
+
+    def test_an_unreadable_base_fails_closed(self) -> None:
+        self.write(self.hashed(), schema_version="1.1")
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), redirect_stdout(io.StringIO()):
+            exit_code = validate_results.main(["--new-since", "no-such-ref-" + "0" * 8])
+        self.assertEqual(exit_code, 2)
+        self.assertIn("--new-since", stderr.getvalue())
+
+
 class ModelProposalTests(RegistryFixture):
     def write(self, *, model_overrides=None, proposal=None, directory="2026-08-30-run-fixture-1234"):
         template = bridged_template()

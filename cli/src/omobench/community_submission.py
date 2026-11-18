@@ -98,7 +98,7 @@ def prepare_community(root: Path, run: Path, session, state: dict):
     prefix = destination(result)
     title, body = description(result, prefix)
     from .ui_submission import diagnosable, validate_bundle
-    unacceptable = [error for error in validate_bundle(root, run) if diagnosable(error)]
+    unacceptable = [error for error in validate_bundle(root, run, new_submission=True) if diagnosable(error)]
     preview = {"mode": "community", "files": [
         {"path": f"{prefix}/{name}", "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
         for name, data in contents.items()], "result": result, "title": title, "body": body,
