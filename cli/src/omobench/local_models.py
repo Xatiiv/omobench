@@ -39,16 +39,46 @@ def to_local_path(value: str) -> Path:
     text = (value or "").strip().strip('"')
     if not text:
         raise ValueError("Enter the folder your models are in.")
+    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", text):
+        raise ValueError("Enter a folder path, not a URL, for example D:\\OmoBench\\lmstudio-models.")
     if re.match(r"^[A-Za-z]:[\\/]", text):
         windows = PureWindowsPath(text)
         drive = windows.drive[0].lower()
-        return Path("/mnt", drive, *windows.parts[1:])
-    if text.startswith("\\\\"):
-        raise ValueError("A network share path cannot be read here; use a local drive.")
+        return Path(WINDOWS_DRIVE_MOUNT_ROOT, drive, *windows.parts[1:])
+    if text.startswith(("\\\\", "//")):
+        if re.match(r"^(?:\\\\|//)(?:wsl\$|wsl\.localhost)[\\/]", text, re.IGNORECASE):
+            raise ValueError("This is the Linux file system as Windows shows it. Enter the Linux path "
+                             "instead, for example /home/you/models.")
+        raise ValueError("A network share cannot be read here. Copy the model to a local drive, or "
+                         "mount the share, and enter that folder.")
     posix = PurePosixPath(text)
     if not posix.is_absolute():
-        raise ValueError("Enter the full path to the folder, for example D:\\OmoBench\\lmstudio-models.")
+        raise ValueError("Enter the full path to the folder, for example D:\\OmoBench\\lmstudio-models "
+                         "or /mnt/d/OmoBench/lmstudio-models.")
     return Path(text)
+
+
+# Where WSL mounts Windows drives unless /etc/wsl.conf says otherwise. Only this
+# default is translated; a different automount root is not detected.
+WINDOWS_DRIVE_MOUNT_ROOT = "/mnt"
+
+
+def folder_problem(typed: str, local: Path) -> str | None:
+    """Why a folder someone typed cannot be used, said so they can fix it; None if it can."""
+    if local.is_dir():
+        return None
+    typed = typed.strip().strip('"')
+    windows = re.match(r"^([A-Za-z]):[\\/]", typed)
+    if local.is_file():
+        parent = str(PureWindowsPath(typed).parent) if windows else str(PurePosixPath(typed).parent)
+        return f"{typed} is a file. Enter the folder that contains it: {parent}"
+    if windows and not Path(WINDOWS_DRIVE_MOUNT_ROOT, windows.group(1).lower()).is_dir():
+        drive = windows.group(1).upper()
+        return (f"Drive {drive}: is not at {WINDOWS_DRIVE_MOUNT_ROOT}/{drive.lower()}, where WSL puts "
+                "Windows drives by default. If this machine mounts drives somewhere else, or the panel "
+                "is not running in WSL, enter the folder's path as this machine sees it, starting "
+                "with /.")
+    return f"{typed} does not exist or cannot be read here (looked in {local})."
 
 
 # --- GGUF header ----------------------------------------------------------------

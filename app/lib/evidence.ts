@@ -228,7 +228,9 @@ function model(result: ResultRecord): EvidenceSection {
   if (!weights) {
     rows.push(row("Weights", result.modelRevision, {
       provenance: "contributor-declared",
-      note: result.modelSource
+      note: namesAPlace(result.modelRevision)
+        ? "Recorded as a revision, but it is a local path or URL, which identifies no bytes."
+        : result.modelSource
         ? `From ${result.modelSource}.`
         : "Recorded as a revision only. Which repository it is a revision of is not separately "
           + "recorded.",
@@ -245,7 +247,30 @@ function model(result: ResultRecord): EvidenceSection {
       note: "A repository commit. A file checksum is a different thing and is not this.",
     }));
   }
+  if (weights?.provenance) {
+    rows.push(row("How the weights were identified", WEIGHT_PROVENANCE_TEXT[weights.provenance], {
+      provenance: weights.provenance === "verified-at-run-start" ? "detected" : "contributor-declared",
+      note: WEIGHT_PROVENANCE_NOTE[weights.provenance],
+    }));
+  }
   return { id: "model", title: "Which model, and which weights", rows };
+}
+
+const WEIGHT_PROVENANCE_TEXT: Record<string, string> = {
+  "verified-at-run-start": "Verified: the file recorded when the run started",
+  "contributor-selected": "Chosen by the contributor after the run",
+  "contributor-declared": "Stated by the contributor",
+};
+const WEIGHT_PROVENANCE_NOTE: Record<string, string> = {
+  "verified-at-run-start": "Hashed after the run and unchanged since it was recorded at the start. Hashing never ran during the measurement.",
+  "contributor-selected": "Hashed, but not shown to be the file the server had loaded.",
+  "contributor-declared": "Nothing here hashed these weights.",
+};
+
+function namesAPlace(revision: string): boolean {
+  const value = (revision ?? "").trim();
+  return /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(value) || /^(?:[A-Za-z]:(?:[\\/]|$)|\\\\|\/\/|\/|~|\.{1,2}(?:[\\/]|$))/.test(value)
+    || value.includes("\\") || value.includes("/");
 }
 
 function runtime(result: ResultRecord): EvidenceSection {

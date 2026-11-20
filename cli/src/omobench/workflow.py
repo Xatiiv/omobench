@@ -420,6 +420,7 @@ def package_checks(
     framework_version: str | None,
     serving: dict[str, Any] | None,
     eligibility: dict[str, Any] | None = None,
+    weights: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """What stands between a finished run and a schema-valid bundle."""
     summary = job.get("summary")
@@ -478,25 +479,51 @@ def package_checks(
                    "comparable with other bridged results and is labelled wherever it is shown.",
         ))
 
-    immutable = bool(revision) and revision.strip().lower() not in MUTABLE_REVISIONS
+    from .model_identity import revision_form_problem
+    stored = job.get("weights_identity") or None
+    # A run whose model file was identified carries its revision; the field is
+    # filled from it, so an empty field there is not a gap.
+    effective = (revision or "").strip() or (stored or {}).get("revision") or ""
+    problem = revision_form_problem(effective) if effective else None
     checks.append(check(
         "weights-revision",
         "Immutable revision of the actual weights source",
         field="model_revision",
-        # Absent is a statement of what will be needed; a revision that moves
-        # is a value that is present and wrong.
-        state="ok" if immutable else ("attention" if not revision else "blocked"),
-        observed=revision or None,
-        source=SOURCE_YOU,
+        # Absent is a statement of what will be needed; a path, a URL or a
+        # revision that moves is a value that is present and wrong.
+        state="ok" if effective and not problem else ("attention" if not effective else "blocked"),
+        observed=effective or None,
+        source=SOURCE_RUN if stored and effective == stored.get("revision") else SOURCE_YOU,
         blocks="package",
-        recovery="" if immutable else
-                 "A commit SHA or other immutable revision of the repository the weights really "
-                 "came from. 'main', 'master' and 'latest' move, so they identify nothing. This "
-                 "is not the file's SHA-256 checksum and not the OmoBench source commit. When "
-                 "the weights come from a quantization repository, record that repository as "
-                 "the weights source and pin its own revision. Weights with no public immutable "
-                 "revision can be identified by their bytes instead: `omobench weights` hashes "
-                 "the files you name and prints the revision to record.",
+        recovery="" if effective and not problem else
+                 ((f"{effective!r} {problem}. " if problem else "")
+                  + "Use Identify model file: its fingerprint of the exact file becomes the "
+                    "revision. Or, when the weights came unchanged from a repository, give that "
+                    "repository's own commit: not a file's SHA-256 checksum and not the OmoBench "
+                    "source commit; for weights from a quantization repository, that repository "
+                    "and its revision. A folder path, a URL, 'main', 'master', 'HEAD' and "
+                    "'latest' identify nothing."),
+    ))
+    typed = bool(stored) or (isinstance(weights, dict) and weights.get("kind") in {"repository", "local-files"})
+    checks.append(check(
+        "weights-identity",
+        "What the weights revision is: a file fingerprint or a repository commit",
+        field="model_revision",
+        state="ok" if typed else "attention",
+        observed=(f"{stored.get('provenance', 'identified')} · {stored.get('revision')}" if stored
+                  else (weights or {}).get("kind") if typed else None),
+        source=SOURCE_RUN if stored else SOURCE_YOU,
+        # A local bundle can be packaged without it; the public registry needs it.
+        blocks="submit",
+        recovery="" if typed else
+                 "The registry needs to know what the revision identifies. Use Identify model "
+                 "file (in Review, beside Package) so the exact file's fingerprint is recorded "
+                 "with how it was established, or record the repository the weights came from "
+                 "and its commit. A bare string is not read by its length or shape.",
+        detail=("Verified: the file recorded when the run started, unchanged since."
+                if stored and stored.get("provenance") == "verified-at-run-start" else
+                "Chosen by you after the run, fingerprinted, and recorded as chosen, not verified."
+                if stored else ""),
     ))
     recorded = bool(framework) and bool(framework_version)
     checks.append(check(

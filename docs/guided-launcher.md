@@ -326,12 +326,17 @@ This recipe's `execution_device` is `cpu`. Exactly like a CPU run through the
 panel or `omobench run --execute`, its results are real evidence: a
 normal `.omobench-runs/` staging directory that can be packaged, reviewed, and
 submitted, the same way a GPU run can. The panel's **Review & share**
-screen fills in the model identity, weight source, revision, quantization,
-runtime version, startup arguments, profile, and execution device from the
-verified recipe automatically, the same package/validate/prepare/submit
-Controller endpoints the [panel](browser-control.md) uses, not a
-second implementation, so the only thing it still asks for is your
-submitter identity. It distinguishes **execution completed**, **profile
+screen fills in the model identity, weight source, quantization, runtime
+version, startup arguments, profile, and execution device from the verified
+recipe automatically, through the same package/validate/prepare/submit
+Controller endpoints the [panel](browser-control.md) uses, not a second
+implementation. The weights revision is the fingerprint of the model file
+itself: the file the server was started on (re-hashed against the recipe just
+before) is recorded as the run starts and fingerprinted once the benchmark has
+finished, so the result records it as verified, not the recipe's commit typed
+in as a bare revision. What it still asks for is your submitter identity and
+the serving machine's description, which every result that records a weights
+identity carries. It distinguishes **execution completed**, **profile
 acceptance passed/failed**, **bundle validation passed/failed**, and
 **submission created** as separate outcomes: a finished run is not
 automatically a publishable one, and an unsuccessful or below-threshold run

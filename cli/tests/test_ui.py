@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 from omobench.cli import build_parser
 from omobench.ui import Controller, UIError, UIServer, endpoint_origin, panel_lock, probe_connection, run_config, safe_log
-from test_cli import GUIDELLM_REPORT_V2, install_guidellm_module_stub, patch_parent_process_preflight
+from test_cli import GUIDELLM_REPORT_V2, install_guidellm_module_stub, patch_parent_process_preflight, typed_form
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -314,7 +314,7 @@ class ExecutionTests(unittest.TestCase):
         self.runner()
         job = self.finished(self.controller.start(RUN_CONFIG))
         self.controller.package(job["id"], {
-            "model": "Qwen/Qwen3-4B", "model_revision": "abc123", "framework": "llama.cpp",
+            "model": "Qwen/Qwen3-4B", **typed_form("cpu"), "framework": "llama.cpp",
             "framework_version": "test-build", "submitter": "tester",
         })
         _, contents, _ = bundle_snapshot(self.root, self.controller.run_directory(job["id"]))
@@ -346,7 +346,7 @@ class ExecutionTests(unittest.TestCase):
                 getattr(self.controller, action)(job["id"])
 
         packaged = self.controller.package(job["id"], {
-            "model": "Qwen/Qwen3-4B", "model_revision": "abc123", "framework": "llama.cpp",
+            "model": "Qwen/Qwen3-4B", **typed_form("cpu"), "framework": "llama.cpp",
             "framework_version": "test-build", "submitter": "tester",
         })
         self.assertTrue(packaged["validation"]["valid"], packaged)
@@ -373,7 +373,7 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(self.controller.detail(job["id"])["model_source"], source_url)
 
         packaged = self.controller.package(job["id"], {
-            "model": "Qwen/Qwen3-4B", "model_revision": "abc123", "framework": "llama.cpp",
+            "model": "Qwen/Qwen3-4B", **typed_form("cpu"), "framework": "llama.cpp",
             "framework_version": "test-build", "submitter": "tester", "model_source": source_url,
         })
         self.assertTrue(packaged["validation"]["valid"], packaged)

@@ -136,6 +136,8 @@ class PanelWeightsTests(unittest.TestCase):
             self.controller.jobs[self.job] = {
                 "id": self.job, "status": "completed", "model": QWEN_ALIAS,
                 "created_at": "2026-11-12T10:00:00+00:00", "server_metadata": {"quantization": "Q4_K_M"}}
+        # A real run has its own folder; the identity found for it is kept there.
+        self.controller._directory(self.job).mkdir(parents=True, exist_ok=True)
 
     def record_at_start(self, files):
         with self.controller.lock:

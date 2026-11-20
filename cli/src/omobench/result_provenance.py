@@ -69,12 +69,28 @@ def _weights(declaration: Any, *, revision: str) -> dict[str, Any] | None:
         return None
     if not isinstance(declaration, dict):
         raise ProvenanceError("weights must be an object.")
-    unexpected = set(declaration) - {"kind", "repository", "repository_revision", "manifest"}
+    unexpected = set(declaration) - {"kind", "repository", "repository_revision", "manifest",
+                                     "provenance"}
     if unexpected:
         raise ProvenanceError(f"Unsupported weights field(s): {', '.join(sorted(unexpected))}.")
     kind = declaration.get("kind")
     if kind not in {"repository", "local-files"}:
         raise ProvenanceError("weights.kind must be 'repository' or 'local-files'.")
+    # How the identity was established, kept with it and never upgraded: files
+    # recorded when the run started and unchanged since are verified; files a
+    # person picked afterwards are selected; a commit a person typed is declared.
+    provenance = declaration.get("provenance")
+    if provenance is not None:
+        if provenance not in model_identity.WEIGHT_PROVENANCE:
+            raise ProvenanceError("weights.provenance must be one of "
+                                  + ", ".join(model_identity.WEIGHT_PROVENANCE) + ".")
+        if kind == "local-files" and provenance == "contributor-declared":
+            raise ProvenanceError("Files that were hashed were selected or verified, not merely "
+                                  "declared.")
+        if kind == "repository" and provenance != "contributor-declared":
+            raise ProvenanceError("A repository commit is stated, not hashed here: its provenance "
+                                  "is contributor-declared.")
+    recorded = {"provenance": provenance} if provenance else {}
 
     if kind == "local-files":
         manifest = declaration.get("manifest")
@@ -90,7 +106,7 @@ def _weights(declaration: Any, *, revision: str) -> dict[str, Any] | None:
         return {"kind": "local-files", "repository": None, "repository_revision": None,
                 "identity": "content-hash",
                 "content": {"manifest_sha256": manifest["manifest_sha256"],
-                            "files": manifest["files"]}}
+                            "files": manifest["files"]}, **recorded}
 
     repository = declaration.get("repository")
     repository_revision = (declaration.get("repository_revision") or "").strip()
@@ -110,7 +126,7 @@ def _weights(declaration: Any, *, revision: str) -> dict[str, Any] | None:
             f"{repository_revision!r} disagree. One weight set has one revision.")
     return {"kind": "repository", "repository": repository,
             "repository_revision": repository_revision, "identity": "repository-revision",
-            "content": None}
+            "content": None, **recorded}
 
 
 def _tokenizer(declaration: Any, *, served_model_id: str | None) -> dict[str, Any]:
@@ -267,6 +283,7 @@ def build(
     # nothing acquires a field nobody collected.
     host = ((environment or {}).get("serving") or {}).get("host") or {}
     newer_facts = ("revision" in model_fields["tokenizer"]
+                   or "provenance" in (model_fields.get("weights") or {})
                    or any(name in host for name in ("cpu_cores", "cpu_threads", "ram_installed_gb")))
     # The same rule extends to facts 1.2 added later: a tokenizer revision and
     # the serving CPU's cores, threads and installed memory are 1.2 facts, so a

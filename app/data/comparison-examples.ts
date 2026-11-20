@@ -25,6 +25,12 @@ type Scenario = {
 };
 
 const DECLARED = "contributor-declared" as const;
+// Fictional weights identities. A comparison only treats two runs as using the
+// same weights when a typed identity says so, so the preview carries one.
+const exampleWeights = (digit: string): ResultRecord["weights"] => ({
+  fileCount: 1, identity: "content-hash", kind: "local-files", manifestSha256: `sha256:${digit.repeat(64)}`,
+  provenance: "verified-at-run-start", repository: null, repositoryRevision: null,
+});
 const SPLIT_SERVING: ServingEnvironment = {
   relationship: "same-host",
   host: { os: { value: "Example OS", provenance: DECLARED },
@@ -68,12 +74,12 @@ const scenarios: Scenario[] = [
     },
   },
   // Evidence that was never recorded, which is not the same as evidence that
-  // differs: nobody wrote down the quantization, the weights source or the
-  // tokenizer.
+  // differs: nobody wrote down the quantization, what the weights revision
+  // identifies, or the tokenizer.
   {
     id: "example-missing", name: "Example setup with gaps", device: "cpu",
     output: 14, ttft: [900, 1500], itl: [70, 110], ram: 16,
-    overrides: { quantization: null, modelSource: null, tokenizer: null },
+    overrides: { quantization: null, modelSource: null, tokenizer: null, modelRevision: "example-revision", weights: null },
   },
   // A relay sits inside every request this one made, and its cost was never
   // subtracted. No question makes that comparable with a direct run.
@@ -92,7 +98,7 @@ const scenarios: Scenario[] = [
     id: "example-model-b", name: "Example other-model setup", device: "gpu",
     output: 36, ttft: [300, 520], itl: [22, 33], ram: 32,
     overrides: {
-      model: "Illustrative larger model", modelRevision: "example-revision-2",
+      model: "Illustrative larger model", modelRevision: `sha256-manifest:${"2".repeat(64)}`, weights: exampleWeights("2"),
       modelSource: "https://example.invalid/illustrative-larger-weights.gguf",
       quantization: "Example Q8",
     },
@@ -109,7 +115,7 @@ const scenarios: Scenario[] = [
     overrides: {
       schemaVersion: "1.2", catalogStatus: "uncatalogued", catalogStatusRecorded: true,
       model: "example-org/Illustrative-Uncurated-7B",
-      modelRevision: "example-revision-3",
+      modelRevision: `sha256-manifest:${"3".repeat(64)}`, weights: exampleWeights("3"),
       modelSource: "https://example.invalid/illustrative-uncurated-weights.gguf",
       serving: PLAIN_SERVING,
       eligibility: {
@@ -133,7 +139,7 @@ export const comparisonExamples: ComparisonEntry[] = scenarios.map((s, index) =>
   result: {
     id: s.id,
     model: "Illustrative model",
-    modelRevision: "example-revision",
+    modelRevision: `sha256-manifest:${"1".repeat(64)}`,
     modelSource: "https://example.invalid/illustrative-weights.gguf",
     quantization: "Example Q4",
     profile: "example-chat-v1",
@@ -158,7 +164,7 @@ export const comparisonExamples: ComparisonEntry[] = scenarios.map((s, index) =>
     schemaVersion: "1.0", catalogStatus: "catalogued", catalogStatusRecorded: false,
     metadataDeclaredAfterExecution: false,
     hardwareDetection: null,
-    serving: null, servedModelId: null, tokenizer: null, weights: null, execution: null,
+    serving: null, servedModelId: null, tokenizer: null, weights: exampleWeights("1"), execution: null,
     // Schema 1.0 collected no eligibility facts. These examples say so rather
     // than implying somebody declared them.
     eligibility: null,

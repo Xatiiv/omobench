@@ -172,13 +172,12 @@ const dimensions: Dimension[] = [
   { id: "model", label: "Model", varies: ["model", "workload"], blocker: "Different model",
     value: (r) => r.model || null },
   {
-    id: "revision", label: "Weights revision", varies: ["model", "workload"],
-    blocker: "Different weights revision", value: (r) => r.modelRevision || null,
-  },
-  {
-    id: "source", label: "Weights source", varies: ["model", "workload"],
-    blocker: "Different or missing weights source",
-    value: (r) => r.modelSource,
+    // Judged by weightsIdentity() below, not by string equality: an
+    // identity nobody established is never an agreement, and a file
+    // fingerprint and a repository commit are different kinds of thing, and
+    // a bare revision with no recorded kind establishes neither.
+    id: "weights", label: "Weights", varies: ["model", "workload"],
+    blocker: "Different weights", value: (r) => describeWeights(weightsIdentity(r)),
   },
   {
     id: "quantization", label: "Quantization", varies: ["model", "workload"],
@@ -247,6 +246,81 @@ export type ComparisonAssessment = {
   differences: string[];
 };
 
+// --- weights identity ---------------------------------------------------------
+
+// A value recorded as a revision that names a place instead of bytes: a drive,
+// a share, an absolute or relative path, a home directory, or any URL.
+const PATH_LIKE = /^(?:[A-Za-z]:(?:[\\/]|$)|\\\\|\/\/|\/|~|\.{1,2}(?:[\\/]|$))/;
+const URL_LIKE = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//;
+const MOVING = new Set(["main", "master", "head", "latest"]);
+
+export type WeightsIdentity =
+  | { established: true; kind: "file-fingerprint" | "repository-commit"; key: string; label: string;
+      provenance: string | null }
+  | { established: false; why: string };
+
+/** What a record establishes about its weights, typed, without guessing from a string's shape. */
+export function weightsIdentity(result: ResultRecord): WeightsIdentity {
+  const weights = result.weights;
+  if (weights?.identity === "content-hash" && weights.manifestSha256) {
+    return { established: true, kind: "file-fingerprint", key: weights.manifestSha256,
+      label: `file fingerprint ${weights.manifestSha256}`, provenance: weights.provenance };
+  }
+  if (weights?.identity === "repository-revision" && weights.repository && weights.repositoryRevision) {
+    return { established: true, kind: "repository-commit", key: `${weights.repository}@${weights.repositoryRevision}`,
+      label: `${weights.repository} at ${weights.repositoryRevision}`, provenance: weights.provenance };
+  }
+  // No typed identity. The record stays readable and its revision is shown
+  // wherever the run is, but a bare model.revision never establishes which
+  // bytes ran: its contract was "an immutable model revision or commit SHA"
+  // and never recorded which of those a value is, nor checked it against
+  // anything. Two equal strings of that kind are equal strings, not the same
+  // weights, so they are never read as agreeing. Nothing about a value's
+  // length or shape changes that.
+  const revision = (result.modelRevision ?? "").trim();
+  if (!revision) return { established: false, why: "no weights revision is recorded" };
+  if (URL_LIKE.test(revision)) return { established: false, why: `the recorded revision (${revision}) is a URL, which names a place, not bytes` };
+  if (PATH_LIKE.test(revision) || revision.includes("\\") || revision.includes("/")) {
+    return { established: false, why: `the recorded revision (${revision}) is a local folder path, which identifies no bytes` };
+  }
+  if (MOVING.has(revision.toLowerCase())) return { established: false, why: `the recorded revision (${revision}) is a label that moves` };
+  return { established: false,
+    why: `the recorded revision (${revision}) does not say what it identifies: a repository commit, a file hash or `
+      + "something else. The record was made before weights identities were typed, and nothing in it establishes which" };
+}
+
+function describeWeights(identity: WeightsIdentity): string | null {
+  return identity.established ? identity.label : null;
+}
+
+const KIND_WORDS = {
+  "file-fingerprint": "a fingerprint of the model files",
+  "repository-commit": "a repository commit",
+} as const;
+
+function compareWeights(left: ResultRecord, right: ResultRecord):
+    { same: true; note?: string } | { same: false; blocker: string; reason: string } {
+  const a = weightsIdentity(left), b = weightsIdentity(right);
+  if (!a.established || !b.established) {
+    const parts = [!a.established ? `the reference run: ${a.why}` : null, !b.established ? `the other run: ${b.why}` : null]
+      .filter(Boolean).join("; ");
+    return { same: false, blocker: "Weights identity not established",
+      reason: `Whether these runs used the same weights cannot be established (${parts}).` };
+  }
+  if (a.kind !== b.kind) {
+    return { same: false, blocker: "Weights identified differently",
+      reason: `One run identifies its weights by ${KIND_WORDS[a.kind]} and the other by ${KIND_WORDS[b.kind]}; `
+        + "the two are not interchangeable, so they cannot be shown to be the same bytes." };
+  }
+  if (a.key !== b.key) {
+    return { same: false, blocker: "Different weights", reason: `Different weights: ${a.label} against ${b.label}.` };
+  }
+  const chosen = [a, b].some(id => id.provenance === "contributor-selected");
+  return { same: true, note: chosen
+    ? "Weights: the same file fingerprint, at least one chosen by its contributor after the run rather than verified as the file served."
+    : undefined };
+}
+
 export function assess(
   reference: ResultRecord,
   candidate: ResultRecord,
@@ -259,6 +333,27 @@ export function assess(
   let suitability: Suitability = "ranking";
 
   for (const dimension of dimensions) {
+    if (dimension.id === "weights") {
+      // Gaps are listed apart from differences, as for every other dimension.
+      for (const [result, where] of [[reference, "the reference run"], [candidate, "the other run"]] as const) {
+        const identity = weightsIdentity(result);
+        if (!identity.established) missing.push(`Weights identity is not established on ${where}`);
+      }
+      const verdict = compareWeights(reference, candidate);
+      if (verdict.same) {
+        if (verdict.note) differences.push(verdict.note);
+        continue;
+      }
+      if (dimension.varies.includes(question)) {
+        differences.push(`Weights: ${verdict.reason}`);
+        suitability = suitability === "unsuitable" ? "unsuitable" : "qualified";
+        continue;
+      }
+      suitability = "unsuitable";
+      blockers.push(verdict.blocker);
+      reasons.push(`${verdict.reason} This comparison holds the weights fixed.`);
+      continue;
+    }
     const left = dimension.value(reference);
     const right = dimension.value(candidate);
     const absent = left === null || right === null;

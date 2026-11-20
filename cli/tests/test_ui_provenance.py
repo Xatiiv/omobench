@@ -18,7 +18,13 @@ from unittest.mock import patch
 
 from omobench import bridge  # noqa: F401  (patched by name below)
 from omobench.ui import Controller, UIError
-from test_cli import GUIDELLM_REPORT_V2
+from test_cli import GUIDELLM_REPORT_V2, TYPED_WEIGHTS, WEIGHTS_COMMIT
+
+# What a form adds to be a new submission: a typed weights identity (a commit
+# of the weights repository, declared). Added where a test packages to publish.
+TYPED = {"model_revision": WEIGHTS_COMMIT,
+         # Without provenance (a 1.2 fact), so a test about schema versions keeps its meaning.
+         "weights": {key: value for key, value in TYPED_WEIGHTS.items() if key != "provenance"}}
 from test_ui import make_root
 
 BRIDGE_TRANSPORT = {
@@ -65,6 +71,11 @@ PACKAGE_FORM = {
     "framework_version": "b10621", "submitter": "local-tester", "quantization": "Q4_K_M",
     "runtime_args": [],
 }
+
+# A direct run packaged to be submitted: the serving machine described and the
+# weights typed. (PACKAGE_FORM alone still packages, as schema 1.0, but is not
+# a new submission the registry will take.)
+SUBMITTABLE = {**PACKAGE_FORM, **TYPED, "serving": SAME_HOST_SERVING}
 
 
 class PanelFixture(unittest.TestCase):
@@ -211,7 +222,7 @@ class UncataloguedPackagingTests(PanelFixture):
 
     def test_the_packaged_bundle_is_schema_1_2_and_validates(self) -> None:
         job_id = self.completed_job(bridged=False)
-        detail = self.controller.package(job_id, self.form())
+        detail = self.controller.package(job_id, self.form(**TYPED))
         self.assertEqual(detail["validation"]["errors"], [])
         self.assertTrue(detail["validation"]["valid"])
         result = json.loads((self.controller.run_directory(job_id) / "result.json")
@@ -225,7 +236,7 @@ class UncataloguedPackagingTests(PanelFixture):
         """The two independent things are independent: a relayed measurement
         and a model nobody curated do not interact."""
         job_id = self.completed_job(bridged=True)
-        detail = self.controller.package(job_id, {**self.form(), "serving": SERVING})
+        detail = self.controller.package(job_id, {**self.form(**TYPED), "serving": SERVING})
         self.assertEqual(detail["validation"]["errors"], [])
         self.assertTrue(detail["validation"]["valid"])
         result = json.loads((self.controller.run_directory(job_id) / "result.json")
@@ -286,13 +297,13 @@ class BridgedPackagingTests(PanelFixture):
 
     def test_packaging_a_bridged_run_is_no_longer_refused_outright(self) -> None:
         job_id = self.completed_job(bridged=True)
-        detail = self.package(job_id, serving=SERVING)
+        detail = self.package(job_id, serving=SERVING, **TYPED)
         self.assertEqual(detail["validation"]["errors"], [])
         self.assertTrue(detail["validation"]["valid"])
 
     def test_the_packaged_result_names_the_windows_host_not_the_wsl_runner(self) -> None:
         job_id = self.completed_job(bridged=True)
-        self.package(job_id, serving=SERVING)
+        self.package(job_id, serving=SERVING, **TYPED)
         result = json.loads(
             (self.controller.run_directory(job_id) / "result.json").read_text(encoding="utf-8"))
         self.assertEqual(result["schema_version"], "1.1")
@@ -301,7 +312,7 @@ class BridgedPackagingTests(PanelFixture):
 
     def test_the_declaration_is_kept_beside_the_evidence_for_review(self) -> None:
         job_id = self.completed_job(bridged=True)
-        self.package(job_id, serving=SERVING)
+        self.package(job_id, serving=SERVING, **TYPED)
         declaration = json.loads((self.controller.run_directory(job_id) / "provenance.json")
                                  .read_text(encoding="utf-8"))
         self.assertEqual(declaration["serving"]["relationship"], "windows-host-wsl-runner")
@@ -331,9 +342,12 @@ class BridgedPackagingTests(PanelFixture):
 
     def test_a_direct_run_still_packages_as_schema_1_0(self) -> None:
         job_id = self.completed_job(bridged=False)
-        detail = self.controller.package(job_id, dict(PACKAGE_FORM, framework="vllm",
-                                                      framework_version="0.11.0"))
-        self.assertEqual(detail["validation"]["errors"], [])
+        detail = self.controller.package(job_id, dict(PACKAGE_FORM, framework="vllm", framework_version="0.11.0"))
+        # Packaging is unchanged; a new submission additionally needs a typed
+        # weights identity, and that is the only thing the panel reports.
+        errors = detail["validation"]["errors"]
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("model.weights", errors[0])
         result = json.loads(
             (self.controller.run_directory(job_id) / "result.json").read_text(encoding="utf-8"))
         self.assertEqual(result["schema_version"], "1.0")
@@ -341,7 +355,7 @@ class BridgedPackagingTests(PanelFixture):
 
     def test_submission_preparation_is_no_longer_blocked_for_a_bridged_run(self) -> None:
         job_id = self.completed_job(bridged=True)
-        self.package(job_id, serving=SERVING)
+        self.package(job_id, serving=SERVING, **TYPED)
         from omobench.ui_submission import bundle_snapshot
         result, contents, _ = bundle_snapshot(self.root, self.controller.run_directory(job_id))
         self.assertEqual(result["environment"]["transport"]["kind"], "windows-wsl-stdio-bridge")
@@ -349,7 +363,7 @@ class BridgedPackagingTests(PanelFixture):
 
     def test_the_pull_request_body_names_the_transport_and_its_overhead(self) -> None:
         job_id = self.completed_job(bridged=True)
-        self.package(job_id, serving=SERVING)
+        self.package(job_id, serving=SERVING, **TYPED)
         from omobench.ui_submission import bundle_snapshot, description, destination
         result, _, _ = bundle_snapshot(self.root, self.controller.run_directory(job_id))
         _, body = description(result, destination(result))
@@ -683,8 +697,10 @@ class CompletionAndRecoveryTests(PanelFixture):
     def evidence_hashes(self, job_id: str) -> dict:
         from omobench.cli import sha256_file
         run = self.controller.run_directory(job_id)
+        # result.json and provenance.json are what packaging writes (the bundle
+        # and the declaration kept beside it); everything else is the run's.
         return {path.name: sha256_file(path) for path in sorted(run.iterdir())
-                if path.name != "result.json" and path.is_file()}
+                if path.name not in {"result.json", "provenance.json"} and path.is_file()}
 
     def test_a_finished_benchmark_is_not_a_validated_bundle(self) -> None:
         job_id = self.completed_job(bridged=False)
@@ -696,8 +712,7 @@ class CompletionAndRecoveryTests(PanelFixture):
 
     def test_publication_is_never_reported_as_done(self) -> None:
         job_id = self.completed_job(bridged=False)
-        self.controller.package(job_id, dict(PACKAGE_FORM, framework="vllm",
-                                             framework_version="0.11.0"))
+        self.controller.package(job_id, dict(SUBMITTABLE))
         with self.controller.lock:
             self.controller.jobs[job_id]["submission"] = {
                 "pull_request_url": "https://github.com/Xatiiv/omobench/pull/99",
@@ -711,12 +726,12 @@ class CompletionAndRecoveryTests(PanelFixture):
         """Packaging is a separate step and failing it costs no measurements."""
         job_id = self.completed_job(bridged=False)
         before = self.evidence_hashes(job_id)
-        # A mutable revision: the registry refuses it, the benchmark is untouched.
-        self.controller.package(job_id, dict(PACKAGE_FORM, framework="vllm",
-                                             framework_version="0.11.0",
-                                             model_revision="main"))
+        # A mutable revision is refused at packaging, with its reason, and the
+        # benchmark is untouched.
+        with self.assertRaisesRegex(UIError, "label that moves"):
+            self.controller.package(job_id, dict(SUBMITTABLE, model_revision="main"))
         states = self.completion(job_id, model_revision="main")
-        self.assertEqual(states["package"]["state"], "failed")
+        self.assertNotEqual(states["package"]["state"], "done")
         self.assertEqual(states["benchmark"]["state"], "done")
         self.assertEqual(states["evidence"]["state"], "done")
         self.assertEqual(self.evidence_hashes(job_id), before)
@@ -724,19 +739,16 @@ class CompletionAndRecoveryTests(PanelFixture):
     def test_a_refused_bundle_can_be_packaged_again_without_rerunning(self) -> None:
         job_id = self.completed_job(bridged=False)
         before = self.evidence_hashes(job_id)
-        self.controller.package(job_id, dict(PACKAGE_FORM, framework="vllm",
-                                             framework_version="0.11.0",
-                                             model_revision="main"))
-        detail = self.controller.package(job_id, dict(PACKAGE_FORM, framework="vllm",
-                                                      framework_version="0.11.0"))
+        with self.assertRaisesRegex(UIError, "label that moves"):
+            self.controller.package(job_id, dict(SUBMITTABLE, model_revision="main"))
+        detail = self.controller.package(job_id, dict(SUBMITTABLE))
         self.assertEqual(detail["validation"]["errors"], [])
         self.assertEqual(self.completion(job_id)["package"]["state"], "done")
         self.assertEqual(self.evidence_hashes(job_id), before)
 
     def test_a_submission_that_started_and_produced_no_pull_request_offers_a_retry(self) -> None:
         job_id = self.completed_job(bridged=False)
-        self.controller.package(job_id, dict(PACKAGE_FORM, framework="vllm",
-                                             framework_version="0.11.0"))
+        self.controller.package(job_id, dict(SUBMITTABLE))
         with self.controller.lock:
             self.controller.jobs[job_id]["submission"] = {"started": True}
         step = self.completion(job_id)["submitted"]
@@ -762,8 +774,7 @@ class CompletionAndRecoveryTests(PanelFixture):
     def test_the_preview_lists_exactly_the_files_that_would_be_shared(self) -> None:
         from omobench.ui_submission import bundle_snapshot
         job_id = self.completed_job(bridged=False)
-        self.controller.package(job_id, dict(PACKAGE_FORM, framework="vllm",
-                                             framework_version="0.11.0"))
+        self.controller.package(job_id, dict(SUBMITTABLE))
         _, contents, _ = bundle_snapshot(self.root, self.controller.run_directory(job_id))
         self.assertEqual(sorted(contents), [
             "environment.json", "guidellm-benchmarks.json.gz", "guidellm.stdout.log",
@@ -773,8 +784,7 @@ class CompletionAndRecoveryTests(PanelFixture):
         job_id = self.completed_job(bridged=False)
         with self.assertRaises(UIError):
             self.controller.evidence_summary(job_id)
-        self.controller.package(job_id, dict(PACKAGE_FORM, framework="vllm",
-                                             framework_version="0.11.0"))
+        self.controller.package(job_id, dict(SUBMITTABLE))
         summary = self.controller.evidence_summary(job_id)
         self.assertEqual([section["id"] for section in summary["sections"]],
                          ["environments", "accelerators", "model", "eligibility", "runtime",
@@ -862,7 +872,7 @@ class RunStartEvidenceTests(PanelFixture):
 
     def test_hardware_read_at_run_start_is_detected_and_makes_a_1_2_result(self) -> None:
         job_id = self.started(hardware_at_start=self.AT_START)
-        detail = self.controller.package(job_id, {**PACKAGE_FORM, "serving": SERVING, "probe": "run"})
+        detail = self.controller.package(job_id, {**PACKAGE_FORM, **TYPED, "serving": SERVING, "probe": "run"})
         self.assertTrue(detail["validation"]["valid"], detail["validation"]["errors"])
         result = self.result(job_id)
         self.assertEqual(result["schema_version"], "1.2")
@@ -881,7 +891,7 @@ class RunStartEvidenceTests(PanelFixture):
         job_id = self.started(tokenizer_check={
             "source": "Qwen/Qwen2.5-Coder-14B-Instruct", "kind": "huggingface",
             "identity": None, "revision": "0123456789abcdef0123456789abcdef01234567"})
-        detail = self.controller.package(job_id, {**PACKAGE_FORM, "serving": SERVING})
+        detail = self.controller.package(job_id, {**PACKAGE_FORM, **TYPED, "serving": SERVING})
         self.assertTrue(detail["validation"]["valid"], detail["validation"]["errors"])
         result = self.result(job_id)
         tokenizer = result["model"]["tokenizer"]

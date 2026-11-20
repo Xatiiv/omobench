@@ -38,8 +38,13 @@ def bundle_filenames(run: Path) -> tuple[str, ...]:
     return BUNDLE_FILES
 
 
-def validate_bundle(root: Path, run: Path) -> list[str]:
-    """Call the repository's actual validator, including registry duplicate checks."""
+def validate_bundle(root: Path, run: Path, *, new_submission: bool = False) -> list[str]:
+    """Call the repository's actual validator, including registry duplicate checks.
+
+    `new_submission` applies the rules a pull request adding this bundle is
+    held to (a typed weights identity; no path or moving label as a
+    revision). Every route that prepares or submits a bundle passes it.
+    """
     root, run = root.resolve(), run.resolve()
     if not run.is_relative_to(root / ".omobench-runs"):
         raise UIError("Only local staging evidence can be submitted from this panel.")
@@ -63,8 +68,11 @@ def validate_bundle(root: Path, run: Path) -> list[str]:
         for result_path in sorted(module.RESULTS_PATH.rglob("result.json")):
             errors.extend(module.validate_result(result_path, validator, catalog, run_ids,
                                                  duplicate_keys, proposals, proposed))
+        # The bundle being prepared here is a new submission by definition: it
+        # is held to the rules a pull request adding it will be held to.
         errors.extend(module.validate_result(run / "result.json", validator, catalog, run_ids,
-                                             duplicate_keys, proposals, proposed))
+                                             duplicate_keys, proposals, proposed,
+                                             new_submission=new_submission))
         result = json.loads((run / "result.json").read_text(encoding="utf-8"))
         if not errors and any(result["artifacts"][key]["path"] != name for key, name in ARTIFACT_FILES.items()):
             errors.append("The panel submits only the standard CLI-generated artifact filenames.")
@@ -102,7 +110,12 @@ INTERRUPTION_MARKER = ": interruption: "
 # publication. Neither is a reason to stop somebody looking at their own
 # evidence -- which is the one view that lets them check it for secrets, and
 # the only way to work out what went wrong.
-DIAGNOSABLE_MARKERS = (ACCEPTANCE_MARKER, INTERRUPTION_MARKER)
+# A third: a complete bundle the registry will not take as a new submission,
+# because it does not say what its weights revision identifies. Fixable without
+# re-running anything (Identify model file, then package again), and no reason
+# to stop somebody reviewing or downloading their own evidence.
+NEW_SUBMISSION_MARKER = ": new submission: "
+DIAGNOSABLE_MARKERS = (ACCEPTANCE_MARKER, INTERRUPTION_MARKER, NEW_SUBMISSION_MARKER)
 
 
 def diagnosable(error: str) -> bool:
@@ -124,7 +137,7 @@ def bundle_snapshot(root: Path, run: Path, *,
     takes away the one view that would let them check it for secrets. It never
     relaxes anything else, and submission never passes it.
     """
-    errors = validate_bundle(root, run)
+    errors = validate_bundle(root, run, new_submission=True)
     if errors and not (allow_unacceptable and acceptance_only(errors)):
         raise UIError("Bundle validation failed:\n" + "\n".join(errors))
     contents = {name: (run / name).read_bytes() for name in bundle_filenames(run)}
@@ -253,7 +266,7 @@ def prepare_submission(root: Path, run: Path) -> dict:
     result, contents, digest = bundle_snapshot(root, run, allow_unacceptable=True)
     prefix = destination(result)
     title, body = description(result, prefix)
-    unacceptable = [error for error in validate_bundle(root, run) if diagnosable(error)]
+    unacceptable = [error for error in validate_bundle(root, run, new_submission=True) if diagnosable(error)]
     preview = {"files": [{"path": f"{prefix}/{name}", "bytes": len(content),
                           "sha256": hashlib.sha256(content).hexdigest()} for name, content in contents.items()],
                "result": result, "title": title, "body": body, "bundle_digest": digest,

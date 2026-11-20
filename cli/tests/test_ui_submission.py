@@ -19,9 +19,9 @@ from omobench.ui_submission import (
     BUNDLE_FILES, GitHub, bundle_archive, bundle_snapshot, description, destination, prepare_submission,
     submit_pull_request, validate_bundle,
 )
-from test_cli import GUIDELLM_REPORT_V2, base_package_args, build_staged_run_directory
+from test_cli import (GUIDELLM_REPORT_V2, TYPED_WEIGHTS, WEIGHTS_COMMIT, base_package_args,
+                      build_staged_run_directory, typed_declaration, typed_form, typed_package_args)
 from test_ui import ROOT, make_root
-
 
 class FakeGitHub:
     """In-memory GitHub protocol fixture; never contacts GitHub."""
@@ -79,7 +79,7 @@ class SubmissionTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         make_root(self.root)
         self.run = build_staged_run_directory(self.root)
-        args = base_package_args(self.run)
+        args = typed_package_args(self.run)
         with patch("omobench.cli.find_repository_root", return_value=self.root), patch("omobench.cli.current_git_commit", return_value="a" * 40), redirect_stdout(io.StringIO()):
             self.assertEqual(package_local_run(args), 0)
 
@@ -255,15 +255,17 @@ class SubmissionTests(unittest.TestCase):
         controller.jobs[job_id] = {"id": job_id, "created_at": "2026-09-10T12:00:00Z", "status": "completed",
                                    "model": "test-alias", "profile": "chat-small-v1", "execution_device": "gpu",
                                    "summary": {"results": {}}, "validation": None, "submission": None}
-        data = {"model": "Qwen/Qwen3-4B", "model_revision": "abc123", "framework": "llama.cpp",
+        data = {"model": "Qwen/Qwen3-4B", **typed_form("gpu"), "framework": "llama.cpp",
                 "framework_version": "test-build", "submitter": "tester", "quantization": "Q4_0",
                 "runtime_args": ["--ctx-size=2048"]}
         packaged = controller.package(job_id, data)
         self.assertTrue(packaged["validation"]["valid"], packaged)
         result = json.loads((self.run / "result.json").read_text())
         self.assertEqual(result["runtime"]["arguments"], ["--ctx-size=2048"])
-        bad = controller.package(job_id, {**data, "model_revision": "latest"})
-        self.assertFalse(bad["validation"]["valid"])
+        # A revision that moves is refused at packaging, with the reason, rather
+        # than packaged into a bundle the validator then turns away.
+        with self.assertRaisesRegex(UIError, "label that moves"):
+            controller.package(job_id, {**data, "model_revision": "latest"})
         controller.jobs[job_id]["submission"] = {"commit_sha": "abc"}
         with self.assertRaisesRegex(UIError, "Submission has started"):
             controller.package(job_id, data)
@@ -299,7 +301,7 @@ class SubmissionTests(unittest.TestCase):
         }
         data = {
             "model": "Qwen/Qwen3-4B",
-            "model_revision": "abc123",
+            **typed_form("cpu"),
             "framework": "llama.cpp",
             "framework_version": "test-build",
             "submitter": "tester",
@@ -392,7 +394,7 @@ class AcceptanceGateTests(unittest.TestCase):
             "total": 13,
         }
         run = build_staged_run_directory(self.root, report=report)
-        args = base_package_args(run, execution_device="cpu")
+        args = typed_package_args(run, execution_device="cpu")
         original_directory = Path.cwd()
         os.chdir(self.root)
         try:

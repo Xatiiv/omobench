@@ -48,6 +48,33 @@ class ModelIdentityError(ValueError):
     """A model identity that cannot be established from what was supplied."""
 
 
+MUTABLE_REVISIONS = {"main", "master", "head", "latest"}
+# Where a revision was mistaken for a place: a drive, a share, an absolute or
+# relative path, a home directory -- or any URL, file:// included.
+_PATH_LIKE = re.compile(r"^(?:[A-Za-z]:(?:[\\/]|$)|\\\\|//|/|~|\.{1,2}(?:[\\/]|$))")
+_URL_LIKE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+WEIGHT_PROVENANCE = ("verified-at-run-start", "contributor-selected", "contributor-declared")
+
+
+def revision_form_problem(revision: str | None) -> str | None:
+    """Why a value cannot be an immutable weights revision, or None.
+
+    Only the form is judged. A value that passes is not thereby known to be a
+    commit or a hash of anything: model.weights says which, and nothing here
+    reads meaning into a string's length.
+    """
+    value = (revision or "").strip()
+    if not value:
+        return "is empty"
+    if _URL_LIKE.match(value):
+        return "is a URL, not a revision; a file:// or web address names a place, not bytes"
+    if _PATH_LIKE.match(value) or "\\" in value or "/" in value:
+        return "is a local path, not a revision; a folder name says nothing about the bytes in it"
+    if value.lower() in MUTABLE_REVISIONS:
+        return "is a label that moves (main, master, HEAD, latest), not an immutable revision"
+    return None
+
+
 def _tokens(name: str) -> list[str]:
     """Split a model name into comparable parts.
 

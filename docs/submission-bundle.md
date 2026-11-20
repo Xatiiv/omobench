@@ -67,9 +67,42 @@ stored 1.0 bundles keep exactly the meaning they were written with.
 ## Immutable model revisions
 
 `model.revision` must identify an immutable model revision or commit SHA.
-Registry validation rejects an empty revision and clearly mutable labels, `main`, `master`, and `latest` (case-insensitive), because they can point to
-different weights over time and break reproducibility. Normal SHA-based (or
-otherwise content-addressed) revisions are accepted.
+Registry validation rejects an empty revision and clearly mutable labels,
+`main`, `master`, `HEAD` and `latest` (case-insensitive), because they can point
+to different weights over time and break reproducibility.
+
+### New submissions: a typed weights identity
+
+A bundle a change adds must also say **what** its revision is, in
+`model.weights` (schema 1.1 or later):
+
+| `model.weights` | `model.revision` | Means |
+| --- | --- | --- |
+| `kind: local-files`, `identity: content-hash`, `content.files[]` | `sha256-manifest:<hash>` | The bytes of these exact files; every shard of a split model is listed |
+| `kind: repository`, `identity: repository-revision`, `repository`, `repository_revision` | the same commit | A commit (40 or 64 hexadecimal characters) of that https repository |
+
+Schema 1.2 records how it was established in `model.weights.provenance`:
+`verified-at-run-start` (the file recorded when the run started, unchanged),
+`contributor-selected` (files chosen and hashed after the run) or
+`contributor-declared` (a repository commit stated, not hashed here).
+
+For a new submission, a revision that is a local path (a drive letter, a UNC
+share, an absolute or relative POSIX path, `~`), any URL including `file://`,
+or a bare string with no `model.weights` is refused: nothing reads meaning into
+a value's length or shape. A schema 1.0 bundle cannot carry `model.weights`, so
+it cannot be a new submission; package with `--provenance`.
+
+Which bundles are new is decided from git, not from the bundle:
+`python tools/validate_results.py --new-since <base>` treats any `result.json`
+not present at `<base>` as new. CI passes the pull request's base once the
+Windows installer that keeps typed identities (0.1.4) is published, so that
+nobody is directed to an installer that cannot meet the rule while it is
+enforced; until then CI checks every bundle under its original rules, and the
+panel already checks the bundle it prepares as a new submission. Bundles already published keep
+the validation they were accepted under; some record a folder path as their
+revision, and the website shows them without claiming their weights match
+anything. Without `--new-since`, every bundle is checked under its original
+rules. The panel checks the bundle it prepares as a new submission.
 
 `model.id` always stays the canonical catalog identity used for eligibility
 and comparison, regardless of where the weights actually came from. The

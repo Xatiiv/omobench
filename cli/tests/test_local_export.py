@@ -249,8 +249,19 @@ class LocalExportTests(unittest.TestCase):
     def test_a_complete_catalogued_run_reports_ready(self):
         job = self.job(model="Qwen/Qwen3-4B", model_revision="c" * 40,
                        framework="llama.cpp", framework_version="b10621")
-        report = self.controller.publication_requirements(job["id"], {"submitter": "fixture-user"})
+        # Ready includes saying what the revision is: here, a repository commit.
+        report = self.controller.publication_requirements(job["id"], {
+            "submitter": "fixture-user",
+            "weights": {"kind": "repository", "repository": "Qwen/Qwen3-4B", "revision": "c" * 40}})
         self.assertTrue(report["ready"], report["items"])
+
+    def test_an_untyped_revision_is_not_ready_for_submission(self):
+        job = self.job(model="Qwen/Qwen3-4B", model_revision="c" * 40,
+                       framework="llama.cpp", framework_version="b10621")
+        report = self.controller.publication_requirements(job["id"], {"submitter": "fixture-user"})
+        self.assertFalse(report["ready"])
+        item = next(entry for entry in report["items"] if entry["label"].startswith("What the weights revision is"))
+        self.assertIn("not read by its length", item["detail"])
 
     def test_acceptance_failure_still_blocks_even_with_every_field_filled(self):
         job = self.job(

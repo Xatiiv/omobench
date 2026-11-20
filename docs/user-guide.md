@@ -556,13 +556,34 @@ file fingerprint.
 ### The model folder
 
 Under **Model folder** in the Connect section, enter the folder your server
-loads model files from and press **Save folder**. A Windows path such as
-`D:\OmoBench\lmstudio-models` works. For LM Studio, this is the models directory
-shown in its **My Models** tab.
+loads model files from and press **Save folder**. For LM Studio, this is the
+models directory shown in its **My Models** tab.
+
+This field and **Folder containing the model file** in Review accept the same
+two forms:
+
+- A Windows drive path, such as `D:\OmoBench\lmstudio-models` (or
+  `D:/OmoBench/lmstudio-models`). It is read through WSL's default mount of
+  that drive, `/mnt/d/OmoBench/lmstudio-models`.
+- An absolute Linux path, such as `/mnt/d/OmoBench/lmstudio-models` or
+  `/home/you/models`. It is used as given.
+
+Anything else is refused with what to enter instead: a path to a file rather
+than its folder (the message names the folder), a network share (`\\server\share`),
+WSL's own files as Windows shows them (`\\wsl$\...` or `\\wsl.localhost\...`;
+enter the Linux path), a relative path, `~`, or a URL. If your WSL mounts
+Windows drives somewhere other than `/mnt` (a custom `automount` root in
+`/etc/wsl.conf`), a Windows path is not translated: enter the Linux path
+under your mount root instead. The panel runs in WSL on Windows; it does not
+translate paths for any other system.
 
 OmoBench reads model file headers there to help find the tokenizer, and records
 which file a run used when the run starts. It does not change, move or upload
 anything in that folder.
+
+In **Review & share**, **Folder containing the model file** is the same folder:
+it starts with the one saved here, and **Identify model file** uses whatever it
+shows. You only need to enter the folder once, in either place.
 
 ### Identify model file
 
@@ -583,9 +604,38 @@ never during it.
   run. The result then says the file was chosen by you, which is honest and
   still publishable.
 
+You can also pick the files yourself under **Folder containing the model
+file**: **Show files**, tick every file the model is made of, tick **These are
+the files this run used**, and press **Identify the selected file(s)**. That is
+recorded as chosen by you, exactly like choosing above.
+
+The identity is saved with the run, so a page reload or a reopened run keeps it.
+Packaging uses it: leave **Immutable model revision** empty and it is filled
+from the identified file. Before packaging, OmoBench checks that the file has
+not changed since it was fingerprinted; if it has, or it is gone, identify it
+again. If the revision field holds something else, packaging stops and names
+both values rather than recording two answers.
+
 The fingerprint and the file names are shown under **Details**. Neither the
 tokenizer revision nor the repository's current revision is ever used as the
 weights' identity.
+
+### What the registry accepts as a weights revision
+
+A new result needs a **typed** identity: either the file fingerprint from
+**Identify model file**, or, for weights taken unchanged from a repository, the
+repository's address and its commit. A bare string is not read by its length or
+shape, so typing a 64-character hash into the revision field is not enough on
+its own. A folder path (`D:\…`, `\server\…`, `/home/…`, `./…`), a `file://`
+address, and moving labels (`main`, `master`, `HEAD`, `latest`) are refused
+before packaging. A run without a typed identity can still be packaged,
+reviewed and downloaded; it just cannot be submitted until you identify the
+model file and package again. You never need to re-run the benchmark for this.
+
+Results published before this rule keep the meaning they were accepted with.
+Some of them record a folder path as their revision; the website shows them,
+but cannot say they used the same weights as anything else, and says so when
+you compare them.
 
 ## H. Review, package and publish
 
@@ -759,9 +809,10 @@ rename the model in your server.
 **"Model folder not set", or no model file is found**
 → OmoBench does not know where your server keeps its files, or the path is
 wrong. → Under **Model folder**, enter the folder LM Studio uses (see its **My
-Models** tab) and press **Save folder**. A Windows path such as
-`D:\OmoBench\lmstudio-models` is accepted and translated for WSL. A folder
-outside the Windows drives WSL can see cannot be read.
+Models** tab) and press **Save folder**. A Windows drive path such as
+`D:\OmoBench\lmstudio-models` or a Linux path such as
+`/mnt/d/OmoBench/lmstudio-models` works; see [The model folder](#the-model-folder)
+for what is refused and why.
 
 **Hardware shows "Not recorded" or "VRAM not reported"**
 → The driver did not report it, or the run was not bridged so Windows could not

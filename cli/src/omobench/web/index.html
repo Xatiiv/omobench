@@ -103,7 +103,7 @@
             <div class="actions"><button id="tokenizer-fetch" type="button" class="secondary" hidden>Download the tokenizer files</button><span id="tokenizer-fetch-plan" class="hint"></span></div>
           </div>
           <details class="quiet-details" id="model-root-details"><summary>Model folder <span class="hint" id="model-root-summary"></span></summary>
-            <label>Folder your server loads model files from<input id="model-root" placeholder="D:\OmoBench\lmstudio-models" spellcheck="false"><span class="hint">A Windows path such as <code>D:\OmoBench\lmstudio-models</code> or a Linux path. OmoBench reads model file headers here to find the tokenizer, and fingerprints the file a run used after the run, never during it. Nothing is changed or uploaded.</span></label>
+            <label>Folder your server loads model files from<input id="model-root" placeholder="D:\OmoBench\lmstudio-models" spellcheck="false"><span class="hint">A Windows drive path such as <code>D:\OmoBench\lmstudio-models</code> or a Linux path such as <code>/mnt/d/OmoBench/lmstudio-models</code>. OmoBench reads model file headers here to find the tokenizer, and fingerprints the file a run used after the run, never during it. Nothing is changed or uploaded.</span></label>
             <div class="actions"><button id="model-root-save" type="button" class="secondary">Save folder</button><span id="model-root-status" class="hint" role="status"></span></div>
           </details>
           <div id="model-manual" hidden>
@@ -302,7 +302,7 @@
         <p id="publication-summary" class="hint"></p>
         <form id="package-form">
           <div class="grid two">
-            <label>Immutable model revision<input name="model_revision" placeholder="Commit SHA of the weights repository" spellcheck="false"><span class="hint">The repository revision of the weights you actually ran. Not the file's SHA-256 checksum and not the OmoBench commit; 'main' and 'latest' move, so they identify nothing.</span></label>
+            <label>Immutable model revision<input name="model_revision" placeholder="Filled in by Identify model file" spellcheck="false"><span class="hint">Leave it empty and use <strong>Identify model file</strong>: the exact file's fingerprint is used. Type a value only for weights taken unchanged from a repository: that repository's commit. Never a folder path, a URL, 'main', 'HEAD' or 'latest'.</span></label>
             <label>Framework<select name="framework" id="framework"></select></label>
             <label>Exact framework version<input name="framework_version" placeholder="Runtime build, e.g. llama.cpp b10621"><span class="hint">The serving runtime's own build. An application version, such as the LM Studio release, is a different thing; record the runtime build rather than guessing one.</span></label>
             <label>Quantization<input name="quantization" placeholder="For example BF16 or Q4_K_M"><span class="hint">A label, not proof of identity on its own.</span></label>
@@ -353,12 +353,13 @@
             </div>
             <div id="weights-identify" class="weights-identify">
               <p class="field-title">Identify the model file you used</p>
-              <p class="hint">OmoBench reads the exact file and records its fingerprint, so the result names the bytes you ran rather than a filename. Nothing is uploaded. For LM Studio the files are usually under <code>/mnt/c/Users/&lt;you&gt;/.lmstudio/models/</code>, in a folder named after the publisher and model.</p>
+              <p class="hint">OmoBench reads the exact file and records its fingerprint on this run, so the result names the bytes you ran rather than a filename. Nothing is uploaded. This is the same folder as <strong>Model folder</strong> in Connect and starts with it. A Windows drive path such as <code>D:\OmoBench\lmstudio-models</code> or a Linux path such as <code>/mnt/d/OmoBench/lmstudio-models</code> works; enter the folder, not the file. <strong>Identify model file</strong>, beside Package, uses this folder too.</p>
               <div class="grid two">
-                <label>Folder containing the model file<input id="weights-folder" spellcheck="false" placeholder="/mnt/c/Users/you/.lmstudio/models/publisher/model"></label>
+                <label>Folder containing the model file<input id="weights-folder" spellcheck="false" placeholder="D:\OmoBench\lmstudio-models\publisher\model"></label>
                 <div class="actions"><button id="weights-list" type="button" class="secondary">Show files</button></div>
               </div>
               <ul id="weights-files" class="weights-files"></ul>
+              <label class="check"><input id="weights-manual-confirmed" type="checkbox"><span>These are the files this run used. They are recorded as chosen by you, not as verified.</span></label>
               <div class="actions"><button id="weights-hash" type="button" class="secondary" hidden>Identify the selected file(s)</button></div>
               <p id="weights-result" class="hint" role="status"></p>
             </div>

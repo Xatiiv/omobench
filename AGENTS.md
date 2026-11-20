@@ -91,6 +91,17 @@ See [guided-launcher.md](docs/guided-launcher.md). End-user instructions live in
   a file SHA-256 and a `sha256-manifest:` hash are different things and are never
   interchanged. A serving alias is never mapped to a catalog model without a
   person choosing it, and an ambiguous mapping requires a choice.
+- A new submission carries a typed weights identity in `model.weights`: a
+  content hash of the files (`sha256-manifest:`) or a repository and its
+  commit, with how it was established (`verified-at-run-start`,
+  `contributor-selected`, `contributor-declared`). Never read meaning into a
+  revision's length or shape, never accept a path or URL as a revision, and
+  never upgrade a selected file to verified. Which bundles are new comes from
+  git (`validate_results.py --new-since <base>`), never from a list of run ids;
+  published bundles keep the validation they were accepted under. The website
+  compares weights by typed identity and treats an unestablished one as a
+  reason to exclude, never as agreement. See
+  [submission-bundle.md](docs/submission-bundle.md#new-submissions-a-typed-weights-identity).
 - `runtime.version` is the inference engine's build. An application release, such
   as the LM Studio version, belongs in
   `environment.serving.runtime.application.version`.

@@ -79,11 +79,16 @@ export type Transport = {
   protocol: string;
 };
 
+export type WeightProvenance = "verified-at-run-start" | "contributor-selected" | "contributor-declared";
+
 export type WeightIdentity = {
   fileCount: number;
   identity: "repository-revision" | "content-hash";
   kind: "repository" | "local-files";
   manifestSha256: string | null;
+  // How the identity was established (schema 1.2). Null on records made
+  // before it was recorded, which says nothing either way.
+  provenance: WeightProvenance | null;
   repository: string | null;
   repositoryRevision: string | null;
 };
@@ -447,6 +452,9 @@ function readWeights(model: JsonObject, sourcePath: string): WeightIdentity | nu
     identity: enumField(weights.identity, ["repository-revision", "content-hash"] as const, "weights identity", sourcePath),
     kind: enumField(weights.kind, ["repository", "local-files"] as const, "weights kind", sourcePath),
     manifestSha256: isObject(content) ? textField(content, "manifest_sha256", sourcePath) : null,
+    provenance: weights.provenance === undefined || weights.provenance === null ? null
+      : enumField(weights.provenance, ["verified-at-run-start", "contributor-selected", "contributor-declared"] as const,
+        "weights provenance", sourcePath),
     repository: optionalTextField(weights, "repository", sourcePath),
     repositoryRevision: optionalTextField(weights, "repository_revision", sourcePath),
   };
@@ -671,7 +679,7 @@ export function readResultRecord(sourcePath: string, value: unknown): ResultReco
   if (!/^sha256:[a-f0-9]{64}$/.test(record.profileSha256)) throw new Error("The profile checksum is missing or invalid.");
   if (!/^sha256:[a-f0-9]{64}$/.test(record.configurationFingerprint)) throw new Error("The configuration fingerprint is invalid.");
   if (!/^[a-z0-9-]+-v[0-9]+$/.test(record.profile)) throw new Error("The profile ID is invalid.");
-  if (["main", "master", "latest"].includes(record.modelRevision.toLowerCase())) throw new Error("An immutable model revision is required.");
+  if (["main", "master", "latest", "head"].includes(record.modelRevision.toLowerCase())) throw new Error("An immutable model revision is required.");
   if (!Number.isFinite(Date.parse(record.startedAt))) throw new Error("The run date is invalid.");
   const counts = Object.values(record.requests);
   if (counts.some(n => !Number.isSafeInteger(n)) || record.requests.attempted !== record.requests.succeeded + record.requests.failed) {

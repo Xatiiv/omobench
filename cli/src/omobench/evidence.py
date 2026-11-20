@@ -253,7 +253,10 @@ def _model(result: dict[str, Any]) -> dict[str, Any]:
     ]
     if weights is None:
         rows.append(_row("Weights", model.get("revision"), provenance="contributor-declared",
-                         note="Recorded as a revision only. Which repository it is a revision "
+                         note="Recorded as a revision, but it is a local path or URL, which "
+                              "identifies no bytes."
+                              if _names_a_place(model.get("revision")) else
+                              "Recorded as a revision only. Which repository it is a revision "
                               "of is not separately recorded."
                               if not model.get("source") else
                               f"From {model['source']}."))
@@ -270,7 +273,34 @@ def _model(result: dict[str, Any]) -> dict[str, Any]:
             "Weights", f"{weights.get('repository')} at {weights.get('repository_revision')}",
             provenance="contributor-declared",
             note="A repository commit. A file checksum is a different thing and is not this."))
+    if (weights or {}).get("provenance"):
+        provenance = weights["provenance"]
+        rows.append(_row("How the weights were identified", WEIGHT_PROVENANCE_TEXT[provenance],
+                         provenance="detected" if provenance == "verified-at-run-start"
+                         else "contributor-declared",
+                         note=WEIGHT_PROVENANCE_NOTE[provenance]))
     return {"id": "model", "title": "Which model, and which weights", "rows": rows}
+
+
+WEIGHT_PROVENANCE_TEXT = {
+    "verified-at-run-start": "Verified: the file recorded when the run started",
+    "contributor-selected": "Chosen by the contributor after the run",
+    "contributor-declared": "Stated by the contributor",
+}
+WEIGHT_PROVENANCE_NOTE = {
+    "verified-at-run-start": "Hashed after the run and unchanged since it was recorded at the "
+                             "start. Hashing never ran during the measurement.",
+    "contributor-selected": "Hashed, but not shown to be the file the server had loaded.",
+    "contributor-declared": "Nothing here hashed these weights.",
+}
+
+
+def _names_a_place(revision: Any) -> bool:
+    import re
+    value = (revision or "").strip() if isinstance(revision, str) else ""
+    return bool(re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", value)
+                or re.match(r"^(?:[A-Za-z]:(?:[\\/]|$)|\\\\|//|/|~|\.{1,2}(?:[\\/]|$))", value)
+                or "\\" in value or "/" in value)
 
 
 def _runtime(result: dict[str, Any], environment: dict[str, Any] | None) -> dict[str, Any]:
