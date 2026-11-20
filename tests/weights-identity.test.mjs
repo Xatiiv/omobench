@@ -4,7 +4,8 @@ import { readFileSync, readdirSync } from "node:fs";
 import ts from "typescript";
 
 // Weights identity on the website: what each record establishes, and how the
-// comparison uses it. The two published Qwen runs are read as published; every
+// comparison uses it. Published records are read as published: two Qwen runs by
+// name, and the whole registry wherever a rule must hold for every record. Every
 // other record here is a LABELLED FIXTURE built from one of them by changing
 // only its weights identity, and none of it is published anywhere.
 
@@ -173,18 +174,50 @@ test("the same weights do not override the other requirements", () => {
   assert.equal(assess(base, otherProfile, "exact").suitability, "unsuitable");
 });
 
+// What each recorded provenance must be shown as, and where the fact came from.
+// Written out here rather than imported, so the page text is checked, not echoed.
+const SHOWN_PROVENANCE = {
+  "verified-at-run-start": { value: "Verified: the file recorded when the run started", source: "read on that machine" },
+  "contributor-selected": { value: "Chosen by the contributor after the run", source: "stated by the contributor" },
+  "contributor-declared": { value: "Stated by the contributor", source: "stated by the contributor" },
+};
+const provenanceRow = record => summarize(record).sections.flatMap(section => section.rows)
+  .find(row => row.label === "How the weights were identified");
+
 test("how the identity was established is read, shown, and only when recorded", () => {
-  const verified = fixture("verified", hashed("1", "verified-at-run-start"));
-  assert.equal(verified.weights.provenance, "verified-at-run-start");
-  const rows = summarize(verified).sections.flatMap(section => section.rows);
-  assert.equal(rows.find(row => row.label === "How the weights were identified")?.value,
-    "Verified: the file recorded when the run started");
-  const chosenRows = summarize(fixture("chosen", hashed("1", "contributor-selected"))).sections.flatMap(section => section.rows);
-  assert.equal(chosenRows.find(row => row.label === "How the weights were identified")?.value,
-    "Chosen by the contributor after the run");
-  for (const id of Object.keys(raw)) {
-    const labels = summarize(published(id)).sections.flatMap(section => section.rows).map(row => row.label);
-    assert.ok(!labels.includes("How the weights were identified"), id);
+  // Labelled fixtures: one per recorded provenance, each shown as exactly that.
+  for (const [provenance, shown] of Object.entries(SHOWN_PROVENANCE)) {
+    const record = fixture(`provenance-${provenance}`, hashed("1", provenance));
+    assert.equal(record.weights.provenance, provenance);
+    const row = provenanceRow(record);
+    assert.equal(row?.value, shown.value, provenance);
+    assert.equal(row?.source, shown.source, provenance);
+  }
+  // Labelled fixtures without a recorded provenance: a typed identity from before
+  // schema 1.2, and no typed identity at all. Neither gets a row invented for it.
+  const typedWithout = fixture("typed-without-provenance", document => {
+    hashed("1", undefined)(document);
+    delete document.model.weights.provenance;
+  });
+  assert.equal(typedWithout.weights.provenance, null);
+  assert.equal(weightsIdentity(typedWithout).established, true);
+  assert.equal(provenanceRow(typedWithout), undefined);
+  const untyped = fixture("untyped", document => { delete document.model.weights; });
+  assert.equal(untyped.weights, null);
+  assert.equal(provenanceRow(untyped), undefined);
+
+  // Every published record, however many there are: the reader keeps exactly the
+  // provenance its document recorded, and the page shows a row only for one.
+  for (const [id, document] of Object.entries(raw)) {
+    const recorded = document.model.weights?.provenance ?? null;
+    const record = published(id);
+    assert.equal(record.weights?.provenance ?? null, recorded, id);
+    const row = provenanceRow(record);
+    if (recorded === null) assert.equal(row, undefined, id);
+    else {
+      assert.equal(row?.value, SHOWN_PROVENANCE[recorded].value, id);
+      assert.equal(row?.source, SHOWN_PROVENANCE[recorded].source, id);
+    }
   }
   const pathRow = summarize(published("run-cc80dd597abb")).sections.flatMap(section => section.rows).find(row => row.label === "Weights");
   assert.match(pathRow.note, /local path or URL, which identifies no bytes/);
