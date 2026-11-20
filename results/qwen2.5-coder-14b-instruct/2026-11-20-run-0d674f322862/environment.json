@@ -1,0 +1,51 @@
+{
+  "omobench_cli_version": "0.1.0",
+  "python": "3.14.4",
+  "operating_system": "Linux-6.18.58.1-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+  "cpu": "AMD Ryzen 7 5800X3D 8-Core Processor",
+  "ram_gb": 15.58,
+  "guidellm": "guidellm version: 0.7.3",
+  "git": "git version 2.53.0",
+  "github_cli": null,
+  "gpus": [],
+  "transport": {
+    "kind": "windows-stdio-http1-v1",
+    "windows_port": 1234,
+    "runner_host": "WSL2",
+    "serving_host": "Windows loopback, hardware not independently verified",
+    "protocol": "HTTP/1.1, one request per connection",
+    "overhead": "Included in measured latency and throughput, not subtracted",
+    "publication": "requires a declared serving environment"
+  },
+  "execution": {
+    "contract": "bounded-execution-v1",
+    "limits": {
+      "inactivity_timeout_seconds": 300,
+      "request_deadline_seconds": 900,
+      "measurement_ceiling_seconds": 900,
+      "shutdown_grace_seconds": 60.0
+    },
+    "supervisor": {
+      "fired": false,
+      "reason": null,
+      "escalated": false,
+      "at_seconds": null,
+      "anchor": "measurement-start",
+      "detail": ""
+    },
+    "interruption": {
+      "state": "none",
+      "observed_seconds": 0,
+      "longest_seconds": 0.0,
+      "events": [],
+      "method": "CLOCK_BOOTTIME and the wall clock against CLOCK_MONOTONIC, sampled every 1s while measuring"
+    },
+    "sleep_prevention": {
+      "requested": true,
+      "held": true,
+      "mechanism": "windows-power-request-v1",
+      "request": "execution-required",
+      "detail": "Windows granted an execution-required power request. The machine will not idle into sleep while this is held. Closing the lid, a critical battery, an administrator policy or sleeping it deliberately still can."
+    }
+  }
+}
