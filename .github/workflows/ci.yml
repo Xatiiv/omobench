@@ -37,8 +37,14 @@ jobs:
         run: python -m unittest discover -s cli/tests -v
       - name: Run registry validator unit tests
         run: python -m unittest discover -s tools/tests -v
+      # Bundles this change adds are held to the new-submission rules (a typed
+      # weights identity, no path or moving label as a revision); bundles
+      # already on the base keep the rules they were accepted under. The base
+      # is read from git history, which the checkout above fetches in full.
       - name: Validate submitted result bundles
-        run: python tools/validate_results.py
+        run: python tools/validate_results.py --new-since "$BASE"
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
 
   runner-fixtures:
     name: CPU runner integration fixtures (Python ${{ matrix.python }})
