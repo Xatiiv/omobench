@@ -92,9 +92,13 @@ or a bare string with no `model.weights` is refused: nothing reads meaning into
 a value's length or shape. A schema 1.0 bundle cannot carry `model.weights`, so
 it cannot be a new submission; package with `--provenance`.
 
-Which bundles are new is decided from git, not from the bundle: CI passes the
-pull request's base (`python tools/validate_results.py --new-since <base>`),
-and any `result.json` not present there is new. Bundles already published keep
+Which bundles are new is decided from git, not from the bundle:
+`python tools/validate_results.py --new-since <base>` treats any `result.json`
+not present at `<base>` as new. CI passes the pull request's base once the
+Windows installer that keeps typed identities (0.1.4) is published, so that
+nobody is directed to an installer that cannot meet the rule while it is
+enforced; until then CI checks every bundle under its original rules, and the
+panel already checks the bundle it prepares as a new submission. Bundles already published keep
 the validation they were accepted under; some record a folder path as their
 revision, and the website shows them without claiming their weights match
 anything. Without `--new-since`, every bundle is checked under its original
