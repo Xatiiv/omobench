@@ -626,16 +626,41 @@ A new result needs a **typed** identity: either the file fingerprint from
 **Identify model file**, or, for weights taken unchanged from a repository, the
 repository's address and its commit. A bare string is not read by its length or
 shape, so typing a 64-character hash into the revision field is not enough on
-its own. A folder path (`D:\…`, `\server\…`, `/home/…`, `./…`), a `file://`
+its own. A folder path (`D:\…`, `\\server\…`, `/home/…`, `./…`), a `file://`
 address, and moving labels (`main`, `master`, `HEAD`, `latest`) are refused
 before packaging. A run without a typed identity can still be packaged,
 reviewed and downloaded; it just cannot be submitted until you identify the
-model file and package again. You never need to re-run the benchmark for this.
+model file and package again. That needs a new benchmark run only when the file
+the run used has changed or is gone (see below).
 
 Results published before this rule keep the meaning they were accepted with.
-Some of them record a folder path as their revision; the website shows them,
-but cannot say they used the same weights as anything else, and says so when
-you compare them.
+Some of them record a folder path as their revision, and some a bare value
+whose kind was never recorded; the website shows them, but cannot say they
+used the same weights as anything else, and says so when you compare them.
+
+### Results packaged with OmoBench 0.1.3
+
+Most results packaged with installer 0.1.3 or earlier have no typed identity.
+0.1.3 kept an identified file only until the page was reloaded, and a guided
+run recorded the recipe's commit as a bare revision. To submit such a run:
+
+1. Install 0.1.4 or later. If the installer prepared your environment, choose
+   **Upgrade**, then **Copy previous run(s)** so your saved runs appear.
+2. Set **Model folder** (Connect) or **Folder containing the model file**
+   (Review) to the folder your server loads models from.
+3. Reopen the run in **Review** and press **Identify model file**:
+   - If the run recorded its model file when it started and the file is
+     unchanged, it is identified as **verified**.
+   - If the run did not record its file (a guided run, or a run started
+     without a Model folder), choose the file(s) you actually ran and confirm.
+     The result says they were **chosen by you after the run**: OmoBench cannot
+     check after the fact that this was the file served, and does not claim to.
+   - If the file has changed since the run recorded it, its bytes as they were
+     then cannot be fingerprinted. Choose a file only if you know it is the
+     same model; otherwise run the benchmark again.
+4. Leave **Immutable model revision** empty and press **Package & validate**.
+   A pull request you already opened with the old bundle needs the new one in
+   its place.
 
 ## H. Review, package and publish
 
