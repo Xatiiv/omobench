@@ -66,16 +66,16 @@ function LocalRunDetails({ result }: Readonly<{ result: RegistryResult }>) {
   return (
     <DetailShell
       badge={
-        <Badge className="border-amber-400/30 bg-amber-400/10 text-amber-200" variant="outline">
+        <Badge className="border-brand-400/30 bg-brand-400/10 text-brand-200" variant="outline">
           Registry evidence
         </Badge>
       }
     >
       <section className="border-b border-white/10 py-14">
-        <Link className="font-mono text-xs text-amber-300 transition hover:text-amber-200 hover:underline" href="/#local-results">
+        <Link className="font-mono text-xs text-brand-300 transition hover:text-brand-200 hover:underline" href="/#local-results">
           ← Back to results
         </Link>
-        <p className="mt-8 font-mono text-xs uppercase tracking-[0.22em] text-amber-300">Registry run record</p>
+        <p className="mt-8 font-mono text-xs uppercase tracking-[0.22em] text-brand-300">Registry run record</p>
         <h1 className="mt-3 max-w-4xl text-4xl font-semibold tracking-[-0.04em] sm:text-5xl">
           {result.model} on {result.hardware.display}{result.eligibility?.modality === "image-text-to-text" ? " · text-only workload" : ""}
         </h1>
@@ -103,8 +103,8 @@ function LocalRunDetails({ result }: Readonly<{ result: RegistryResult }>) {
       </section>
 
       <section className="grid gap-4 border-y border-white/10 py-10 lg:grid-cols-[0.9fr_1.1fr]">
-        <div className="rounded-xl border border-amber-400/20 bg-amber-400/[0.035] p-6">
-          <p className="font-mono text-xs uppercase tracking-[0.18em] text-amber-300">Performance summary</p>
+        <div className="rounded-xl border border-brand-400/20 bg-brand-400/[0.035] p-6">
+          <p className="font-mono text-xs uppercase tracking-[0.18em] text-brand-300">Performance summary</p>
           <dl className="mt-6 space-y-4">
             {[
               ["Time to first token, p50", formatMetric(result.ttftP50, " ms")],
@@ -196,16 +196,16 @@ function DemoRunDetails({ result }: Readonly<{ result: DemoResult }>) {
   return (
     <DetailShell
       badge={
-        <Badge className="border-amber-300/30 bg-amber-300/10 text-amber-200" variant="outline">
+        <Badge className="border-brand-300/30 bg-brand-300/10 text-brand-200" variant="outline">
           Illustrative local data
         </Badge>
       }
     >
       <section className="border-b border-white/10 py-14">
-        <Link className="font-mono text-xs text-amber-300 transition hover:text-amber-200 hover:underline" href="/compare">
+        <Link className="font-mono text-xs text-brand-300 transition hover:text-brand-200 hover:underline" href="/compare">
           ← Compare setups
         </Link>
-        <p className="mt-8 font-mono text-xs uppercase tracking-[0.22em] text-amber-300">Run record preview</p>
+        <p className="mt-8 font-mono text-xs uppercase tracking-[0.22em] text-brand-300">Run record preview</p>
         <h1 className="mt-3 max-w-4xl text-4xl font-semibold tracking-[-0.04em] sm:text-5xl">
           {result.model} on {result.hardware}
         </h1>
@@ -229,8 +229,8 @@ function DemoRunDetails({ result }: Readonly<{ result: DemoResult }>) {
       </section>
 
       <section className="grid gap-4 border-y border-white/10 py-10 lg:grid-cols-[1fr_1fr]">
-        <div className="rounded-xl border border-amber-400/20 bg-amber-400/[0.035] p-6">
-          <p className="font-mono text-xs uppercase tracking-[0.18em] text-amber-300">Performance summary</p>
+        <div className="rounded-xl border border-brand-400/20 bg-brand-400/[0.035] p-6">
+          <p className="font-mono text-xs uppercase tracking-[0.18em] text-brand-300">Performance summary</p>
           <dl className="mt-6 space-y-4">
             <div className="flex items-end justify-between gap-4 border-b border-white/10 pb-4">
               <dt className="text-sm text-slate-400">Time to first token</dt>
@@ -238,7 +238,7 @@ function DemoRunDetails({ result }: Readonly<{ result: DemoResult }>) {
             </div>
             <div className="flex items-end justify-between gap-4">
               <dt className="text-sm text-slate-400">Output tokens per second</dt>
-              <dd className="font-mono text-2xl font-medium text-amber-300">{result.outputTokensPerSecond}</dd>
+              <dd className="font-mono text-2xl font-medium text-brand-300">{result.outputTokensPerSecond}</dd>
             </div>
           </dl>
         </div>
@@ -289,10 +289,10 @@ function ResultNotFound() {
   return (
     <main className="min-h-screen bg-slate-950 px-6 py-12 text-slate-50 sm:px-10">
       <div className="mx-auto max-w-3xl rounded-2xl border border-white/10 bg-white/[0.025] p-8">
-        <p className="font-mono text-xs uppercase tracking-[0.2em] text-amber-200">Result not found</p>
+        <p className="font-mono text-xs uppercase tracking-[0.2em] text-brand-200">Result not found</p>
         <h1 className="mt-3 text-3xl font-semibold">There is no local record with this ID.</h1>
         <p className="mt-3 max-w-xl leading-7 text-slate-400">Return to the comparison page and choose an available packaged result or an illustrative row.</p>
-        <Link className="mt-6 inline-flex rounded-md bg-amber-400 px-4 py-2.5 text-sm font-medium text-slate-950 transition hover:bg-amber-300" href="/">
+        <Link className="mt-6 inline-flex rounded-md bg-brand-400 px-4 py-2.5 text-sm font-medium text-slate-950 transition hover:bg-brand-300" href="/">
           Back to OmoBench
         </Link>
       </div>

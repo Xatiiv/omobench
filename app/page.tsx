@@ -2,6 +2,7 @@
 
 import { useMemo, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
+import Image from "next/image";
 import { SiteHeader } from "@/components/product/site-header";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -82,7 +83,7 @@ function deviceBadgeClassName(mode: ExecutionMode): string {
     ? "border-sky-300/30 bg-sky-300/10 text-sky-200"
     : mode === "cpu-gpu-offload"
       ? "border-violet-300/30 bg-violet-300/10 text-violet-200"
-      : "border-amber-400/30 bg-amber-400/10 text-amber-200";
+      : "border-brand-400/30 bg-brand-400/10 text-brand-200";
 }
 
 type RegistryFilterProps = {
@@ -96,19 +97,19 @@ type RegistryFilterProps = {
 function RegistryFilter({ id, label, onValueChange, options, value }: RegistryFilterProps) {
   return (
     <div>
-      <label className="mb-1.5 block font-mono text-[11px] uppercase tracking-[0.14em] text-slate-500" htmlFor={id}>
+      <label className="mb-1.5 block font-mono text-[11px] uppercase tracking-[0.14em] text-slate-400" htmlFor={id}>
         {label}
       </label>
       <Select onValueChange={onValueChange} value={value}>
         <SelectTrigger className="h-10 w-full border-white/10 bg-black/20 font-mono text-xs text-slate-200 hover:bg-white/[0.04]" id={id}>
           <SelectValue />
         </SelectTrigger>
-        <SelectContent className="border-white/10 bg-slate-900 text-slate-100">
-          <SelectItem className="font-mono text-xs focus:bg-amber-400/15 focus:text-amber-100" value="all">
+        <SelectContent className="border-white/10 bg-popover text-slate-100">
+          <SelectItem className="font-mono text-xs focus:bg-brand-400/15 focus:text-brand-100" value="all">
             Any
           </SelectItem>
           {options.map((option) => (
-            <SelectItem className="font-mono text-xs focus:bg-amber-400/15 focus:text-amber-100" key={option.value} value={option.value}>
+            <SelectItem className="font-mono text-xs focus:bg-brand-400/15 focus:text-brand-100" key={option.value} value={option.value}>
               {option.label}
             </SelectItem>
           ))}
@@ -162,16 +163,16 @@ function LocalRegistry() {
 
   return (
     <section className="pb-16" id="local-results">
-      <div className="rounded-2xl border border-amber-400/25 bg-amber-400/[0.035] p-6 sm:p-8">
+      <div className="rounded-2xl border border-brand-400/25 bg-brand-400/[0.035] p-6 sm:p-8">
         <div className="flex flex-col gap-3 border-b border-white/10 pb-6 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <p className="font-mono text-xs uppercase tracking-[0.2em] text-amber-300">Benchmark registry</p>
+            <p className="font-mono text-xs uppercase tracking-[0.2em] text-brand-300">Benchmark registry</p>
             <h2 className="mt-2 text-2xl font-semibold tracking-tight">Performance with the evidence to back it up.</h2>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-400">
               Start from the hardware: choose a processor, graphics card or memory size to see how models run on it, or choose a model to see it across machines. Open a result to inspect its configuration, measurements and source artifacts.
             </p>
           </div>
-          <Badge className={hasResults ? "border-amber-400/30 bg-amber-400/10 text-amber-200" : "border-amber-300/30 bg-amber-300/10 text-amber-200"} variant="outline">
+          <Badge className={hasResults ? "border-brand-400/30 bg-brand-400/10 text-brand-200" : "border-brand-300/30 bg-brand-300/10 text-brand-200"} variant="outline">
             {hasResults ? `${registryResults.length} registry ${registryResults.length === 1 ? "result" : "results"}` : "Awaiting a submitted result"}
           </Badge>
         </div>
@@ -182,7 +183,7 @@ function LocalRegistry() {
             <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-400">
               Run a benchmark, review the evidence and submit it for validation. Accepted results appear here after review and a website build.
             </p>
-            <Link className="mt-4 inline-block text-sm text-amber-300 hover:underline" href="/compare">Open the visual comparison workspace ↗</Link>
+            <Link className="mt-4 inline-block text-sm text-brand-300 hover:underline" href="/compare">Open the visual comparison workspace ↗</Link>
           </div>
         ) : (
           <>
@@ -205,7 +206,7 @@ function LocalRegistry() {
               <p aria-live="polite">
                 Showing <span className="font-mono text-slate-200">{filteredResults.length}</span> of {registryResults.length} registry results.
               </p>
-              {active && <button className="font-mono text-xs text-amber-300 hover:underline" onClick={() => update(NO_FILTERS)} type="button">Clear filters</button>}
+              {active && <button className="font-mono text-xs text-brand-300 hover:underline" onClick={() => update(NO_FILTERS)} type="button">Clear filters</button>}
               {sameWorkload && <Link className="font-mono text-xs text-sky-300 hover:underline" href={comparisonHref(filteredResults[0].id, filteredResults.slice(1, 4).map(result => result.id))}>Compare these runs side by side ↗</Link>}
             </div>
             {differing.length > 0 && (
@@ -244,7 +245,7 @@ function LocalRegistry() {
                         <TableRow className="border-white/10 hover:bg-white/[0.035]" key={result.id}>
                           <TableCell>
                             <p className="font-medium text-slate-100">{facets.cpu ?? NOT_RECORDED}</p>
-                            <p className="mt-1 font-mono text-[11px] text-slate-500">
+                            <p className="mt-1 font-mono text-[11px] text-slate-400">
                               {facets.cpuCores !== null ? `${facets.cpuCores} cores` : "Cores not recorded"}
                               {facets.cpuThreads !== null ? ` · ${facets.cpuThreads} threads` : ""}
                             </p>
@@ -257,17 +258,17 @@ function LocalRegistry() {
                           </TableCell>
                           <TableCell className="font-mono text-xs text-slate-300">
                             {formatGb(facets.ramGb)}
-                            {facets.ramGb !== null && <span className="block text-[11px] text-slate-500">{facets.ramIsInstalled ? "installed" : "usable, as reported"}</span>}
+                            {facets.ramGb !== null && <span className="block text-[11px] text-slate-400">{facets.ramIsInstalled ? "installed" : "usable, as reported"}</span>}
                           </TableCell>
                           <TableCell className="font-mono text-xs text-slate-300">{vramSummary(facets)}</TableCell>
                           <TableCell className="font-mono text-xs text-slate-200">{result.model}</TableCell>
                           <TableCell className="font-mono text-xs text-slate-300">{facets.quantization}</TableCell>
                           <TableCell className="font-mono text-xs text-slate-300">{runtimeWithVersion(result)}</TableCell>
                           <TableCell className="font-mono text-xs text-slate-300">{result.profile}</TableCell>
-                          <TableCell className="font-mono text-amber-300">{formatMetric(result.outputTokensPerSecond)}</TableCell>
+                          <TableCell className="font-mono text-brand-300">{formatMetric(result.outputTokensPerSecond)}</TableCell>
                           <TableCell className="font-mono text-slate-100">{formatMetric(result.ttftP50, " ms")}</TableCell>
                           <TableCell className="text-right">
-                            <a className="font-mono text-xs text-amber-300 transition hover:text-amber-200 hover:underline" href={`/runs/${result.id}`}>
+                            <a className="font-mono text-xs text-brand-300 transition hover:text-brand-200 hover:underline" href={`/runs/${result.id}`}>
                               View details
                             </a>
                             <Link className="mt-2 block font-mono text-xs text-sky-300 hover:underline" href={comparisonHref(result.id)}>Compare ↗</Link>
@@ -305,20 +306,29 @@ export default function Home() {
           </div>
           <div className="setup-visual" aria-label="A benchmark combines your model, runtime, hardware and a fixed profile">
             <div className="visual-topline"><span>YOUR BENCHMARK</span><span className="visual-tag">LOCAL FIRST</span></div>
-            <div className="setup-orbit" aria-hidden="true">
-              <div className="orbit-ring ring-one" /><div className="orbit-ring ring-two" />
-              <div className="orbit-core"><svg viewBox="0 0 60 60"><path d="M15 20h30v28H15zM20 20V12h20v8M9 26h6m-6 10h6m30-10h6m-6 10h6M24 48v6m12-6v6"/><path d="m21 36 6-8 6 10 7-9"/></svg></div>
-              <span className="orbit-label label-model">01 / MODEL</span><span className="orbit-label label-runtime">02 / RUNTIME</span><span className="orbit-label label-hardware">03 / HARDWARE</span>
-            </div>
+            <Image className="hardware-hero-art" src="/brand/hero.svg" alt="" width={480} height={280} priority />
             <div className="visual-bottom"><div><span className="eyebrow">ONE FIXED WORKLOAD</span><strong>Your setup, measured.</strong></div><span className="visual-arrow" aria-hidden="true">↗</span></div>
             <div className="visual-legend"><span><i /> Throughput</span><span><i /> Latency</span><span><i /> Reliability</span></div>
           </div>
         </section>
 
+        <section className="brand-principles" aria-label="What OmoBench gives you">
+          {[
+            ["hardware", "Your hardware", "CPU, GPU or a split setup. Measure the machine you actually use."],
+            ["compare", "Clear comparisons", "Inspect the workload and settings behind each result."],
+            ["evidence", "Traceable results", "Keep measurements, configuration and model identity together."],
+          ].map(([art, title, copy]) => (
+            <article key={art}>
+              <Image src={`/brand/${art}.svg`} alt="" width={480} height={280} />
+              <h2>{title}</h2><p>{copy}</p>
+            </article>
+          ))}
+        </section>
+
         <section className="border-y border-white/10 py-10" id="workflow">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
             <div>
-              <p className="font-mono text-xs uppercase tracking-[0.2em] text-slate-500">The core loop</p>
+              <p className="font-mono text-xs uppercase tracking-[0.2em] text-slate-400">The core loop</p>
               <h2 className="mt-2 text-2xl font-semibold tracking-tight">One result, independently inspectable.</h2>
             </div>
             <p className="max-w-lg text-sm leading-6 text-slate-400">A clear path from your own machine to a result others can reproduce.</p>
@@ -331,7 +341,7 @@ export default function Home() {
               ["04", "Compare", "Filter the published registry by model, runtime, hardware, and profile."],
             ].map(([number, title, description]) => (
               <li className="rounded-xl border border-white/10 bg-white/[0.025] p-5" key={number}>
-                <p className="font-mono text-xs text-amber-300">{number}</p>
+                <p className="font-mono text-xs text-brand-300">{number}</p>
                 <h3 className="mt-5 text-base font-semibold">{title}</h3>
                 <p className="mt-2 text-sm leading-6 text-slate-400">{description}</p>
               </li>
@@ -341,7 +351,7 @@ export default function Home() {
 
         <section className="py-16" id="profiles">
           <div className="max-w-2xl">
-            <p className="font-mono text-xs uppercase tracking-[0.2em] text-slate-500">Benchmark contract v1</p>
+            <p className="font-mono text-xs uppercase tracking-[0.2em] text-slate-400">Benchmark contract v1</p>
             <h2 className="mt-2 text-3xl font-semibold tracking-tight">Choose the workload that matters.</h2>
             <p className="mt-3 text-sm leading-6 text-slate-400">Their YAML definitions are versioned alongside every submitted result. A later methodology change creates a new profile ID instead of rewriting history.</p>
           </div>
@@ -362,9 +372,9 @@ export default function Home() {
 
         <LocalRegistry />
 
-        <footer className="border-t border-white/10 py-8 text-sm text-slate-500">
+        <footer className="border-t border-white/10 py-8 text-sm text-slate-400">
           <p>OmoBench measures inference speed and reliability, not the quality of a model&apos;s answers. Every published result links to its evidence.</p>
-          <p className="mt-2"><a className="text-amber-300 hover:underline" href={USER_GUIDE_URL}>User guide</a> · <a className="text-amber-300 hover:underline" href={REPOSITORY_URL}>Source on GitHub</a></p>
+          <p className="mt-2"><a className="text-brand-300 hover:underline" href={USER_GUIDE_URL}>User guide</a> · <a className="text-brand-300 hover:underline" href={REPOSITORY_URL}>Source on GitHub</a></p>
         </footer>
       </div>
     </main>
